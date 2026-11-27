@@ -1,0 +1,1383 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_record_envelope",
+    "run_records",
+    "item_sources",
+    "external_sources",
+    "record_slots",
+    "reference_roles",
+    "evidence_projection",
+    "failed_check_scope",
+    "legacy_sources",
+    "legacy_dispositions",
+    "issue_1279",
+    "experiment_authorization"
+  ],
+  "properties": {
+    "schema_version": {"const": "at18-adapter-contract/1"},
+    "run_record_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "record", "head", "run_id", "run_attempt", "check_id", "profile_id", "payload"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/string"},
+        "record": {"$ref": "#/$defs/string"},
+        "head": {"$ref": "#/$defs/git-commit"},
+        "run_id": {"$ref": "#/$defs/positive-integer"},
+        "run_attempt": {"$ref": "#/$defs/positive-integer"},
+        "check_id": {"$ref": "#/$defs/string"},
+        "profile_id": {"$ref": "#/$defs/nullable-profile-id"},
+        "payload": {"$ref": "#/$defs/object"}
+      }
+    },
+    "run_records": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["permission.experiment", "migration.experiment", "post_gate.experiment", "tb"],
+      "properties": {
+        "permission.experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "version", "version_pointer", "fields"],
+          "properties": {
+            "role": {"const": "RUN_RECORD"},
+            "version": {"const": "at18-permission/1"},
+            "version_pointer": {"const": "/schema_version"},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "binding",
+                "launch",
+                "venue_profile_sha256",
+                "capability_record_sha256",
+                "derived_credential_public_id",
+                "queried_public_id",
+                "role",
+                "role_user",
+                "query_received_at",
+                "binding_writer_epoch",
+                "binding_profile_id",
+                "binding_profile_version",
+                "binding_venue_profile_sha256",
+                "binding_capability_record_version",
+                "binding_capability_record_sha256",
+                "binding_tb09_fingerprint",
+                "binding_authorization_id",
+                "binding_evidence_class",
+                "launch_writer_epoch",
+                "launch_launch_seq",
+                "launch_launched_at",
+                "launch_tb09_fingerprint_computed",
+                "launch_credential_public_id_verified",
+                "launch_session_permission_verified",
+                "launch_send_state",
+                "launch_send_refusal_class",
+                "launch_send_refusal_detail"
+              ],
+              "properties": {
+                "binding": {"$ref": "#/$defs/object"},
+                "launch": {"$ref": "#/$defs/object"},
+                "venue_profile_sha256": {"$ref": "#/$defs/sha256"},
+                "capability_record_sha256": {"$ref": "#/$defs/sha256"},
+                "derived_credential_public_id": {"$ref": "#/$defs/string"},
+                "queried_public_id": {"$ref": "#/$defs/string"},
+                "role": {"$ref": "#/$defs/string"},
+                "role_user": {"$ref": "#/$defs/string"},
+                "query_received_at": {"$ref": "#/$defs/utc-timestamp"},
+                "binding_writer_epoch": {"$ref": "#/$defs/positive-integer"},
+                "binding_profile_id": {"$ref": "#/$defs/profile-id"},
+                "binding_profile_version": {"$ref": "#/$defs/positive-integer"},
+                "binding_venue_profile_sha256": {"$ref": "#/$defs/sha256"},
+                "binding_capability_record_version": {"$ref": "#/$defs/string"},
+                "binding_capability_record_sha256": {"$ref": "#/$defs/sha256"},
+                "binding_tb09_fingerprint": {"$ref": "#/$defs/sha256"},
+                "binding_authorization_id": {"$ref": "#/$defs/string"},
+                "binding_evidence_class": {"$ref": "#/$defs/evidence-class"},
+                "launch_writer_epoch": {"$ref": "#/$defs/positive-integer"},
+                "launch_launch_seq": {"$ref": "#/$defs/positive-integer"},
+                "launch_launched_at": {"$ref": "#/$defs/utc-timestamp"},
+                "launch_tb09_fingerprint_computed": {"$ref": "#/$defs/sha256"},
+                "launch_credential_public_id_verified": {"$ref": "#/$defs/boolean"},
+                "launch_session_permission_verified": {"$ref": "#/$defs/boolean"},
+                "launch_send_state": {"$ref": "#/$defs/string"},
+                "launch_send_refusal_class": {"$ref": "#/$defs/nullable-string"},
+                "launch_send_refusal_detail": {"$ref": "#/$defs/nullable-string"}
+              }
+            }
+          }
+        },
+        "migration.experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "version", "version_pointer", "fields"],
+          "properties": {
+            "role": {"const": "RUN_RECORD"},
+            "version": {"const": "at18-migration/1"},
+            "version_pointer": {"const": "/schema_version"},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "profile_id",
+                "evidence_class",
+                "identity_map",
+                "old_before",
+                "new_after",
+                "after_recovery",
+                "after_rollback",
+                "interruption",
+                "ownership_journal",
+                "capital_journal",
+                "writer_journal",
+                "send_journal"
+              ],
+              "properties": {
+                "profile_id": {"$ref": "#/$defs/profile-id"},
+                "evidence_class": {"$ref": "#/$defs/evidence-class"},
+                "identity_map": {"$ref": "#/$defs/migration.identity"},
+                "old_before": {"$ref": "#/$defs/migration.snapshot"},
+                "new_after": {"$ref": "#/$defs/migration.snapshot"},
+                "after_recovery": {"$ref": "#/$defs/migration.snapshot"},
+                "after_rollback": {"$ref": "#/$defs/migration.snapshot"},
+                "interruption": {"$ref": "#/$defs/migration.interruption"},
+                "ownership_journal": {"$ref": "#/$defs/migration.owner_event"},
+                "capital_journal": {"$ref": "#/$defs/migration.capital_event"},
+                "writer_journal": {"$ref": "#/$defs/migration.writer_event"},
+                "send_journal": {"$ref": "#/$defs/migration.send_event"}
+              }
+            }
+          }
+        },
+        "post_gate.experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "version", "version_pointer", "fields"],
+          "properties": {
+            "role": {"const": "RUN_RECORD"},
+            "version": {"const": "at18-post-gate/1"},
+            "version_pointer": {"const": "/schema_version"},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "profile_id",
+                "evidence_class",
+                "growth_eligible",
+                "growth_enabled",
+                "post_gate_params_effective",
+                "outputs",
+                "gate_events",
+                "first_activations",
+                "parameter_version_id"
+              ],
+              "properties": {
+                "profile_id": {"$ref": "#/$defs/profile-id"},
+                "evidence_class": {"$ref": "#/$defs/evidence-class"},
+                "growth_eligible": {"$ref": "#/$defs/boolean"},
+                "growth_enabled": {"$ref": "#/$defs/boolean"},
+                "post_gate_params_effective": {"$ref": "#/$defs/boolean"},
+                "outputs": {"$ref": "#/$defs/post_gate.output"},
+                "gate_events": {"$ref": "#/$defs/post_gate.gate"},
+                "first_activations": {"$ref": "#/$defs/post_gate.activation"},
+                "parameter_version_id": {"$ref": "#/$defs/nullable-string"}
+              }
+            }
+          }
+        },
+        "tb": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "version", "version_pointer", "fields"],
+          "properties": {
+            "role": {"const": "RUN_RECORD"},
+            "version": {"const": "at18-tb-entity/1"},
+            "version_pointer": {"const": "/schema_version"},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["tb_id", "evidence_class", "profile_id", "tests", "keys", "conditions", "output"],
+              "properties": {
+                "tb_id": {"$ref": "#/$defs/string"},
+                "evidence_class": {"$ref": "#/$defs/evidence-class"},
+                "profile_id": {"$ref": "#/$defs/nullable-profile-id"},
+                "tests": {"$ref": "#/$defs/tb.test"},
+                "keys": {"$ref": "#/$defs/tb.key"},
+                "conditions": {"$ref": "#/$defs/object"},
+                "output": {"$ref": "#/$defs/object"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "item_sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration.identity",
+        "migration.snapshot",
+        "migration.ledger_entry",
+        "migration.interruption",
+        "migration.owner_event",
+        "migration.capital_event",
+        "migration.writer_event",
+        "migration.send_event",
+        "post_gate.gate",
+        "post_gate.activation",
+        "post_gate.output",
+        "tb.test",
+        "tb.key"
+      ],
+      "properties": {
+        "migration.identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["old_id", "new_id", "kind"],
+          "properties": {
+            "old_id": {"$ref": "#/$defs/string"},
+            "new_id": {"$ref": "#/$defs/string"},
+            "kind": {"$ref": "#/$defs/string"}
+          }
+        },
+        "migration.snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["positions", "open_orders", "fee_tail", "owner_epoch", "capital"],
+          "properties": {
+            "positions": {"$ref": "#/$defs/migration.ledger_entry"},
+            "open_orders": {"$ref": "#/$defs/migration.ledger_entry"},
+            "fee_tail": {"$ref": "#/$defs/migration.ledger_entry"},
+            "owner_epoch": {"$ref": "#/$defs/positive-integer"},
+            "capital": {"$ref": "#/$defs/migration.ledger_entry"}
+          }
+        },
+        "migration.ledger_entry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "owner", "account", "asset", "quantity"],
+          "properties": {
+            "id": {"$ref": "#/$defs/string"},
+            "owner": {"$ref": "#/$defs/string"},
+            "account": {"$ref": "#/$defs/string"},
+            "asset": {"$ref": "#/$defs/string"},
+            "quantity": {"$ref": "#/$defs/decimal-string"}
+          }
+        },
+        "migration.interruption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["step", "interrupted_at", "recovered_at"],
+          "properties": {
+            "step": {"$ref": "#/$defs/string"},
+            "interrupted_at": {"$ref": "#/$defs/utc-timestamp"},
+            "recovered_at": {"$ref": "#/$defs/utc-timestamp"}
+          }
+        },
+        "migration.owner_event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequence", "id", "owner", "writer_epoch"],
+          "properties": {
+            "sequence": {"$ref": "#/$defs/positive-integer"},
+            "id": {"$ref": "#/$defs/string"},
+            "owner": {"$ref": "#/$defs/string"},
+            "writer_epoch": {"$ref": "#/$defs/positive-integer"}
+          }
+        },
+        "migration.capital_event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequence", "id", "account", "asset", "quantity"],
+          "properties": {
+            "sequence": {"$ref": "#/$defs/positive-integer"},
+            "id": {"$ref": "#/$defs/string"},
+            "account": {"$ref": "#/$defs/string"},
+            "asset": {"$ref": "#/$defs/string"},
+            "quantity": {"$ref": "#/$defs/decimal-string"}
+          }
+        },
+        "migration.writer_event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequence", "writer_epoch", "writer_id", "operation"],
+          "properties": {
+            "sequence": {"$ref": "#/$defs/positive-integer"},
+            "writer_epoch": {"$ref": "#/$defs/positive-integer"},
+            "writer_id": {"$ref": "#/$defs/string"},
+            "operation": {"$ref": "#/$defs/string"}
+          }
+        },
+        "migration.send_event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequence", "command_id", "writer_epoch", "operation"],
+          "properties": {
+            "sequence": {"$ref": "#/$defs/positive-integer"},
+            "command_id": {"$ref": "#/$defs/string"},
+            "writer_epoch": {"$ref": "#/$defs/positive-integer"},
+            "operation": {"$ref": "#/$defs/string"}
+          }
+        },
+        "post_gate.gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "event_id", "known_at", "profile_id", "evidence_class"],
+          "properties": {
+            "type": {"$ref": "#/$defs/string"},
+            "event_id": {"$ref": "#/$defs/string"},
+            "known_at": {"$ref": "#/$defs/utc-timestamp"},
+            "profile_id": {"$ref": "#/$defs/profile-id"},
+            "evidence_class": {"$ref": "#/$defs/evidence-class"}
+          }
+        },
+        "post_gate.activation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "event_id",
+            "gate_event_id",
+            "parameter_version_id",
+            "known_at",
+            "profile_id",
+            "evidence_class"
+          ],
+          "properties": {
+            "type": {"$ref": "#/$defs/string"},
+            "event_id": {"$ref": "#/$defs/string"},
+            "gate_event_id": {"$ref": "#/$defs/string"},
+            "parameter_version_id": {"$ref": "#/$defs/string"},
+            "known_at": {"$ref": "#/$defs/utc-timestamp"},
+            "profile_id": {"$ref": "#/$defs/profile-id"},
+            "evidence_class": {"$ref": "#/$defs/evidence-class"}
+          }
+        },
+        "post_gate.output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "dependency"],
+          "properties": {"type": {"$ref": "#/$defs/string"}, "dependency": {"$ref": "#/$defs/nullable-string"}}
+        },
+        "tb.test": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["check_id", "name", "source_path"],
+          "properties": {
+            "check_id": {"$ref": "#/$defs/string"},
+            "name": {"$ref": "#/$defs/string"},
+            "source_path": {"$ref": "#/$defs/string"}
+          }
+        },
+        "tb.key": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["slice_id", "kind", "id", "basis_path", "basis_pointer"],
+          "properties": {
+            "slice_id": {"$ref": "#/$defs/string"},
+            "kind": {"$ref": "#/$defs/string"},
+            "id": {"$ref": "#/$defs/string"},
+            "basis_path": {"$ref": "#/$defs/string"},
+            "basis_pointer": {"$ref": "#/$defs/pointer"}
+          }
+        }
+      }
+    },
+    "external_sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_record", "venue_profile", "post_gate_parameter_version"],
+      "properties": {
+        "capability_record": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "ticket", "fields"],
+          "properties": {
+            "role": {"const": "CAPABILITY_RECORD"},
+            "ticket": {"const": 1770},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["capability_record_version", "source_url", "retrieved_at", "sha256"],
+              "properties": {
+                "capability_record_version": {"$ref": "#/$defs/string"},
+                "source_url": {"$ref": "#/$defs/https-url"},
+                "retrieved_at": {"$ref": "#/$defs/utc-timestamp"},
+                "sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          }
+        },
+        "venue_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "ticket", "fields"],
+          "properties": {
+            "role": {"const": "AUTHORIZATION"},
+            "ticket": {"const": 1351},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "profile_id",
+                "version",
+                "evidence_class",
+                "account",
+                "allowed_actions",
+                "credential_class",
+                "public_id",
+                "authorization_id",
+                "authorizer",
+                "authorized_at"
+              ],
+              "properties": {
+                "profile_id": {"$ref": "#/$defs/profile-id"},
+                "version": {"$ref": "#/$defs/positive-integer"},
+                "evidence_class": {"$ref": "#/$defs/evidence-class"},
+                "account": {"$ref": "#/$defs/string"},
+                "allowed_actions": {"$ref": "#/$defs/string-array"},
+                "credential_class": {"$ref": "#/$defs/string"},
+                "public_id": {"$ref": "#/$defs/string"},
+                "authorization_id": {"$ref": "#/$defs/string"},
+                "authorizer": {"$ref": "#/$defs/string"},
+                "authorized_at": {"$ref": "#/$defs/utc-timestamp"}
+              }
+            }
+          }
+        },
+        "post_gate_parameter_version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "ticket", "fields"],
+          "properties": {
+            "role": {"const": "AUTHORIZATION"},
+            "ticket": {"const": null},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "parameter_version_id",
+                "profile_id",
+                "evidence_class",
+                "gate_event_id",
+                "authorized_at",
+                "authorizer",
+                "parameters"
+              ],
+              "properties": {
+                "parameter_version_id": {"$ref": "#/$defs/string"},
+                "profile_id": {"$ref": "#/$defs/profile-id"},
+                "evidence_class": {"$ref": "#/$defs/evidence-class"},
+                "gate_event_id": {"$ref": "#/$defs/string"},
+                "authorized_at": {"$ref": "#/$defs/utc-timestamp"},
+                "authorizer": {"$ref": "#/$defs/string"},
+                "parameters": {"$ref": "#/$defs/object"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "record_slots": {
+      "const": {
+        "permission.experiment": {"tb_ids": ["TB-09"], "destination_ids": ["DST-05"]},
+        "migration.experiment": {"tb_ids": ["TB-10"], "destination_ids": ["DST-02", "DST-03", "DST-05"]},
+        "post_gate.experiment": {"tb_ids": ["TB-11"], "destination_ids": []}
+      }
+    },
+    "reference_roles": {
+      "const": {
+        "gate_reached_event": "RUN_RECORD",
+        "parameter_version": "AUTHORIZATION",
+        "first_activation": "RUN_RECORD",
+        "non_activation_evidence": "RUN_RECORD",
+        "authorization_declaration": "AUTHORIZATION",
+        "runtime_verification": "RUN_RECORD",
+        "non_empty_evidence_refs": "RUN_RECORD",
+        "tb_entities": "RUN_RECORD"
+      }
+    },
+    "evidence_projection": {
+      "const": {
+        "destination_experiment": {
+          "DST-01": [],
+          "DST-02": ["non_empty_evidence_refs"],
+          "DST-03": ["non_empty_evidence_refs"],
+          "DST-04": [],
+          "DST-05": ["runtime_verification", "non_empty_evidence_refs"],
+          "DST-06": []
+        },
+        "tb_special_refs": [],
+        "top_level_only": ["gate_reached_event", "parameter_version", "first_activation", "non_activation_evidence"],
+        "excluded": ["authorization_declaration", "venue_permission_fact", "capability_hash"]
+      }
+    },
+    "failed_check_scope": {
+      "const": {
+        "escape_operations": [["~", "~0"], ["/", "~1"], ["%", "%25"], ["@", "%40"]],
+        "obligation_escape_operations": [["%", "%25"], ["@", "%40"]],
+        "null_profile_token": "none",
+        "reserved_profile_ids": ["none"],
+        "templates": {
+          "key": "key:<slice>/<kind>/<esc_id>",
+          "basis": "K@basis:<esc_path>@<esc_pointer>",
+          "domain": "K@<evidence_class>@<profile>",
+          "basis_domain": "K@basis:<esc_path>@<esc_pointer>@<evidence_class>@<profile>",
+          "ticket": {"base": "ticket:<n>", "named": "ticket:<n>@<esc_obligation_id>"},
+          "slot": "slot:<record>@<profile>"
+        }
+      }
+    },
+    "legacy_sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "i1096",
+        "i1279",
+        "i1304",
+        "i1319",
+        "i1320",
+        "c5224523519",
+        "c5224551950",
+        "c6325275012",
+        "c5465215005",
+        "c5596451156",
+        "c6552159628",
+        "c5596451506",
+        "c5596451863",
+        "c6242843651",
+        "c5440707729",
+        "c5462459006",
+        "c5465517520",
+        "c5466854598",
+        "c5501144382",
+        "c5596452227",
+        "hl_942",
+        "retirement_0048",
+        "at14_0058",
+        "prereg_windows"
+      ],
+      "properties": {
+        "i1096": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-body"},
+            "ticket": {"const": 1096},
+            "comment_id": {"const": null},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "i1279": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-body"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": null},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "i1304": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-body"},
+            "ticket": {"const": 1304},
+            "comment_id": {"const": null},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "i1319": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-body"},
+            "ticket": {"const": 1319},
+            "comment_id": {"const": null},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "i1320": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-body"},
+            "ticket": {"const": 1320},
+            "comment_id": {"const": null},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5224523519": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 942},
+            "comment_id": {"const": 5224523519},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5224551950": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 942},
+            "comment_id": {"const": 5224551950},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c6325275012": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1096},
+            "comment_id": {"const": 6325275012},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5465215005": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1282},
+            "comment_id": {"const": 5465215005},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5596451156": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1304},
+            "comment_id": {"const": 5596451156},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c6552159628": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1304},
+            "comment_id": {"const": 6552159628},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5596451506": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1319},
+            "comment_id": {"const": 5596451506},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5596451863": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1320},
+            "comment_id": {"const": 5596451863},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c6242843651": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1320},
+            "comment_id": {"const": 6242843651},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5440707729": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": 5440707729},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5462459006": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": 5462459006},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5465517520": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": 5465517520},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5466854598": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": 5466854598},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5501144382": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": 5501144382},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "c5596452227": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ticket", "comment_id", "pointer", "type", "sha256"],
+          "properties": {
+            "kind": {"const": "issue-comment"},
+            "ticket": {"const": 1279},
+            "comment_id": {"const": 5596452227},
+            "pointer": {"const": "/body"},
+            "type": {"const": "string"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "hl_942": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "commit", "path", "sha256", "pointer", "type"],
+          "properties": {
+            "kind": {"const": "git-blob"},
+            "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "pointer": {"const": null},
+            "type": {"const": "bytes"}
+          }
+        },
+        "retirement_0048": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "commit", "path", "sha256", "pointer", "type"],
+          "properties": {
+            "kind": {"const": "git-blob"},
+            "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "pointer": {"const": null},
+            "type": {"const": "bytes"}
+          }
+        },
+        "at14_0058": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "commit", "path", "sha256", "pointer", "type"],
+          "properties": {
+            "kind": {"const": "git-blob"},
+            "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "pointer": {"const": null},
+            "type": {"const": "bytes"}
+          }
+        },
+        "prereg_windows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "commit", "path", "sha256", "pointer", "type"],
+          "properties": {
+            "kind": {"const": "git-blob"},
+            "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "pointer": {"const": null},
+            "type": {"const": "bytes"}
+          }
+        }
+      }
+    },
+    "legacy_dispositions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["942", "1096", "1282", "1304", "1319", "1320", "1279"],
+      "properties": {
+        "942": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "PRESERVE_BOUNDED"},
+            "sources": {"const": ["c5224523519", "c5224551950", "hl_942"]},
+            "obligations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ISSUE_942_DISPOSITION"],
+              "properties": {
+                "ISSUE_942_DISPOSITION": {
+                  "const": {
+                    "requirement": "CLOSED_AND_PRESERVE_Q1_TO_Q10",
+                    "sources": ["c5224523519", "c5224551950", "hl_942"],
+                    "tb_ids": [],
+                    "when": "always",
+                    "entity": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "1096": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "RETIRE_OR_INCORPORATE"},
+            "sources": {"const": ["i1096", "c6325275012", "retirement_0048"]},
+            "obligations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ISSUE_1096_ENTRY_END_STATE", "ISSUE_1096_RETIREMENT_CONDITIONS"],
+              "properties": {
+                "ISSUE_1096_ENTRY_END_STATE": {
+                  "const": {
+                    "requirement": "ENTRY_FREEZE_OR_INCORPORATION",
+                    "sources": ["i1096", "c6325275012"],
+                    "tb_ids": ["TB-10"],
+                    "when": "always",
+                    "entity": "tb-entry-inventory"
+                  }
+                },
+                "ISSUE_1096_RETIREMENT_CONDITIONS": {
+                  "const": {
+                    "requirement": "ADR_0048_RETIREMENT_CONDITIONS",
+                    "sources": ["retirement_0048"],
+                    "tb_ids": ["TB-10"],
+                    "when": "on-deletion",
+                    "entity": "tb-entry-inventory"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "1282": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "PRESERVE_ARCHIVE"},
+            "sources": {"const": ["c5465215005", "c5466854598", "prereg_windows"]},
+            "obligations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ISSUE_1282_ARCHIVE"],
+              "properties": {
+                "ISSUE_1282_ARCHIVE": {
+                  "const": {
+                    "requirement": "CLOSED_AND_PRESERVE_7_OF_7_AND_DUAL_CONTROLS",
+                    "sources": ["c5465215005", "c5466854598", "prereg_windows"],
+                    "tb_ids": [],
+                    "when": "always",
+                    "entity": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "1304": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "ADOPT_AT14"},
+            "sources": {"const": ["i1304", "c5596451156", "c6552159628", "at14_0058"]},
+            "obligations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ISSUE_1304_REPLAY",
+                "ISSUE_1304_RECOVERY",
+                "ISSUE_1304_AS_KNOWN",
+                "ISSUE_1304_STATE_PARITY",
+                "ISSUE_1304_AT14"
+              ],
+              "properties": {
+                "ISSUE_1304_REPLAY": {
+                  "const": {
+                    "requirement": "FULL_HISTORY_REPLAY",
+                    "sources": ["c5596451156", "c6552159628", "at14_0058"],
+                    "tb_ids": ["TB-07"],
+                    "when": "always",
+                    "entity": "history-input-profile/1"
+                  }
+                },
+                "ISSUE_1304_RECOVERY": {
+                  "const": {
+                    "requirement": "RESTART_AND_RECOVERY",
+                    "sources": ["c5596451156", "c6552159628", "at14_0058"],
+                    "tb_ids": ["TB-07"],
+                    "when": "always",
+                    "entity": null
+                  }
+                },
+                "ISSUE_1304_AS_KNOWN": {
+                  "const": {
+                    "requirement": "AS_KNOWN",
+                    "sources": ["c5596451156", "c6552159628", "at14_0058"],
+                    "tb_ids": ["TB-07"],
+                    "when": "always",
+                    "entity": null
+                  }
+                },
+                "ISSUE_1304_STATE_PARITY": {
+                  "const": {
+                    "requirement": "FULL_STATE_PARITY",
+                    "sources": ["c5596451156", "c6552159628", "at14_0058"],
+                    "tb_ids": ["TB-07"],
+                    "when": "always",
+                    "entity": null
+                  }
+                },
+                "ISSUE_1304_AT14": {
+                  "const": {
+                    "requirement": "LIVE_AT14_REPORT_AND_REGRESSION_LOCK",
+                    "sources": ["c5596451156", "c6552159628", "at14_0058"],
+                    "tb_ids": ["TB-07"],
+                    "when": "always",
+                    "entity": "at14-report"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "1319": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "INCORPORATE_FEED_WIRE"},
+            "sources": {"const": ["i1319", "c5596451506"]},
+            "obligations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ISSUE_1319_FEED_WIRE", "ISSUE_1319_INTENT_RECEIPT", "ISSUE_1319_SEND_ISOLATION"],
+              "properties": {
+                "ISSUE_1319_FEED_WIRE": {
+                  "const": {
+                    "requirement": "INCORPORATE_OR_RETIRE_FEED_AND_WIRE",
+                    "sources": ["c5596451506"],
+                    "tb_ids": ["TB-08"],
+                    "when": "always",
+                    "entity": "feed-wire-inventory"
+                  }
+                },
+                "ISSUE_1319_INTENT_RECEIPT": {
+                  "const": {
+                    "requirement": "FORMAL_INTENT_AND_RECEIPT",
+                    "sources": ["c5596451506"],
+                    "tb_ids": ["TB-04"],
+                    "when": "always",
+                    "entity": null
+                  }
+                },
+                "ISSUE_1319_SEND_ISOLATION": {
+                  "const": {
+                    "requirement": "ACTUAL_SEND_ISOLATION_WITHIN_942_SCOPE",
+                    "sources": ["c5596451506", "c5224551950"],
+                    "tb_ids": ["TB-09"],
+                    "when": "always",
+                    "entity": "permission.experiment"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "1320": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "REPLAY_AND_PRESERVE_HEAVY"},
+            "sources": {"const": ["i1320", "c5596451863", "c6242843651", "at14_0058", "prereg_windows"]},
+            "obligations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ISSUE_1320_FULL_REPLAY", "ISSUE_1320_HEAVY_MEASUREMENT"],
+              "properties": {
+                "ISSUE_1320_FULL_REPLAY": {
+                  "const": {
+                    "requirement": "FULL_HISTORY_REPLAY",
+                    "sources": ["c6242843651", "at14_0058"],
+                    "tb_ids": ["TB-07"],
+                    "when": "always",
+                    "entity": "history-input-profile/1"
+                  }
+                },
+                "ISSUE_1320_HEAVY_MEASUREMENT": {
+                  "const": {
+                    "requirement": "HEAVY_RESULTS_OR_EXPLICIT_AUTHORIZED_RETIREMENT",
+                    "sources": ["c6242843651", "prereg_windows"],
+                    "tb_ids": ["TB-11"],
+                    "when": "always",
+                    "entity": "heavy-measurement"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "1279": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "sources", "obligations"],
+          "properties": {
+            "disposition": {"const": "KEEP_OPEN"},
+            "sources": {"const": ["i1279", "c5462459006", "c5466854598", "c5501144382", "c5596452227"]},
+            "obligations": {"type": "object", "additionalProperties": false, "required": [], "properties": {}}
+          }
+        }
+      }
+    },
+    "issue_1279": {
+      "const": {
+        "state_source": {"ticket": 1279, "pointer": "/state", "type": "string", "expected": "open"},
+        "comment_source": {"ticket": 1279, "complete_pagination": true, "pointer": "/body", "type": "string"},
+        "graph_scope_source": "c5596452227",
+        "precondition_source": "c5501144382",
+        "own_checklist": [
+          {"source": "c5466854598", "entry": 1, "line": 5, "key": "cross-asset-alpha"},
+          {"source": "c5462459006", "entry": 1, "line": 6, "key": "own-replay-horizon"},
+          {"source": "c5596452227", "entry": 2, "line": 5, "key": "own-ledger"},
+          {"source": "c5596452227", "entry": 3, "line": 5, "key": "own-execution"},
+          {"source": "c5440707729", "entry": 3, "line": 3, "key": "own-minimum-data"},
+          {"source": "c5596452227", "entry": 5, "line": 5, "key": "own-other-checklist"}
+        ],
+        "release_disposition": {
+          "required": "OPEN_WITHOUT_PREMATURE_RELEASE",
+          "unknown": "LEGACY_DISPOSITION",
+          "known_historical_comments": ["c5440707729", "c5462459006", "c5465517520", "c5466854598", "c5501144382", "c5596452227"]
+        }
+      }
+    },
+    "experiment_authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticket",
+        "comment_id",
+        "body_sha256",
+        "workflow",
+        "ref",
+        "signature_fence",
+        "fields",
+        "group_actions",
+        "send_authorization"
+      ],
+      "properties": {
+        "ticket": {"const": 2133},
+        "comment_id": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "body_sha256": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
+        "workflow": {"const": ".github/workflows/at18-experiment.yml"},
+        "ref": {"const": "refs/heads/main"},
+        "signature_fence": {"const": "at18-experiment-authorization/1"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "runner_group",
+            "runner_label",
+            "profile_id",
+            "not_before",
+            "expires_at",
+            "actions"
+          ],
+          "properties": {
+            "schema_version": {"$ref": "#/$defs/string"},
+            "runner_group": {"$ref": "#/$defs/string"},
+            "runner_label": {"$ref": "#/$defs/string"},
+            "profile_id": {"$ref": "#/$defs/profile-id"},
+            "not_before": {"$ref": "#/$defs/utc-timestamp"},
+            "expires_at": {"$ref": "#/$defs/utc-timestamp"},
+            "actions": {"$ref": "#/$defs/string-array"}
+          }
+        },
+        "group_actions": {
+          "type": "object",
+          "propertyNames": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+          "additionalProperties": {
+            "type": "array",
+            "items": {"enum": ["query", "place", "cancel", "reduce_only_close"]},
+            "uniqueItems": true,
+            "minItems": 1
+          }
+        },
+        "send_authorization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ticket", "comment_id", "body_sha256", "signature_fence", "mode"],
+          "properties": {
+            "ticket": {"const": 1412},
+            "mode": {"const": "disabled_until_1412_per_action"},
+            "comment_id": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+            "body_sha256": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
+            "signature_fence": {"const": "at18-send-authorization/1"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "string": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "string"}}
+    },
+    "git-commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "git-commit"}}
+    },
+    "positive-integer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "positive-integer"}}
+    },
+    "nullable-profile-id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "nullable-profile-id"}}
+    },
+    "object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object"}}
+    },
+    "sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "sha256"}}
+    },
+    "utc-timestamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "utc-timestamp"}}
+    },
+    "profile-id": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "profile-id"}}
+    },
+    "evidence-class": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "evidence-class"}}
+    },
+    "boolean": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "boolean"}}
+    },
+    "nullable-string": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "nullable-string"}}
+    },
+    "migration.identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "migration.identity"}}
+    },
+    "migration.snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object"}, "decode_as": {"const": "migration.snapshot"}}
+    },
+    "migration.interruption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object"}, "decode_as": {"const": "migration.interruption"}}
+    },
+    "migration.owner_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "migration.owner_event"}}
+    },
+    "migration.capital_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "migration.capital_event"}}
+    },
+    "migration.writer_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "migration.writer_event"}}
+    },
+    "migration.send_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "migration.send_event"}}
+    },
+    "post_gate.output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "post_gate.output"}}
+    },
+    "post_gate.gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "post_gate.gate"}}
+    },
+    "post_gate.activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "post_gate.activation"}}
+    },
+    "tb.test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "tb.test"}}
+    },
+    "tb.key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "tb.key"}}
+    },
+    "migration.ledger_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "decode_as"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "object-array"}, "decode_as": {"const": "migration.ledger_entry"}}
+    },
+    "decimal-string": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "decimal-string"}}
+    },
+    "pointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "pointer"}}
+    },
+    "https-url": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "https-url"}}
+    },
+    "string-array": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type"],
+      "properties": {"pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}, "type": {"const": "string-array"}}
+    }
+  }
+}

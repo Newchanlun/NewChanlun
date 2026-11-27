@@ -1,0 +1,433 @@
+[
+  {
+    "ticket": 1366,
+    "run_id": 39034285362,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+      },
+      {
+        "target": "cargo fmt --check（#611：归零后防回潮）",
+        "kind": "step",
+        "check_id": "r11.rustfmt"
+      }
+    ]
+  },
+  {
+    "ticket": 1392,
+    "run_id": 37545808487,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+      }
+    ]
+  },
+  {
+    "ticket": 1404,
+    "run_id": 39245752214,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      }
+    ]
+  },
+  {
+    "ticket": 1404,
+    "run_id": 38201220739,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+      }
+    ]
+  },
+  {
+    "ticket": 1405,
+    "run_id": 39223502349,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "cargo fmt --check（#611：归零后防回潮）",
+        "kind": "step",
+        "check_id": "r11.rustfmt"
+      }
+    ]
+  },
+  {
+    "ticket": 1405,
+    "run_id": 39321352559,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      }
+    ]
+  },
+  {
+    "ticket": 1406,
+    "run_id": 38677450584,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+      },
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+      }
+    ]
+  },
+  {
+    "ticket": 1406,
+    "run_id": 38515293378,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+      },
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+      }
+    ]
+  },
+  {
+    "ticket": 1414,
+    "run_id": 39245752214,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      }
+    ]
+  },
+  {
+    "ticket": 1414,
+    "run_id": 38406287284,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+      }
+    ]
+  },
+  {
+    "ticket": 1420,
+    "run_id": 42437400612,
+    "targets": [
+      {
+        "target": "strict_request_reply_and_two_attempts_share_real_wire_and_request_budget",
+        "kind": "test",
+        "check_id": "r11.session.strict_request_reply_and_two_attempts_share_real_wire_and_request_budget"
+      }
+    ]
+  },
+  {
+    "ticket": 1488,
+    "run_id": 42467231009,
+    "targets": [
+      {
+        "target": "Install elan",
+        "kind": "step",
+        "check_id": "r11.install-elan"
+      }
+    ]
+  },
+  {
+    "ticket": 1495,
+    "run_id": 39091453686,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+      },
+      {
+        "target": "cargo fmt --check（#611：归零后防回潮）",
+        "kind": "step",
+        "check_id": "r11.rustfmt"
+      }
+    ]
+  },
+  {
+    "ticket": 1495,
+    "run_id": 38685059094,
+    "targets": [
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.default.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.default.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.default.seam_btc_tick_bars_yield_non_trivial_structure"
+      },
+      {
+        "target": "m3_partition_synthetic_holds",
+        "kind": "test",
+        "check_id": "r11.backtest.m3_partition_synthetic_holds"
+      },
+      {
+        "target": "calibration_sweep_finds_non_collapsed_segments",
+        "kind": "test",
+        "check_id": "r11.backtest.calibration_sweep_finds_non_collapsed_segments"
+      },
+      {
+        "target": "seam_btc_tick_bars_yield_non_trivial_structure",
+        "kind": "test",
+        "check_id": "r11.backtest.seam_btc_tick_bars_yield_non_trivial_structure"
+      }
+    ]
+  },
+  {
+    "ticket": 1621,
+    "run_id": 39983013376,
+    "targets": [
+      {
+        "target": "each_signed_record_window_gates_alone",
+        "kind": "test",
+        "check_id": "r11.session.each_signed_record_window_gates_alone"
+      },
+      {
+        "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+        "kind": "test",
+        "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+      },
+      {
+        "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+        "kind": "test",
+        "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+      }
+    ]
+  },
+  {
+    "ticket": 1640,
+    "run_id": 41213375682,
+    "targets": [
+      {
+        "target": "冲突路径 14/15：模型预检失败不写 used / resume / cp，随后仍可占用；占用后同一检查点重入才记 resume",
+        "kind": "test",
+        "check_id": "r11.swarm-route-preflight"
+      }
+    ]
+  },
+  {
+    "ticket": 1657,
+    "run_id": 40698673032,
+    "targets": [
+      {
+        "target": "cargo test — v3 history Owned 分配原型（s_allocation_json_testonly，#1394）",
+        "kind": "step",
+        "check_id": "r11.owned-pyo3"
+      }
+    ]
+  },
+  {
+    "ticket": 1671,
+    "run_id": 40003423344,
+    "targets": [
+      {
+        "target": "each_signed_record_window_gates_alone",
+        "kind": "test",
+        "check_id": "r11.session.each_signed_record_window_gates_alone"
+      },
+      {
+        "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+        "kind": "test",
+        "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+      },
+      {
+        "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+        "kind": "test",
+        "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+      }
+    ]
+  },
+  {
+    "ticket": 1678,
+    "run_id": 40005878482,
+    "targets": [
+      {
+        "target": "each_signed_record_window_gates_alone",
+        "kind": "test",
+        "check_id": "r11.session.each_signed_record_window_gates_alone"
+      },
+      {
+        "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+        "kind": "test",
+        "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+      },
+      {
+        "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+        "kind": "test",
+        "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+      }
+    ]
+  },
+  {
+    "ticket": 1678,
+    "run_id": 40233909763,
+    "targets": [
+      {
+        "target": "incremental_macd_append_is_o1_scaling",
+        "kind": "test",
+        "check_id": "r11.backtest.incremental_macd_append_is_o1_scaling"
+      }
+    ]
+  },
+  {
+    "ticket": 1683,
+    "run_id": 40003451021,
+    "targets": [
+      {
+        "target": "each_signed_record_window_gates_alone",
+        "kind": "test",
+        "check_id": "r11.session.each_signed_record_window_gates_alone"
+      },
+      {
+        "target": "opening_batch_negative_controls_are_typed_and_deterministic",
+        "kind": "test",
+        "check_id": "r11.session.opening_batch_negative_controls_are_typed_and_deterministic"
+      },
+      {
+        "target": "v2_domain_binds_revision_waits_in_e_and_replays",
+        "kind": "test",
+        "check_id": "r11.session.v2_domain_binds_revision_waits_in_e_and_replays"
+      }
+    ]
+  }
+]
