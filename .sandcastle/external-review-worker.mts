@@ -8,7 +8,7 @@ import { CodexTranscript, OUTPUT_SCHEMA, PROMPT_JSON_MODELS, assertRoute, type C
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { codexWorker } from "./codex-route.mts";
 import { assertSwarmExecutionReady, dockerCliProxyEnv } from "./swarm-route.mts";
-import { IMAGE_ID, codeIdentity, type Admission } from "./docker-acceptance.mts";
+import { IMAGE_ID, codeIdentity, contractDigest, type Admission } from "./docker-acceptance.mts";
 import { containerEnvLeaks, declaredContainerEnv, type MountSpec } from "./docker-isolation.mts";
 import { gitEnvironment } from "./git-environment.ts";
 
@@ -235,6 +235,7 @@ function save(folder: string, name: string, value: unknown): void {
 
 export interface WorkerDependencies {
   ready(image: string): string;
+  contract?(): string;
   sandbox(image: string): DockerProvider;
   identity(): { head: string; dirty: string };
   inspect(id: string): { Id: string; Image: string; Mounts: Array<{ Type?: string; Name?: string; Source: string; Destination: string; RW: boolean }>; Config: { Env: string[] } };
@@ -319,6 +320,7 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
     if (before.head !== launch.head_sha || before.status || before.branch !== "HEAD") throw new Error("checkout 不干净或 head 不符");
     record.phase = "admission";
     const image = deps.ready(REVIEW_IMAGE); record.image_id = image;
+    record.isolation_contract = (deps.contract ?? contractDigest)();
     const sandbox = deps.sandbox(image);
     record.phase = "volume";
     volume = reviewVolumeName(launch.launch_id); record.volume = volume; record.volume_removed = false;
@@ -468,11 +470,12 @@ export async function runExternalReview(folder: string, deps: WorkerDependencies
 }
 
 /** 沿用旧 PASS 前的部署准入：与正式派发同一组检查（controller 已提交、ready() 核当前镜像的 accepted 记录并做容器隔离合同观测），不建审阅容器、不调模型。 */
-export function checkReviewAdmission(deps: Pick<WorkerDependencies, "identity" | "ready"> = dependencies):
-  { controller_code_head: string; image_id: string } {
+export function checkReviewAdmission(deps: Pick<WorkerDependencies, "identity" | "ready" | "contract"> = dependencies):
+  { controller_code_head: string; image_id: string; isolation_contract: string } {
   const identity = deps.identity();
   if (identity.dirty) throw new Error("controller 代码未提交");
-  return { controller_code_head: identity.head, image_id: deps.ready(REVIEW_IMAGE) };
+  return { controller_code_head: identity.head, image_id: deps.ready(REVIEW_IMAGE),
+    isolation_contract: (deps.contract ?? contractDigest)() };
 }
 
 async function main(): Promise<void> {

@@ -1,14 +1,14 @@
 # 级别递归（Level Recursion / 走势级别的递归构造）
 
 > 正本：本文件是**级别**的教义正本（「级别 ＝ 由递归定义，不由数据聚类的簇定义」）。
-> 最后裁定：[#1627](https://github.com/xy7365527-lang/NewChanlun/issues/1627)（2026-10-21，「现行裁定」中的 `a₀` 值域改为指向 `zhongshu.md` §2.1.1）；[#815](https://github.com/xy7365527-lang/NewChanlun/issues/815)（2026-08-03，M-3）
-> 受影响代码清单：见 [`qushi.md`](qushi.md) 末节「#815 受影响代码清单（四组汇总）」——#815 四组共用一份，本文件不另立。
+> 最后裁定：[#2114](https://github.com/xy7365527-lang/NewChanlun/issues/2114)（2026-11-20，次级走势完成与递归准入）；此前 [#1627](https://github.com/xy7365527-lang/NewChanlun/issues/1627)（2026-10-21，`a₀` 值域指向 `zhongshu.md` §2.1.1）、[#815](https://github.com/xy7365527-lang/NewChanlun/issues/815)（2026-08-03，M-3）
+> 受影响代码清单：见 [#2114 实施交接](qushi.md#2114-受影响代码清单)；#815 四组仍共用 `qushi.md`「#815 受影响代码清单（四组汇总）」。
 
-**版本**: v1.2（#1627 `a₀` 值域改指针；v1.1 为 #815 M-3 裁定落盘）
+**版本**: v1.3（#2114 替代旧递归准入；v1.2 为 #1627 `a₀` 值域指针）
 **状态**: 已结算
 **创建日期**: 2026-02-16
 **结算日期**: 2026-02-17
-**最后更新**: 2026-10-21
+**最后更新**: 2026-11-25
 **溯源**: [旧缠论] 第12课、第17课、第20课
 
 ---
@@ -66,7 +66,7 @@ Move[2] = 2级走势类型（✅ 已实现：moves_from_level_zhongshus + Recurs
 
 ### 递归终止
 
-**[旧缠论]** 当某层 `len(Move[k]) < 3` 时，无法再构造更高级别中枢，递归自然终止。
+**[旧缠论]** 当某层不足三个可用于构造的连续次级别单元时，当前切面无法再构造更高级别中枢；走势实例是否可用按下节取证。
 
 > "在实际之中，对最后不能分解的级别，其缠中说禅走势中枢就不能用'至少三个连续次级别走势类型所重叠'定义，而定义为至少三个该级别单位K线重叠部分。" — 第17课
 
@@ -78,13 +78,9 @@ Move[2] = 2级走势类型（✅ 已实现：moves_from_level_zhongshus + Recurs
 
 > "某级别走势类型中，被至少三个连续次级别走势类型所重叠的部分。" — 第17课
 
-**"次级别走势类型"的完成条件**：
+**[新缠论:推论]** 盘整和趋势作为上级的已完成走势，均须具备自身完成见证及构造归属见证，统一见 [#2114 完成与准入判据](qushi.md#走势实例的完成与递归准入)。单枢三类点、新中枢成立或趋势类型确认均不能单独代证；本级无背驰也不排除完成。**单枢盘整由原始结构判定完成的一般见证仍未决**（CC-025／G-014，见上述判据的单枢条款）；缺该实例的完成见证时保留开放，不得作为上级已完成单元。线段递归基底不改。
 
-一个 Move[k-1] 被视为"完成"的条件：
-1. **盘整型 Move[k-1]**：包含至少 1 个 Center[k-1]，且已被后续走势终结（第三类买卖点或新中枢生成）
-2. **趋势型 Move[k-1]**：包含至少 2 个 Center[k-1]，且最后一段出现背驰
-
-**当前实现状态**：
+**旧 Python 实现状态**（高层准入仍待按 #2114 对齐）：
 - 1级中枢（Center[1]）：组件是 Segment = Move[0] ✅ 正确
 - 2级及以上中枢：✅ **已实现**（zhongshu_from_components + RecursiveLevelEngine + RecursiveStack）
 
@@ -249,10 +245,10 @@ Move[2] = 2级走势类型（✅ 已实现：moves_from_level_zhongshus + Recurs
 ### 在纯递归口径下的意义
 
 由于本项目不使用多周期方案（编排者决断），"假中枢"的来源不再是"TF 口径产出"，而是：
-1. **递归链未完成时的候选中枢**：低级别走势类型尚未 settled，导致高级别中枢是"暂态"的
+1. **次级别走势证据未齐时的形状观察**：组件缺完成或归属见证时，不得据此构造正式上级中枢。
 2. ~~**组件完成判定不严格**：用 Segment 直接构造中枢时，未验证 Segment 是否构成完整的次级别走势类型~~ → ✅ **已修复（2026-02-26）**：`zhongshu_from_segments` 过滤条件从 `confirmed` 严格化为 `confirmed AND kind=="settled"`，与递归路径 `SegmentAsComponent.completed` 一致。Level-1 中枢构造不再隐式依赖"confirmed 段恰好都是 settled"的不变量。
 
-因此"真/假"的区分在于**组件完成状态（settled）+ 口径A内部一致性**，而非来源口径的差异。
+因此"真/假"的区分在于**组件资格与归属是否可证**，而非来源口径或旧 `Move.settled` 标签。
 
 > **⚠️ 525号修正（2026-05-31）**：原表述"递归链的完整性"作为有效性判据已收窄——见上文真中枢
 > 定义的修正框。"递归链完整"是口径A构造不变量，不是中枢有效性判据。一个本级别已完成的中枢有效，
@@ -321,25 +317,18 @@ Move[2] = 2级走势类型（✅ 已实现：moves_from_level_zhongshus + Recurs
 - **测试**：22个测试全GREEN（10 protocol + 12 zhongshu_level），含 zhongshu_from_components 与 zhongshu_from_segments 交叉验证
 - **设计规范**：`docs/spec/level_recursion_interface_v1.md`
 
-### ~~2. Move[k-1] 完成判定~~ → ✅ 已结算（Option B: settled 标记）
+### 递归准入（#2114）
 
-**结算结论** [旧缠论:选择]：采用 Option B — `Move.settled = True` 作为递归构造的组件完成判定。
+**旧第 2 条 Option B（仅以 `Move.settled` 判组件完成）由 #2114 替代。** 按[走势正本的实例完成](zoushi.md#4-走势类型确认完成和继任2114)与 [#2114 完成与准入判据](qushi.md#走势实例的完成与递归准入)，上级只消费完成及归属均有证的次级别实例。非末组 `settled=True` 不能补证，证齐的末组也不必等待继任。
 
-**理由**：
-1. beichi #3 已结算：背驰→走势完成是充分非必要条件，走势可由第三类买卖点或"小转大"终结而无本级背驰
-2. Option A（要求背驰才完成）会将结构层与动力学层紧耦合，且与"小转大"终结机制矛盾
-3. 分离关注点：`Move.settled` 是结构标记（新实例产生时前一个自动结算），背驰检测是独立管道
-4. P9 交叉验证已确认 `RecursiveOrchestrator` 使用 settled 过滤后与手动管线一致
-5. `nested_divergence_search` 的递归下降映射也基于 settled 过滤，20测试GREEN
-
-**边界条件**：settled=False 的最后一个 Move 不参与高级别递归构造。这意味着实时数据中最高级别总是不完整的（正确行为：未完成的走势不应影响更高级别判断）
+**旧实现差距**：`RecursiveLevelEngine` 仍只按 `settled` 过滤，适配器、递归栈短路和区间套索引沿用旧组件序列。边界与代码位置列入 [#2114 实施交接](qushi.md#2114-受影响代码清单)。P9 的旧管线对拍证明两条旧路径一致，不能证明其符合本条。
 
 ### ~~3. 递归深度的实际限制~~ → ✅ 已结算（可配参数）
 
 **结算结论**：`RecursiveStack.max_levels`（默认6）作为可配置参数已实现。
 
 - **代码**：`recursive_stack.py :: RecursiveStack.__init__(max_levels=6)`
-- **终止条件**：`RecursiveStack` 在 settled moves < 3 时自动停止创建新层级（自然终止）
+- **终止条件**：旧 `RecursiveStack` 在当前层输出不足三个 Move 等情形时停止上探；按 #2114，对上级的实际构造资格仍逐项验完成与归属，不以旧组数或标签补证。
 - **估算验证**：1分钟 K 线 240根/天，10年 ≈ 600K 根 → 实际递归深度 4-5 层符合预期
 - **设计原则**：`max_levels` 是安全上限，实际深度由数据自然决定（对象否定对象，非人为截断）[新缠论]
 
@@ -354,7 +343,7 @@ Move[2] = 2级走势类型（✅ 已实现：moves_from_level_zhongshus + Recurs
 
 - **解决方案**：`RecursiveLevelEngine`（事件驱动，全量重算+diff）
 - **代码**：`recursive_level_engine.py`（引擎）+ `recursive_level_state.py`（快照+diff）
-- **核心流程**：settled Move → adapt_moves → zhongshu_from_components → diff → moves_from_level_zhongshus → diff
+- **旧实现流程**：settled Move → adapt_moves → zhongshu_from_components → diff → moves_from_level_zhongshus → diff；第一步按 #2114 替换旧准入。
 - **测试**：21个测试全GREEN（引擎基本、中枢形成、走势形成、增量处理、diff直接测试、settled过滤、reset）
 - **level_id语义**：引擎level_id=k → 消费 Move[k-1] → 产出 Center[k] + Move[k]
 
@@ -382,3 +371,4 @@ Move[2] = 2级走势类型（✅ 已实现：moves_from_level_zhongshus + Recurs
 - 2026-02-16: v0.7 #2 已结算（settled标记=递归完成判定，分离结构层与动力学层）；#3 已结算（max_levels可配参数+自然终止）；beichi阻塞已解除
 - 2026-02-17: v1.0 /ritual 结算仪式——生成态→已结算。#4 TF映射标记为工程债（纯展示层需求，核心引擎不依赖）。5/5问题全部已结算。106测试全GREEN，递归引擎核心覆盖率100%。依据元编排原则#6自动结算
 - 2026-10-21: v1.2 [#1627](https://github.com/xy7365527-lang/NewChanlun/issues/1627) ——「现行裁定」里的 `a₀` 值域三条（递归基＝线段中枢／退化路径不得作 `a₀`／两项可选基底）合并为一条指针，指向 `zhongshu.md` §2.1.1；名分撤销段、术语条、代码条不动
+- 2026-11-25: v1.3 #2114 替代 v0.7 的 Option B；递归准入改为完成与归属均有证，旧实现差距列入共用交接表。
