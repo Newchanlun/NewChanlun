@@ -58,17 +58,29 @@ A、B、C、D 是评审时备选，不是运行时档位。A 的原库证明、�
 - `ReplaceExited` 只接续已确证退出且受控后代均已退出的目标。活体返回 `StillLive`，已暂停返回 `Paused`，归属不明或后代未退出各返原拒绝；不写停止管道、不改变目标状态或原址。需要恢复时，由获授权恢复方在这些退出条件成立后走第 5 条原域入口，操作方附原具名请求。没有当前原证就回域首错，不由 launcher 自动恢复。
 - `OrderlyReplace` 只接管已知健康、可有序停服的受控实例，**禁止**携恢复请求、禁止升代。在唯一 Child 等待者中，写停止字节前先对目标做 `waitpid(pid, WNOHANG | WUNTRACED)`，结合已收集且未被继续事件取消的状态，并逐一核受控后代的身份及非暂停正常状态。命中 `WIFSTOPPED` 或任一受控后代已暂停就返 `Paused`，**不写** `SUPERVISED_STOP_BYTE`（`0x01`）；已退、未知或不健康也不写。不暂停且门全过才向本目标 stdin 写一次 `0x01`，进入 `Draining`。等真实退出后才同代装配；有序停止的 X 使用同一停止字节。若写后超时，`StopTimeout` 表示 `0x01` 已进入内核管道且不能撤回；目标保持 `Isolated` 等真实退出，不承诺继续服务、不发信号升级、不起第二写者。预检之后才暂停也按此写后状态处理。退出确证后，须另行显式提交 `ReplaceExited`，仍过原有标记/正式恢复门；两命令不会自动转换。
 
-launcher 每域只在内存保留一个操作槽和 Child/等待状态，不新增持久登记簿。成功路径为 `Serving → Draining → AwaitingProof → Starting → Serving` 或 `Isolated → AwaitingProof → Starting → Serving`。本合同只在整批放行且第 5 条初次服役证明已齐后接管受控成员的运行期故障：Child 真实异常退出可自动隔离并撤销依赖就绪，不自动换代；初次装配失败及未启用本合同的部署仍按 ADR 0065 第 11、14 条和第七节处理。显式全停与单域装配不能交错提交：全停到来后不再 spawn，原全停合同收束已有成员；拒绝单域请求不触发全停。在线换代不重启整组、不提交新的批次放行字，也不补造或宣称完成共同 checkpoint；各域照 0065 保留收盘原件、只在因果证据齐备时封口。以后整会话停启仍核共同 checkpoint，不用单域证明越过整组门。
+launcher 每域只允许一项在途操作；在途槽、Child/等待状态与第 4 条的已完成结果索引分开，不新增持久登记簿。成功路径为 `Serving → Draining → AwaitingProof → Starting → Serving` 或 `Isolated → AwaitingProof → Starting → Serving`。
+
+**原子放行决定运行期分派，服役证明决定 Ready。** 批次放行字为 0 时，任一成员失败仍按 ADR 0065 第 11、14 条和第七节处理，不进入在线单域接管；未启用本合同的部署仍走其原监督路径。本合同下，launcher 原子写入 1 后即按运行期处理受控成员，无须等第 5 条的初次服役证明齐备。确认 Child 异常退出就自动隔离该域、撤销受影响方向，不自动换代。即使目标尚未交首证，只要 launcher 持该目标的 Child/pidfd、已交付的 `O_PATH` 锁参照，并能依第 3 条确证目标及受控后代退出，就允许操作方显式提交 `ReplaceExited`，仍过全部原域准入门。缺任一证据就拒该域，不从旧日志、原址或残留补造前代身份或服役证明。对放行后的本地 X 退出，沿 [ADR 0065 第 11 条](https://github.com/Newchanlun/NewChanlun/blob/855cf58a42919bf904b06e000682b71a64feabc0/docs/adr/0065-production-session-endpoint-ownership.md#L94) 的非关键域语义，不回收健康 S/E/B、不挡其下一笔合法提交。此时全会话仍按第 10 条报 `Degraded`，直至新目标和其余必需域的当前服役证明及全部所需依赖实证齐备。`OrderlyReplace` 在放行后只接管已交本实例服役证明且仍满足本条健康、非暂停等门的目标，不等别域首证，也不因缺证改走另一命令。
+
+显式全停与单域装配不能交错提交：全停到来后不再 spawn，原全停合同收束已有成员；拒绝单域请求不触发全停。在线换代不重启整组、不提交新的批次放行字，也不补造或宣称完成共同 checkpoint；各域照 0065 保留收盘原件、只在因果证据齐备时封口。以后整会话停启仍核共同 checkpoint，不用单域证明越过整组门。
 
 **3. 出证分工与 FD。**
 
-- launcher 在 spawn 时保留 Child 和 Linux pidfd（回收 Child 之前取得）；只依据该 Child 的已回收退出状态和相同 pidfd 的退出信号，不靠数字 PID、心跳、PID 文件、日志、EOF 或客户端超时。缺成员或初始证据不从过去 pid、owner 或残留逆向建档。
-- 域实取锁后，从**正在持锁的 FD** 执行 `open("/proc/self/fd/<lock_fd>", O_PATH | O_CLOEXEC)`，`fstat` 核两 FD 的 `(st_dev, st_ino)` 相同，经私有 `SOCK_SEQPACKET` / `SCM_RIGHTS` 向 launcher 交该参照；接收用 `MSG_CMSG_CLOEXEC`。参照是独立 OFD，不经锁路径重开，不续命写者的 flock；`flock`、`read`、`write` 都返 `EBADF`。禁止直接传、dup 持锁 FD。S 按 ADR 0050:71（S） 和原 E5 锁序同时持有、分别钉住并交付 `.writer.lock` 和 `.maintenance.lock`；保留原 uid、类型、链接数及路径重验。
+- launcher 在 spawn 时保留 Child 和 Linux pidfd（回收 Child 之前取得）；只依据该 Child 的已回收退出状态和相同 pidfd 的退出信号，不靠数字 PID、心跳、PID 文件、日志、EOF 或客户端超时。缺成员身份或退出证据不从过去 pid、owner 或残留逆向建档。
+- 域实取锁后，从**正在持锁的 FD** 执行 `open("/proc/self/fd/<lock_fd>", O_PATH | O_CLOEXEC)`，`fstat` 核两 FD 的 `(st_dev, st_ino)` 相同，经私有 `SOCK_SEQPACKET` / `SCM_RIGHTS` 向 launcher 交该参照；接收用 `MSG_CMSG_CLOEXEC`。整批首启或续服时，在准备阶段交参照，由 launcher 关联本批 Child/pidfd，早于原子放行；它不是第 5 条服役证明，不代替准备、绑定与末次存活复核。参照是独立 OFD，不经锁路径重开，不续命写者的 flock；`flock`、`read`、`write` 都返 `EBADF`。禁止直接传、dup 持锁 FD。S 按 ADR 0050:71（S） 和原 E5 锁序同时持有、分别钉住并交付 `.writer.lock` 和 `.maintenance.lock`；保留原 uid、类型、链接数及路径重验。
 - 换代 spawn 时 launcher 先用同一通道把**上一任**的参照 FD 反向交给下任；下任按原锁序打开已有锁（不新建）、实取 flock 后，第一时间 `fstat` 比对参照和实锁对象（S 两把都比），**先于开库、消费 `clean_close/1` 和任何 ADR 0065 认领/退役**。这是本次 launcher 才持有的追加证据，不替代 0065 第 4 条的 `<db>.writer-lock-id`、锁叶及适用的 owner 锁三元组；S 恢复仍用本库持久端点索引定位并核验 owner。缺、换或错锁立即硬拒并退出：不动库、不消费标记、不改名 socket。不能等新域已认领才比对。launcher 留存上一任参照，直到新证明匹配即续存；已获授权的具名恢复短命域入口也由 launcher 经受控私有通道交同一参照，且须在持锁、首次触及介质之前核验，不能通过先恢复再发现锁被换绕过此门。
 - 域的监听、业务 FD、写锁具备关闭和不传递约束：有序停用停止门、排队退出、关闭旧监听及连接、关库、释放写锁；强杀以真实进程退出与内核回收为准。派生链必须在能力传递之前由 launcher 的装配闭包掌握：允许非持权子进程不继承上述 FD（CLOEXEC，及 fork/exec 窗口的关闭约束），可能携带 FD/发送权的实现必须纳入明确、封闭的受控成员集并逐个持有可等待的身份；无法给出闭包的布局不准在线重拉。等待受控后代的真实退出，不能以进程组为空、主 PID 已退或锁可取代替。当前本地 simulation X 无发送子进程；有发送子进程的真实场所另走 C09.8/#1401，不能凭该观察链打开下一任发送门。
 - 确认退出只允许准备**同域装配**，不授予名字。目标域实取同一写锁并通过本域启动门后，按 ADR 0065 第 5–6 条认 owner、先核旧退役名和未竟意图；适用退役行才对钉住的旧 socket 非阻塞 connect，仅 `ECONNREFUSED` 可进入持久记意图、移名及复核。新 bind/listen 后按第 5 条用 inode 与 `SO_PEERPIDFD` 证明本次监听器，再持久化 `bound` 并末次重验；消费者活体连接的 `SO_PEERCRED` 核对不替代该证明。按原表处置空址、坏 owner、占用、fsync 或目录重验失败，不改走旧直绑。活/暂停/未知/旧 FD 未收束时不派第二 writer、原名原样；旧锁实取不可得为原 `StaleWriter`，坏 owner 等沿 ADR 0065 的 `TransportUnavailable`，不启第二监听。合法退役完成后若 bind 或持久化失败，保留已完成的退役；未确认的退役不按空址收认，只有第 6 条的移错对象才尝试无覆盖放回。
 
-**4. 重试。** 通过控制权限及会话核验后，先查操作 ID，再核当前目标实例：`ReplaceExited`、`OrderlyReplace` 各自同 ID、同字节只查/等同一结果；命令名也是请求字节，同 ID 换命令或异内容均为 `IdentityConflict`。同一域一项在途，其他 ID 得 `DomainBusy`，不排无限队。对已替换的旧实例给 `StaleIncarnation`，即使裸 PID 或 socket 名被复用。前置不满足需等待事实改变，再显式提交新操作 ID；重放不会补写停机字节；故障场景的具名恢复请求仍重取原 ID、原字节，不因丢启动或恢复回复自动升代。启动中或已激活的回复丢失，使用已在槽的子进程和既有结果，不能再 spawn。launcher 失去控制或重启时，本在线合同结束；不收编孤儿，转原整会话启动/运维边界。
+**4. 重试。** 通过控制权限及会话核验后，launcher 在同一控制序列按本次生命周期内唯一的 `op_id` 分派；目标域、目标实例和命令名都在规范请求字节中。
+
+1. 先查已完成索引。每个终结项保存 `op_id`、原规范请求字节、原目标实例和原终态结果（含失败）。同 ID 同字节只回原结果，不重新核当前实例或执行；异字节（含换目标、换命令）返 `IdentityConflict`。
+2. 未命中才查在途槽。同 ID 同字节只查询或等待该操作，异字节返 `IdentityConflict`。终结时先以同一步控制状态变更发布完成记录并清空在途槽，再回包；期间该 ID 不会成为陌生 ID。
+3. 两处均无此 ID 才按新请求核当前目标；指向旧实例返 `StaleIncarnation`，即使裸 PID 或 socket 名被复用。目标当前但该域另有操作在途，返 `DomainBusy`，不排队。入槽后才按本条及第 2、3、5 条执行；已终结的前件拒绝仍可原样查回，事实改变后另用新 ID。
+
+已接纳项从入槽到终结都占用一条记录。单域换代是低频运维操作：本 launcher 生命周期内每域最多接纳 **256 项**，不逐出任何完成项。规范请求和控制终态回执分别最多 **16 KiB**，协议须有界、能完整编码各合法终态，不在执行后截断结果；越界请求按第 9 条拒绝。每域记录载荷最多 **8 MiB**，另加有界的固定大小记录及索引元数据；全组上界以启动时冻结的成员数计。接纳前为请求、完整终态和索引预留容量，终结不再分配。达到限额或无法取得预留容量时，该域本 launcher 生命周期内不再接纳陌生的当前实例操作，返 `OperationHistoryFull`；不占新槽、不写停机字节、不 spawn，不影响其他域，也不改变前述已知 ID 与陌生旧实例的判决。
+
+重放不会补写停机字节或再次 spawn。具名恢复仍只重取自己的原 ID、原字节，不因启动或恢复回包丢失自动升代。launcher 失去控制或重启时，本合同与内存记录一并结束；不收编孤儿，转原整会话启动/运维边界。
 
 ### Q2：新域自证；各来源只按已核原件推进
 
@@ -78,7 +90,7 @@ S 不带 SHM 且原 R4/epoch/Begin 门均过时可按原许可代正常重开；
 
 目标域只在自身持锁全部启动门成功、原地址已监听、所有指定原始读回可核后，经私有通道给 launcher **本次服务证明**：原会话/代、域、原业务及部署身份、所核本域 writer_epoch、原恢复收据（如有）/创世或干净重开根据、被核的具名 cut/原回执、本次进程身份及第 3 条锁参照。E 另交已审计的创世 cut 与出证时当前 cut、各自的 `image_hash` 和钉住的 E main 文件身份；launcher 保存首次可信原址与创世证据作为本轮参照，后续不覆盖。此证明仅证明本次启动，不能代替原恢复回执。launcher 按 Child/pidfd 和请求关联，原业务提交身份仍按原合同。
 
-采用本合同部署的整会话首启或续服，先走 [ADR 0065「恢复职责分派」](0065-production-session-endpoint-ownership.md#恢复职责分派) 的两阶段门（A，212–218 行）：全员先 spawn 到准备态、持各自原锁重验；收齐后才许可初始化／绑定；待适用的初始共同 checkpoint 落盘、全员完成绑定及末次存活复核后，才原子提交批次放行字。**准备和绑定不等待任何上游服役证明，不接纳业务。** 放行后才按 **S 本次服务证明 → E 本次服务证明（创世/当前 cut、锁参照）→ 各 Bᵢ 自核 E 并交本次服务证明 → X 自核 S/E 并交本次服务证明** 串行接续。B/X 已在本批次内，不再 spawn；未自核的权威方向保持关闭。即使 E 有恢复履历，也须审读 `seq=0` 的真实创世 cut 后再交下游。B 的创世绑定只在第 6 条首次核证通过后、首个依赖业务前持久化；它不是共同初始 checkpoint 的前置，不以准备库填默认绑定，不替换已有链。
+采用本合同部署的整会话首启或续服，先走 [ADR 0065「恢复职责分派」](0065-production-session-endpoint-ownership.md#恢复职责分派) 的两阶段门（A，212–218 行）：全员先 spawn 到准备态、持各自原锁重验；收齐后才许可初始化／绑定；待适用的初始共同 checkpoint 落盘、全员完成绑定及末次存活复核后，才原子提交批次放行字。**准备和绑定不等待任何上游服役证明，不接纳业务。** 放行后才按 **S 本次服务证明 → E 本次服务证明（创世/当前 cut、锁参照）→ 各 Bᵢ 自核 E 并交本次服务证明 → X 自核 S/E 并交本次服务证明** 串行接续。正常核证继续使用批次中原有的 B/X，不二次 spawn；未自核的权威方向保持关闭。若某成员在放行后、首证前退出，第 2、3 条用已经取得的进程和锁参照判定是否允许显式单域换代，不等退出实例交首证；下任须用同一服役证明和上游核证接续其位置。即使 E 有恢复履历，也须审读 `seq=0` 的真实创世 cut 后再交下游。B 的创世绑定只在第 6 条首次核证通过后、首个依赖业务前持久化；它不是共同初始 checkpoint 的前置，不以准备库填默认绑定，不替换已有链。
 
 **6. A 向：B 换而 E 活。** launcher 经私有装配通道向 B 交同一 E 的已证业务/部署身份、原库身份、选定 cut/当前原件及新 pidfd。**唯一核证是原 E 库的私有、只读一致快照，加原业务 socket 的 `ReadAuthorityHead` 活体挑战。** X 对 E 使用同一核证。
 
@@ -103,10 +115,18 @@ B 本地链尾必须与所核证据吻合，或按第 7 条提交唯一的合法
 
 1. 校验私有通道、目标与父绑定、新 pidfd 未退出，以及第 5 条本次服务证明。E 方向依第 6 条做有界快照，核原 E 库和原件，再用**同一个** `ReadAuthorityHead` 挑战，核业务身份、历史 cut、摘要与当前代，校验 `SO_PEERCRED` 和 pidfd。首启及同代换句柄也用同一判据。
 2. S 方向使用经 launcher 受信交接、在新 S 原锁内复核的 #2128 具名当前回执；没有升代史的原实例用已证创世身份，同代重开仍重验对应根据。X 向当前实例的 S 业务地址发送 `s-session/3` 信封（payload 为 `{"op":"ready"}`），发帧前和收答后核 `SO_PEERCRED` 和 pidfd。成功采用真实 `kind="Ready"` / `ok=true`，核 `schema_revision`、`session_id`、`session_generation`、`writer_epoch`、`profile_id`、`profile_hash`、`clock_plan_hash` 与冻结 S 身份及交接证据相符，重算 `s-session/replies`、`S:<session>` 和因果信封。现有头另含 `advance_state`、`generation`、`structure_cut`、`index_frontier`、`delivery_frontier`；它们读的是当前态，不拿它们替代/重算恢复切面。本合同准入校验有界头及其信封可容入双方帧界。X 不打开活 S SQLite。
-3. X 在原写者循环复查父尾、活体和原件引用，按 [ADR 0073](https://github.com/Newchanlun/NewChanlun/blob/032a99603d44fe2f0acca56bd66d7830d8d0c8d1/docs/adr/0073-simulation-x-recovery-authority-binding.md#L32-L64) 复用 `x-authority-binding/1`：单次只推进该分量一步，事务提交后 ACK；同代有序重开只换活体句柄。各通知在同一通道串行，同时可交付时先 E 后 S；同批双域冷启动仍按 0073 原顺序。每次后续权威连接发帧前及收答后核本次 peer 等于当前绑定实例、pidfd 未退出，并在单序接纳点再核该连接证明/父尾；旧实例的帧即使同代也不接纳。
-4. X 的业务交换保留 `QueryReleasedExact`、`RequestConditionalExecution`、`QueryExecuteCommitted` 的原用途。后两者不是原 S3 的 `ready`/ `receipt`/ `ingest`；若 X 声明该依赖，可在线的部署须把 simulation 执行权威处理器接到同一个持锁 S 实例，在原 S socket 上用 `s-session/3` 信封分派，并由 S 出具端点及能力证明。业务正文按 [ADR 0038 #2127 修订](https://github.com/Newchanlun/NewChanlun/blob/e9b12ef9eeff26cab51e295826a11c871e189ac7/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L162-L174) 与 ADR 0073 第 7 条核 `x-exact-authority/2` 的当前应答及原交付／提交证据；旧 `/1` 保留其原会话合同，只作本票的实现取证，不是在线降级路径。只向冻结 profile 中获准 simulation X 的受控实例开放，S 核来源身份与 launcher 交付的 peer/pidfd；不开放真实发送。只会返回 `ready` 的 S 或另一个进程的代理不能通过该业务方向，不承认假 fixture 可达为实服。X 不消费 B 绑定链，不借新 S/X 代修改 E 的业务来源授权。
+3. X 在原写者循环复查父尾、活体和原件引用，按 [ADR 0073](https://github.com/Newchanlun/NewChanlun/blob/032a99603d44fe2f0acca56bd66d7830d8d0c8d1/docs/adr/0073-simulation-x-recovery-authority-binding.md#L37-L44) 复用 `x-authority-binding/1`：单次只推进该分量一步，事务提交后 ACK；同代有序重开只换活体句柄。各通知在同一通道串行，同时可交付时先 E 后 S；同批双域冷启动仍按 0073 原顺序。每次后续权威连接发帧前及收答后核本次 peer 等于当前绑定实例、pidfd 未退出，并在单序接纳点再核该连接证明/父尾；旧实例的帧即使同代也不接纳。
+4. X 的业务交换保留 `QueryReleasedExact`、`RequestConditionalExecution`、`QueryExecuteCommitted` 的原用途。后两者不是原 S3 的 `ready`/ `receipt`/ `ingest`；若 X 声明该依赖，可在线的部署须把 simulation 执行权威处理器接到同一个持锁 S 实例，在原 S socket 上用 `s-session/3` 信封分派，并由 S 出具端点及能力证明。E 的 `x-exact-authority/2` 按 [P 的 ADR 0038 第 162–168 行](https://github.com/Newchanlun/NewChanlun/blob/e9b12ef9eeff26cab51e295826a11c871e189ac7/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L162-L168) 核当前应答、原交付与实际获知时点；S 的同版本应答按下述唯一判据核证。旧 `/1` 保留其原会话合同，只作本票的实现取证，不是在线降级路径。只向冻结 profile 中获准 simulation X 的受控实例开放，S 核来源身份与 launcher 交付的 peer/pidfd；不开放真实发送。只会返回 `ready` 的 S 或另一个进程的代理不能通过该业务方向，不承认假 fixture 可达为实服。X 不消费 B 绑定链，不借新 S/X 代修改 E 的业务来源授权。
 
-切换后新交换只走当前绑定，旧帧不准作为新的成功。旧 `Accepted` 在持久证据确认未请求时，仅在原命令仍完整通过当前资格时能第一次发送；`ExecutionRequested` 等可能已发送，只能向当前权威具名查原尝试及其原绑定，查不到保留 pending 和最大责任；`ExecutionReady` 保留原资格，只能为原批首次取得调用占有；`MayHaveCalled` 只按原批和已有占有继续本地幂等处理或读回，不二次占有、不补发；`Observed` 只查原件。X 本域确需替换时走原库、原 profile 和原本域排他启动；如另有 E/S 绑定变化仍逐条核 0073，缺原库或历史不能新建。XI 候选的 `--authority-rebind` 只适用冷启动；在线在原 X 写者中增加控制交付，不新起第二 X 作重绑代理。
+   **S 终态回执分三层核证。** 在线采用 [P 的 ADR 0038 第 170–174 行](https://github.com/Newchanlun/NewChanlun/blob/e9b12ef9eeff26cab51e295826a11c871e189ac7/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L170-L174) 的四字段 `execution_origin = {request_ref, queue_id, writer_epoch, receipt}`；仅 `ExecuteCommitted` 有此原件，其余为 `null`，不取得执行资格。
+
+   - **原申请代核 `request_ref`**：等于 X 在发首字节前持久保存的原资格申请的消息 ID、规范请求摘要及原 S 目标代，并与当时的 S 绑定核等。
+   - **同一原队列项与 S 连续恢复履历核提交代**：S 在同一只读切面核原申请、原 `queue_id` 的入队记录及其不可变终态 `receipt`，保留原 FIFO 位置，不重新入队。X 核该项合法稳定点的首次实际终态提交：`writer_epoch` 与 `receipt` 一致，且是连续履历在该提交点获准的 S 代；同时核原会话及代、S 身份、原命令及摘要、E 原交付、`eligibility_ref`、原 S 切面和外层 `receipt_id` / `commit_ns` 与原件相符。S₁ 入队、S₂ 首次提交可合法为申请代 1、提交代 2、应答代 2；不要求申请代等于提交代，不改写原回执。
+   - **当前 S 绑定核应答代**：本次应答信封的生产者、纪元及外层 `authority_epoch` 都核当前 S 绑定；X 分别持久保存此次查询绑定和实际获知时点、原申请/队列引用及原提交证据，历史重验按原事件引用，不拿当前代填旧值。首次获知和占有时序仍过 P 第 174 行。
+
+   保留 ADR 0073 的身份隔离、历史履历、原责任与一次占有规则。冻结 [ADR 0073 第 7 条的 S 交叉引用（X，第 52 行）](https://github.com/Newchanlun/NewChanlun/blob/032a99603d44fe2f0acca56bd66d7830d8d0c8d1/docs/adr/0073-simulation-x-recovery-authority-binding.md#L52) 指向 [`aeb79b0e` 的 ADR 0038 第 170 行](https://github.com/Newchanlun/NewChanlun/blob/aeb79b0e1a8ce5318fe34bb370ffdb11630a2af9/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L170)，以原申请绑定核提交代，不得作为在线 `/2` 的第二套判据。**同辈正本 PR #2160 的 S 查询条款与 P 对齐后，才能集成本合同**；依 #799/#804，不并跑旧判据，不因核验失败切换口径。
+
+切换后新交换只走当前绑定，旧帧不准作为新的成功。旧 `Accepted` 在持久证据确认未请求时，仅在原命令仍完整通过当前资格时能第一次发送；`ExecutionRequested` 等可能已发送，只能向当前权威具名查原尝试及其原绑定，查不到保留 pending 和最大责任；`ExecutionReady` 保留原资格，只能为原批首次取得调用占有；`MayHaveCalled` 只按原批和已有占有继续本地幂等处理或读回，不二次占有、不补发；`Observed` 只查原件。X 本域确需替换时走原库、原 profile 和原本域排他启动；如另有 E/S 绑定变化，仍按本条与 0073 的绑定、历史和责任规则核证；缺原库或历史不能新建。XI 候选的 `--authority-rebind` 只适用冷启动；在线在原 X 写者中增加控制交付，不新起第二 X 作重绑代理。
 
 **8a. D 向：S 换而带 finance 的 E/B 活。** 仅启用 finance 的 E 和各 B 在各自原库首写 `economic-s-authority-binding/1`。创世行冻结 `manifest["finance"]["structure"]` 中初始 `writer_epoch` 及 S 会话/代、域、profile/规则与构建身份（业务、部署分开核）。链行记录序号/父序号、S 前后代、#2128 具名原回执的规范字节及本域接纳边界；进程句柄仅在内存，不进入历史业务事实。旧 manifest 代只用来建创世，不再当新财务请求的预期代。
 
@@ -121,7 +141,7 @@ B 本地链尾必须与所核证据吻合，或按第 7 条提交唯一的合法
 
 | 域 | 足够的现有机制 | 本票唯一需要的增量 |
 |---|---|---|
-| launcher | 同构建 sibling、manifest/profile/layout、Child、原恢复计划；0065 整批放行 | 放行后的串行权威接续；`ReplaceExited` / `OrderlyReplace` 及独立重放；保存进程与 `O_PATH` 参照、换代前反向交付；检查域证明、托管头客户端身份、定向交 `AdvanceEAuthority` / `AdvanceSAuthority` 或同代句柄及 ACK；不持锁、不写库。 |
+| launcher | 同构建 sibling、manifest/profile/layout、Child、原恢复计划；0065 整批放行 | 放行后的串行权威接续；`ReplaceExited` / `OrderlyReplace` 、单域在途槽及独立完成索引；保存进程与 `O_PATH` 参照、换代前反向交付；检查域证明、托管头客户端身份、定向交 `AdvanceEAuthority` / `AdvanceSAuthority` 或同代句柄及 ACK；不持锁、不写库。 |
 | S | 原 E5 双锁、R4、#2128 具名回执和 serve 复核、`s-session/3` 的 `ready`/具名读口 | 双锁 `O_PATH` 前置比较及回交、私有服务证明。受启用子合同约束，同一 S owner 正式承接第 8/8a 条所需 simulation 与财务业务操作，证明 endpoint/能力和原准入计量；`ready` 本身不增字段，不复制活 S 介质。 |
 | E | 持锁 serve、#2082 原库具名恢复、0065 标记及端点 | 持锁重验及证明（含创世/当前切面、原库与锁参照）；新版业务/部署合同登记 B/X 只读主体与 `authorized_sources` 专属 `ReadAuthorityHead`、有界编解码及持久 commit header；带 finance 时持久 S 绑定、`AdvanceSAuthority`、同代句柄和 ACK。 |
 | 各 B | 本域独立持锁、E 原事实核验、本地收据及幂等、#2082 本域恢复 | 锁参照/启动证明；使用自有专属主体挑战 E；冻结 `replacement.e_snapshot.{timeout_ms,max_bytes}` 并调用有界 `recovery_snapshot::read`；钉 E 创世 cut、持久 `b-e-authority-binding/1`、`AdvanceEAuthority` 及 ACK；带 finance 时加第 8a 条 S 方向及 ACK。 |
@@ -130,12 +150,12 @@ B 本地链尾必须与所核证据吻合，或按第 7 条提交唯一的合法
 
 各消费方等待对端或准备私有证明时，仅关闭受影响方向。耗时读证在有界工作单元完成，不跨域持事务或停止独立处理；回到本域单写序列再复核父尾、控制成员与活体句柄，短事务提交。过期证明拒绝，不拿时钟或旧 ACK 继续放行。
 
-首写/审计核新版业务、部署及 profile 的冻结字段和对应持久版本；不以启动参数或配置热改给旧库补记。旧版 E/B（含原 `economic-session/1` B 和现行版）/X 缺头操作、专属身份、快照预算、锁参照或已启用方向能力时，在在线操作准入即拒；同样拒缺单域服役证明、已启用的 S 正式财务/执行能力或绑定协议的部署。不加默认预算、兼容开关或读法换档。原版本仍走 ADR 0065 既有启动与原恢复合同，不让 recover/serve 就地重写历史。
+首写/审计核新版业务、部署及 profile 的冻结字段和对应持久版本；不以启动参数或配置热改给旧库补记。旧版 E/B（含原 `economic-session/1` B 和现行版）/X 缺头操作、专属身份、快照预算、锁参照或已启用方向能力时，在在线操作准入即拒；同样拒不具备第 5 条服役出证协议、已启用的 S 正式财务/执行能力或绑定协议的部署。不加默认预算、兼容开关或读法换档。原版本仍走 ADR 0065 既有启动与原恢复合同，不让 recover/serve 就地重写历史。
 
 **10. 状态判据。**
 
 - **单域恢复可用**当且仅当：新目标确属本轮同一原布局、原库及原写锁谱系；原启动门和接纳前动作全成功；原名上的本次实现完成有效具名读回（恢复前已提交的 cut/收据或操作指定的原状态，结果按原协议逐字节核对）；本域当前写者证明与实际进程一致，且可在本地独立接受合法下一次提交。目标原本依赖 E/S 的方向，只有本地绑定证明和复核完成后才各自可用。仅 spawn、listen、owner 更新、恢复 CLI 零退出、pidfd 存活或日志均不足。生产状态不得为凑就绪伪造业务写；有获准输入时实际下一次提交是验收证据。
-- **全会话 Ready**当且仅当：本轮既有 manifest/profile 所需的 S、E、所有 B 及所需 X，均有当前活体、无隔离、持有各自有效写服务资格、通过指定原库具名读回，并能独立接受合法的下一次提交；所有必需权威方向均已由实际消费方确认到同一当前提供方的合法绑定：各 B→E，所需 X→E/S，带 finance 时 E→S 和每个启用 finance 的 B→S。当前实例的 ACK 齐备才算该方向就绪；未回 ACK、历史链未补齐、依赖尚未恢复或无任何本域能力证据时，报分域 `Degraded`（列缺的域和边），不报全局 Ready。受影响方向在活体失效时立刻撤销自身能力，不能持续展示旧 Ready。待定原责任按既有规则受保护，留存本身不等于服务失效；但不能核证正在使用的原件/绑定时仍不 Ready。launcher 对同一批当下实例和 ACK 求交发布 Ready，随后发现实例或证明失效即撤销；Ready 不是对未来存活的承诺。
+- **全会话 Ready**当且仅当：本轮既有 manifest/profile 所需的 S、E、所有 B 及所需 X，均有当前活体、无隔离、已交各自当前实例的第 5 条服役证明、持有有效写服务资格、通过指定原库具名读回，并能独立接受合法的下一次提交；所有必需权威方向均已由实际消费方确认到同一当前提供方的合法绑定：各 B→E，所需 X→E/S，带 finance 时 E→S 和每个启用 finance 的 B→S。当前实例的 ACK 齐备才算该方向就绪；原子放行或旧实例证明均不能补齐当前证明，首证前退出的目标只以继任者的实际证明计入；未回 ACK、历史链未补齐、依赖尚未恢复或无任何本域能力证据时，报分域 `Degraded`（列缺的域和边），不报全局 Ready。受影响方向在活体失效时立刻撤销自身能力，不能持续展示旧 Ready。待定原责任按既有规则受保护，留存本身不等于服务失效；但不能核证正在使用的原件/绑定时仍不 Ready。launcher 对同一批当下实例和 ACK 求交发布 Ready，随后发现实例或证明失效即撤销；Ready 不是对未来存活的承诺。
 - **安全边界。** 不新增真实发单、撤单、补发、资金/账户权限、目录属主或凭据操作。没有独立真实授权不杀孤儿、不改宿主权限；已有真实 X 的指纹、能力和发送子进程隔离条件不变。目录整改、拒绝态清场和缺失历史依 #2130；无确认就保留。有序停止请求只写本轮受控目标的现有停止通道，不把失联转换成杀进程的许可。
 
 ## 五、角色、状态及失败矩阵
@@ -148,10 +168,10 @@ B 本地链尾必须与所核证据吻合，或按第 7 条提交唯一的合法
 | 崩溃 S | launcher 观察隔离；操作方 `ReplaceExited` | 旧 Child 及双锁参照；S #2128、原锁内当前回执与活体 | S 先独立服役；launcher 交 X，启用 finance 时分别向 E/各 B 交 `AdvanceSAuthority`；各消费方自核并 ACK | E、B、X 保持；依赖暂闭，财务读随后只认新 S，历史按原绑定 | 旧 FD 拒；SHM/Begin/坏锚沿 R4 原首错；部分 ACK、旧 S 帧、跳代或回执冲突不放行相关方向及 Ready | P3、P5、P7；AT2、AT4、AT6、AT7、AT9 |
 | 崩溃某个 B，E 健康 | launcher 隔离，操作方请求 | 旧 B 退出及 B 原库当前回执/标记；B 独立核真 E 与 E 原件 | 授权方恢复 B；launcher 单拉；新 B 自取锁、续原址 | E 不停、不让锁；S、其他 B/X 保持 | 缺 B 标记/过时收据拒绝；E 证据缺只封 E 依赖；不调 E 锁内 CLI | P1、P1X、P4；AT2、AT5 |
 | 崩溃 E，多个 B 与 X 活 | launcher 隔离，操作方请求 | 旧 E 退出与 E 原库当前回执；Bᵢ/X 各核新代及原链 | 新 E 先独立交付；launcher 定向传证；各 B/X 事务 ACK | 所有健康域保持；B 只关闭 E 方向 | 过时/裸代/跳代/异库不激活；旧帧拒；个别 ACK 缺不拦 E，不报 Ready | P2、P1X；AT2、AT6、AT7、AT9 |
-| 崩溃本地 simulation X | launcher 隔离，操作方请求 | Child 及受控后代退出；本域锁、profile、原指令及在途档 | 只新拉 X，X 自核原库并认领 | S/E/B 保持 | FD 未清、原库/档缺或不能核旧发送状态均隔离；不重发 | P3；AT2、AT7 |
+| 崩溃本地 simulation X（含原子放行后、X 首证前） | launcher 隔离，操作方显式 `ReplaceExited` | 旧 Child/pidfd、准备时已交的锁参照、目标及受控后代真实退出；新 X 核本域锁、profile、原指令及在途档 | 只新拉 X，X 自核原库、认领并补齐自身当前服役证明；不二次提交批次放行字 | S/E/B 保持，可继续提交 | 缺进程身份、锁参照或退出证据即拒；FD 未清、原库/档缺或不能核旧发送状态均隔离；不重发，证明未齐不报 Ready | P3；AT2、AT5、AT7、AT9 |
 | 旧实例活、SIGSTOP、失联、写后超时，或未知归属/后代 | 操作方显式选命令 | 未满足退出、暂停检查或子代闭包 | 无新域装配 | 写前拒绝不动目标、原址/owner；只有写后超时的目标保持隔离等退出 | `ReplaceExited` 活体 `StillLive`，已暂停 `Paused`；`OrderlyReplace` 暂停不写，写后 `StopTimeout` 不许声称继续服务。未知/旧 FD 按首错拒，即便锁空且试连拒绝 | P3、P6；AT3 |
 | 原锁不可取、锁对象更换、已验退出但残留仍占用，或坏 owner | 操作方请求 | 本域实取同锁、原 owner 与钉住 socket | 拒绝于域门，不接纳 | 保持健康域 | 等锁不成立；对象异常/坏 owner 按 0065 拒，原对象保留；不回退直绑 | P3、P7；AT3、AT4 |
-| 同域并发、重复触发、丢回包、旧操作 | 操作方重送原请求 | launcher 操作槽、原域恢复事务、各消费方本地绑定尾 | 只返回已在途或已落地的原结果 | 保持健康域 | 异内容冲突，异 ID 在途忙，旧实例拒；新故障要重新核前件 | P2；AT8 |
+| 同域并发、重复触发、丢回包、迟到操作 | 操作方重送原请求 | launcher 已完成索引和在途槽、原域恢复事务、各消费方本地绑定尾 | 命中已完成项回其原终态，在途同字节只查询或等待 | 保持健康域 | 已知 ID 异内容冲突；陌生旧实例拒，当前实例的陌生 ID 遇在途忙或历史额度耗尽则拒；无重复副作用 | P2；AT8 |
 | 介质、标记或原件不明，旧合同进程或 launcher 已失去 | 操作方仅按各自原合同处理 | 缺在线装配/本域门证据 | 不在线接管 | 不动幸存者/孤儿 | 留 `Isolated`/拒绝；按 #2130 运维或另启既有全停路径，不报告 Ready | 0065 / 0050 负控；AT4、AT9 |
 | 无本地监听的 X 或外部发送身份未证 | 仅原获准外部流程 | #1401/C09.8 原证、原 profile | 本票无发送或新真实进程 | 其他健康域保持 | 不进入本地端点流程；不增加发送、不杀旧发送者或孤儿 | AT7、AT9 |
 
@@ -165,11 +185,11 @@ B 本地链尾必须与所核证据吻合，或按第 7 条提交唯一的合法
 | AT2 `replace_one_crash_same_address` | 分别对真实 S/E/B/本地 X 在业务提交前后、回报/应用边界断开，确认真实退出后 `ReplaceExited`。正式恢复才升一次代；其余域不重启、不换库、不 init，退役对象核原 ino，新 listener 在原址。旧请求不复活，具名原结果逐字节回读，各域实际完成下一合法提交。S 臂用获准固定 Plan 并启用 finance：同 PID 的 E/多个 B 消费 S #2128 原件，经各自绑定推进后实际完成 `Reserve`、`PrepareDecision`、`CommitDecision`；原财务事实按旧切面验证。 |
 | AT3 `replace_one_refuses_live_unknown_or_old_fd` | `ReplaceExited` 对活/SIGSTOP 各返 `StillLive`/`Paused`，不写且不改目标；`OrderlyReplace` 对已暂停目标或后代拒 `Paused` 并证明管道未写，`SIGCONT` 后同 PID/socket 应答。写后超时另臂证明只写一次且目标隔离等待退出、无升级信号/重拉，不要求能应答。未知、旧 FD（含仅 bind）、无退出证据、锁空与试连拒绝同现仍拒。实取错锁（含 S 任一锁错）、坏 owner、活 socket 或 M 布局错均拒；在开库及认领前验证反向 `O_PATH` 比对，不消费标记、不改端点、无新监听或第二 writer。 |
 | AT4 `replace_one_checks_own_recovery_and_sidecars` | E/B 缺/坏/错代 `clean_close/1` 或未正式恢复，S 带 SHM、非法 WAL、坏锚或未决 Begin 均按原门拒；原库/端点未替换，S 真 #2128 合规恢复并校验两个原锁参照才准再绑。两锁逐把检测持锁后、开库和介质处置前缺/换/错参照；对照误传原 FD 会续命写锁与传 `O_PATH` 后立即可重新取锁。另核原回执重取、旧回执/请求拒、预核与 serve 复查竞态，用 0065 整会话旧直绑对照臂确认标记门不得绕过，在线换代的认领失败不得转入该臂。 |
-| AT5 `replace_b_reads_current_e_without_e_lock` | 创世及活动 WAL 升代臂保 E PID/端点/持锁、E 真新提交，直接 `current-recovery` 锁拒；新 B 先核有界私有快照、凭专属主体用同一头挑战精确核大 image 的历史 cut，再在 B 原库提交真依赖操作。拒未登记/冒名、错 peer、陈旧收据、同 manifest 另 init、仅 immutable 旧库、超时间/总字节或不稳快照；强制头挑战失败并确认不发 `ReadView` / `EconomicReadOpen`，专属授权不增加其他读写能力。首启单独验证：全员可先准备、放行前不接纳也不消费 E/B 标记；放行后未核上游证明的下游不得执行权威交换，核证后同一批次下游可接续，无第二次 spawn。 |
+| AT5 `replace_b_reads_current_e_without_e_lock` | 创世及活动 WAL 升代臂保 E PID/端点/持锁、E 真新提交，直接 `current-recovery` 锁拒；新 B 先核有界私有快照、凭专属主体用同一头挑战精确核大 image 的历史 cut，再在 B 原库提交真依赖操作。拒未登记/冒名、错 peer、陈旧收据、同 manifest 另 init、仅 immutable 旧库、超时间/总字节或不稳快照；强制头挑战失败并确认不发 `ReadView` / `EconomicReadOpen`，专属授权不增加其他读写能力。首启单独验证：全员可先准备、放行前不接纳也不消费 E/B 标记；放行后未核上游证明的下游不得执行权威交换，核证后同一批次下游可接续，无第二次 spawn。 另在真实本地 X 已交 `O_PATH`、完成绑定和放行前准备、launcher 唯一一次原子写 1 后，卡在 X 第 5 条首证前使其异常退出。确证旧 Child/pidfd、锁参照和退出后，自动隔离但仅由显式 `ReplaceExited` 新拉 X；不二次写放行字，健康 S/E/B 同 PID、端点及代并实际继续提交；新 X 和所需依赖均实证前非 Ready。对照在末次存活复核观察到退出，放行字保持 0，不走在线换代。 |
 | AT6 `replace_e_advances_live_b_source` | E 臂中至少两个活 B 保持本域 writer/端点，已接纳与未接纳分开；退出、切换前后注入旧帧、错误 E 原件与错 peer，仅新绑定一次，真 E 依赖成功、历史不改。同代 E 仅换句柄。S/finance 对照臂向 E/多个活 B 发真 `AdvanceSAuthority`，带在途操作，验证两种财务版本按尾项单步接纳新 S、拒旧 S/跳代及异内容，历史证据仍按旧绑定核；同代重开仅换活体，旧 peer 不放行。 |
-| AT7 `replace_e_or_s_rebinds_live_x_without_resend` | 分别真换 E/S，另测同代重开；原 X PID、端点、自身代、X 事实来源及 E 原业务授权不变，私有快照不动 E 部署，只动相应分量。E 用同一头/S 用实际 `ready` 核活体，随后真权威交换再查 peer/pidfd；错 peer、旧帧或只会 `ready` 的 S 不可用。覆盖 Accepted、可能已发送/丢回包、ExecutionReady、MayHaveCalled、Observed；资格/占有/发送不重复，未知最大责任不降。另打断本地 X；非监听 profile 不进本地重拉，无真实场所发送。 |
-| AT8 `replace_one_retry_and_competing_requests` | 两命令各测不同 ID 并发、重复同 ID、同 ID 换命令/异内容、迟到旧实例；重复不会再写停止字节或 spawn。分别在具名恢复/启动、各消费方绑定提交后丢回包，查回原字节；代、行、进程不重复，提交前中断可按原请求语义重试。 |
-| AT9 `replace_one_requires_real_session_ready` | 真依赖失败、部分 B→E、带 finance 时部分 E/B→S ACK 未交、旧 S 帧、X 原件或真实 S 业务能力缺失、旧部署缺头/主体/预算、已 bind 未证读回、健康域提交失败和 launcher 消失均非 Ready。只有实际恢复所有必需边、原库具名读回及每域独立提交后才报 Ready。整会话重启、新路径、手改库/裸代、TB-05 只隔离、假 PID 均不能做正控。 |
+| AT7 `replace_e_or_s_rebinds_live_x_without_resend` | 分别真换 E/S，另测同代重开；原 X PID、端点、自身代、X 事实来源及 E 原业务授权不变，私有快照不动 E 部署，只动相应分量。E 用同一头/S 用实际 `ready` 核活体，随后真权威交换再查 peer/pidfd；错 peer、旧帧或只会 `ready` 的 S 不可用。覆盖 Accepted、可能已发送/丢回包、ExecutionReady、MayHaveCalled、Observed；资格/占有/发送不重复，未知最大责任不降。另打断本地 X；非监听 profile 不进本地重拉，无真实场所发送。 按 [P 第 221–222 行的两种正控](https://github.com/Newchanlun/NewChanlun/blob/e9b12ef9eeff26cab51e295826a11c871e189ac7/docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#L221-L222)：S₁ 已提交但回包丢失，从 S₂ 首次查回（申请代 1、提交代 1、应答代 2）；S₁ 仅已入队，S₂ 在原队列项的合法稳定点首次提交并应答（申请代 1、提交代 2、应答代 2）。独立留存原申请、原队列项和真实提交字节，逐项对读 X 持久引用；两臂均不重发、不重新入队、不双提交、不二次占有，且过实际获知时序。负控各只篡改原 `queue_id` 或实际提交代 `writer_epoch`，保留合法当前应答信封，拒绝取得资格或占有，留原 pending 和责任，不降级。 |
+| AT8 `replace_one_retry_and_competing_requests` | 两命令各测不同 ID 并发、重复同 ID、同 ID 换命令/异内容、迟到旧实例；重复不会再写停止字节或 spawn。分别在具名恢复/启动、各消费方绑定提交后丢回包，查回原字节；代、行、进程不重复，提交前中断可按原请求语义重试。 同一 launcher 内，操作 `a`（`I₀ → I₁`）成功但丢回复，操作 `b`（`I₁ → I₂`）完成后，原样重放 `a` 回 `a` 的原终态；改字节重放 `a` 返 `IdentityConflict`；从未用过的 ID 指向 `I₀` 返 `StaleIncarnation`。三臂均不再写停止字节、不恢复、不 spawn，不改变 `I₂`。另测同 ID 改目标域，以及本域满 256 项或预留失败后，新 ID 指向当前实例返 `OperationHistoryFull`、无副作用；原样/改字节重放和陌生旧实例仍各归原判，其他域仍可接纳。 |
+| AT9 `replace_one_requires_real_session_ready` | 真依赖失败、部分 B→E、带 finance 时部分 E/B→S ACK 未交、旧 S 帧、X 原件或真实 S 业务能力缺失、旧部署缺头/主体/预算、已 bind 未证读回、健康域提交失败和 launcher 消失均非 Ready。只有实际恢复所有必需边、原库具名读回及每域独立提交后才报 Ready。整会话重启、新路径、手改库/裸代、TB-05 只隔离、假 PID 均不能做正控。 在 AT5 放行后、X 首证前退出窗口，旧 X 的首证不参与 Ready，但新 X 仅 bind、缺其服役证明或缺任一所需依赖实证时均保持 `Degraded`；当前 X 与所有必需域及方向齐证才报 Ready。以同一放行窗口分别使 launcher 缺目标身份、锁参照或真实退出证据，显式 `ReplaceExited` 一律拒该域，无新进程、无第二次放行、无伪造首证，S/E/B 继续独立提交。 |
 
 ## 七、受影响代码及票据边
 
@@ -199,5 +219,5 @@ B 本地链尾必须与所核证据吻合，或按第 7 条提交唯一的合法
 ### 票与 blocking 边
 
 - 保留 **#2079 → #2120**、#2120 挂 #1363；保留 **#1376 → #1396 → #1409 → #1417 → #1423 → #1411**；不关闭 #1363 或 #1411，不改任何 TB-05 逐域真实中断或 #1411 整会话恢复门。
-- #2127、#2128、#2129 各自已有对 #1411 的阻塞关系不动；PR #2077/#2082 实施基线与 #2130 运维拒绝出口依 ADR 0065。P、S、X 是同辈待合入的裁定引用，N、PI、SI、XI 的代码只定位接缝；下游按实际合入的正本和实现复核，不把候选或历史探针当现役能力。引用这些接缝不是新增本票对现有 #1411 或 #1363 的阻塞边。
+- #2127、#2128、#2129 各自已有对 #1411 的阻塞关系不动；PR #2077/#2082 实施基线与 #2130 运维拒绝出口依 ADR 0065。P、S、X 是同辈待合入的裁定引用，N、PI、SI、XI 的代码只定位接缝；集成前须确认 PR #2160 正本按第 8 条对齐 P 的 S 终态提交代判据；下游按实际合入的正本和实现复核，不把候选或历史探针当现役能力。引用这些接缝不是新增本票对现有 #1411 或 #1363 的阻塞边。
 - 未来由 **#2120 → 专门的 launcher 存活单域原址实施片** 接本 ADR；只承接在线控制、单域启动证明、活 E/B/X 的本域绑定推进、所需权威接缝和第六节实测。原最大责任、#1401 权限/真实 X 送单隔离和 #1323 Destination / #1340 验收范围照旧；这条实施片不能用 #1411 的全停成功销项。
