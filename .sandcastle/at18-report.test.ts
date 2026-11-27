@@ -5456,6 +5456,120 @@ class Adapter:
   }
 });
 
+test("R47/#1319：默认候选组合隔离实参、身份标记和已占槽位", () => {
+  execFileSync("python3", ["-IB", "-c", String.raw`
+import inspect, runpy, sys
+d = runpy.run_path(sys.argv[1])
+left, right, flavor = [99], [99], object()
+def target(marker=left, /, *items, tag=right, kind=flavor, **kw): pass
+sig = inspect.signature(target)
+shapes = d['default_arguments']
+distinct = {(0, id(left)), ('tag', id(right)), ('kind', id(flavor))}
+source = d['SourceShape']((99, 17, 99), {'flag': True}, {'tag': 0}, {}, frozenset(), {})
+mode = ('shape', source.args, source.kwargs, source)
+rows = shapes(sig, {'tag': 99}, mode, {'tag'}, distinct_defaults=distinct)
+args, kw, refs = next(rows)
+assert args[0] is left and args[1:] == [99, 17, 99] and kw == {'flag': True}
+# 模拟外层 shadow_kw 的覆写：后续姿态不能继承覆写或丢失位置身份。
+kw['tag'] = [99]
+refs.pop(0)
+rows = list(rows)
+assert all(refs[0] is left and kw['flag'] is True for args, kw, refs in rows)
+for tail in ([99, 17, 99], [17, 99]):
+    assert {frozenset(kw) - {'flag'} for args, kw, refs in rows if args[1:] == tail} >= {
+        frozenset({'tag'}), frozenset({'kind'}), frozenset({'tag', 'kind'})}
+assert any(args[1:] == [17, 99] and kw == {'flag': True} for args, kw, refs in rows)
+args, kw, refs = next(row for row in rows if row[0][1:] == [17, 99] and len(row[1]) == 3)
+assert kw['tag'] is refs['tag'] is right and kw['kind'] is refs['kind'] is flavor
+copied_args, copied_kw = d['copy_arguments'](args, kw, refs)
+assert copied_args[0] is left and copied_kw['tag'] is right and copied_kw['kind'] is flavor
+for rejected in (object(), lambda: None, {'wrap': [object()]}, [lambda: None]):
+    try:
+        d['ctor_choice']((sig,), (sig,), args, kw | {'tag': rejected}, refs, {})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('an observed value used a production default marker')
+assert not d['is_keyword_default'](refs, 'tag', [99])
+assert all('tag' not in opts and 'tag' not in marks for _, opts, marks in
+           shapes(sig, {}, False, (), (frozenset(), {'tag'}), distinct))
+
+prefix_rows = list(shapes(sig, {}, False, (), distinct_defaults=distinct))
+assert any(a == [] and k.get('tag') is right for a, k, _ in prefix_rows)
+assert any(a and a[0] is left and k.get('tag') is right and k.get('kind') is flavor
+           for a, k, _ in prefix_rows)
+# 大集合只试省略、全集、单槽及其补集，不展开幂集。
+params = [inspect.Parameter(f'k{i}', inspect.Parameter.KEYWORD_ONLY, default=object()) for i in range(9)]
+wide = list(shapes(inspect.Signature(params), {}, False, (),
+                   distinct_defaults={(p.name, id(p.default)) for p in params}))
+assert sorted(len(k) for _, k, _ in wide) == [0, *([1] * 9), *([8] * 9), 9]
+`, join(sandbox, "at18-python-source.py")], { stdio: "pipe" });
+});
+
+test("R47/#1319：正式 CLI 组合固定源索引和本地双钩子默认对象", { timeout: 240_000 }, async t => {
+  const indexed = "def route(tag, /, *items, **kw): return tag + items[0]";
+  const indexedHooks = (identity: string, tail: string, observed: string) => `
+left, right = object(), object()
+class Adapter:
+    def __new__(cls, *items, tag=left, **kw):
+        assert tag is ${identity} and items == (${tail}) and kw == {'flag': True}
+        return super().__new__(cls)
+    def __init__(self, *items, tag=right, **kw):
+        assert tag is ${identity} and items == (${tail}) and kw == {'flag': True}
+    def dispatch(self): return f.route(${observed})
+`;
+  const check = (name: string, hooks: string, route: string, observed: string, covered = true) => t.test(name, async () => {
+    const { f, report } = await control({
+      feedIntegration: "from . import at18_fixture_feed as f\n" + hooks + "\n__all__ = ('Adapter',)\n",
+      feedReplacement: route + "\n__all__ = ('route',)\n",
+      feedTest: "from trading_system.at18_fixture_feed import route\n" +
+        `def test_route(): assert route(${observed}) == 116\n`,
+    }, "R47/" + name);
+    assert.equal(report.head, f.F);
+    assert.equal(report.overall_result, covered ? "PASS" : "FAIL");
+    assert.deepEqual(report.failed_checks.map(({ check_id, scope }) => [check_id, scope]), covered ? [] :
+      [["LEGACY_DISPOSITION", "ticket:1319@ISSUE_1319_FEED_WIRE"]]);
+    const ticket = report.legacy_dispositions.find(r => r.ticket === 1319);
+    assert.deepEqual([ticket?.ticket_state, ticket?.disposition_valid], ["CLOSED", covered]);
+  });
+  const observed = "99, 17, flag=True";
+  await check("joined", indexedHooks("left", "17,", observed), indexed, observed);
+  await check("right-sentinel", indexedHooks("right", "17,", observed), indexed, observed);
+  const equalTail = "99, 17, 99, flag=True";
+  await check("保留与被扣源索引同值的匿名尾参", indexedHooks("left", "17, 99", equalTail), indexed, equalTail);
+
+  const mixed = `
+left, right, a0, a1, b0, b1, keep0, keep1 = (object() for _ in range(8))
+class Adapter:
+    def __new__(cls, marker=left, /, *, a=a0, b=b0, keep=keep0, offset):
+        assert marker is left and a is a0 and b is b0 and keep is keep0 and offset == 17
+        return super().__new__(cls)
+    def __init__(self, marker=right, /, *, a=a1, b=b1, keep=keep1, offset):
+        assert marker is left and a is a0 and b is b0 and keep is keep1 and offset == 17
+    def dispatch(self): return f.route(99, offset=17)
+`;
+  await check("位置前缀和两个关键字默认对象组合，第三个关键字仍省略", mixed,
+    "def route(marker, /, *, offset): return marker + offset", "99, offset=17");
+
+  for (const hook of ["__new__", "__init__", "metaclass"] as const) {
+    const code = indexedHooks("left", "17,", observed);
+    const guard = "    from . import left\n" +
+      "    assert tag is left and items == (17,) and kw == {'flag': True}\n";
+    const [hooks, foreign] = hook === "__new__" ? [
+      code.replace(/    def __new__[\s\S]*?(?=    def __init__)/, "    __new__ = staticmethod(foreign)\n"),
+      "def foreign(cls, *items, tag=foreign_token, **kw):\n" + guard + "    return object.__new__(cls)\n",
+    ] : hook === "__init__" ? [
+      code.replace(/    def __init__[\s\S]*?(?=    def dispatch)/, "    __init__ = foreign\n"),
+      "def foreign(self, *items, tag=foreign_token, **kw):\n" + guard,
+    ] : [
+      code.replace("class Adapter:", "class Adapter(metaclass=foreign):"),
+      "class foreign(type):\n    def __call__(cls, *items, **kw): return super().__call__(*items, **kw)\n",
+    ];
+    await check("外来 " + hook + " 不启用组合", "from .at18_fixture_feed import foreign\n" + hooks,
+      indexed + "\nforeign_token = object()\n" + foreign, observed, false);
+  }
+});
+
 test("R24/#1319：只排除编译空体，不推断本地实现的业务语义", { timeout: 120_000 }, async t => {
   const entry = "trading_system/at18_fixture_feed.py";
   const integration = "trading_system/__init__.py";

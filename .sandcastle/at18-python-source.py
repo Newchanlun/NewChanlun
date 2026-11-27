@@ -283,10 +283,9 @@ def arguments(signature, samples, variadic=False, *, following_positional=False,
 
 
 def default_arguments(signature, view, mode, omitted, outer_consumed=(frozenset(), frozenset()), distinct_defaults=()):
-    args, kwargs, defaults = arguments(signature, view, mode, omitted=omitted, outer_consumed=outer_consumed)
-    yield args, kwargs, defaults
     params = signature.parameters
     positional = [p for p in params.values() if p.kind in POSITIONAL]
+    replacements = [()]
     if omitted and type(mode) is tuple and any(p.kind is inspect.Parameter.VAR_POSITIONAL
                                                 for p in params.values()):
         source = mode[3]
@@ -296,18 +295,30 @@ def default_arguments(signature, view, mode, omitted, outer_consumed=(frozenset(
         retained = set(outer_consumed[0]) | {i for p, i in source.positions.items() if p not in omitted}
         # 保留原省略姿态；替换姿态只扣掉被默认值占据的具名源位置。
         if replaced - retained and len(retained | replaced) < len(source.args):
-            yield arguments(signature, view, mode, omitted=omitted, outer_consumed=outer_consumed,
-                            replaced_positions=replaced)
-    if not distinct_defaults:
-        return
-    for i, p in enumerate(positional):
-        if i >= len(args) and (i, id(p.default)) in distinct_defaults and (p.name in omitted or p.name not in view):
-            yield arguments(signature, view, mode, omitted=omitted, outer_consumed=outer_consumed, explicit_prefix=i + 1)
-    occupied = {p.name for p in positional[:len(args)]} | outer_consumed[1] | kwargs.keys()
-    for p in params.values():
-        if (p.kind in KEYWORD and p.name not in occupied and (p.name, id(p.default)) in distinct_defaults and
-                (p.name in omitted or p.name not in view)):
-            yield args, kwargs | {p.name: p.default}, defaults | {p.name: p.default}
+            replacements.append(replaced)
+
+    def keyword_forms(args, kwargs, defaults):
+        if not distinct_defaults:
+            yield args, kwargs, defaults
+            return
+        occupied = {p.name for p in positional[:len(args)]} | outer_consumed[1] | kwargs.keys()
+        eligible = {p.name: p.default for p in params.values() if
+                    p.kind in KEYWORD and p.name not in occupied and (p.name, id(p.default)) in distinct_defaults and
+                    (p.name in omitted or p.name not in view)}
+        # 复用已有槽位枚举上限，且每个姿态都独立持有可被外层覆写的关键字和标记。
+        for selected in selections(tuple(eligible)):
+            explicit = {name: value for name, value in eligible.items() if name in selected}
+            yield args, kwargs | explicit, defaults | explicit
+
+    for replaced in replacements:
+        options = dict(omitted=omitted, outer_consumed=outer_consumed, replaced_positions=replaced)
+        args, kwargs, defaults = arguments(signature, view, mode, **options)
+        yield from keyword_forms(args, kwargs, defaults)
+        if distinct_defaults:
+            for i, p in enumerate(positional):
+                if (i >= len(args) and (i, id(p.default)) in distinct_defaults and
+                        (p.name in omitted or p.name not in view)):
+                    yield from keyword_forms(*arguments(signature, view, mode, explicit_prefix=i + 1, **options))
 
 
 def variadic_only(signature):
