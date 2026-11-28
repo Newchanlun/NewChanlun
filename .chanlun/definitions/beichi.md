@@ -768,7 +768,7 @@ class Divergence:
 | 柱子伸长高度比较 | ✅ 工具函数已实现（T7） | `histogram_peak_for_range()`：计算指定范围hist峰值。未集成到主检测（#2 or/and未结算） |
 | 盘整背驰 | ✅ 已实现 | 同向离开段力度比较 |
 | 区间套（多级别嵌套） | ⚠️ 部分实现（2026-07-29 订正） | 单级别 `divergences_in_bar_range` + 跨级别 `nested_divergence_search`（Python `a_nested_divergence.py:480`）**仅接观测 API（server.py 查询端点），未接交易决策路径**；Rust 生产侧有 NestCertificate/Cand 谓词/nest_index 等 5 件在判据路径（map #529 N0-N3 交付），但「入场时点力度=小级别盘背」的因果性封装+防未来函数消费门空缺（= #529 Consume_at/N5-N7 雾里）。核查 `.chanlun/review-results/qujiandao-impl-audit-20260729.md` |
-| 小转大 | ⚠️ **订正（#815 M-4，2026-08-03）**：旧记「✅ 已实现 / `a_xiaozhuan_da.py`」**指向的是死码** | `src/newchan/a_xiaozhuan_da.py` 非测试调用者为零，且判据比原文**宽**（未实装 `044:24-26` 的 c′ 三类点必要条件）。**真正的生产实现在 Rust**：`econ_positive.rs:1691 xiaozhuanda_confirm` + `XzdEvidence::gate_pass` + `build_xzd_fallback`（16+ 文件，准入门两条通道之一）。Lean 侧亦有对应：`formal/Origin/CertGatedExit.lean:683/687/699–700`、`DivergenceNesting.lean:122`。名分见上「『小转大』的名分（#815 M-4 裁定）」节 |
+| 小转大 | ⚠️ **订正（#815 M-4，2026-08-03）**：旧记「✅ 已实现 / `a_xiaozhuan_da.py`」**指向的是死码** | `src/newchan/a_xiaozhuan_da.py` 非测试调用者为零，且判据比原文**宽**（未实装 `044:24-26` 的 c′ 三类点必要条件）。上文 #815 所记的 Rust 旧准入通道（`econ_positive.rs:1691` 的 `xiaozhuanda_confirm`、`XzdEvidence::gate_pass`、`build_xzd_fallback`）及 Lean 旧镜像（`formal/Origin/CertGatedExit.lean:683/687/699–700`、`DivergenceNesting.lean:122`）是**历史影子路径，仅留隔离对照**。按 [#2114 实施边界](qushi.md#2114-受影响代码清单)，正式 B 只从版本化 `Classification` 消费 S 的独立转折见证，不得把 `build_xzd_fallback` 用作转折见证或准入兜底 |
 | confirmed 时机 | 旧参考实现 | 跟随趋势标签的 `confirmed`；不证明完整窗或正式首证钟 `τ` |
 
 ---
