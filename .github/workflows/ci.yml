@@ -890,6 +890,8 @@ jobs:
       # #1875：具名锁 4 路并行（run-1488-delta-ci.py 每条仍是独立进程、--exact，逐条核对哈希与日志、结果按计划顺序）。
       #   托管 runner 也取 4，与同类 4 核托管机上 extras 的 RUST_TEST_THREADS=4 同口径；串行时 A/B/C 锁曾是托管路径的关键路径（run 42373511176：22.1 min）。
       CI_1488_TEST_JOBS: "4"
+      # #1875：与 rust-job-setup 同口径，关闭 dev 档冗余 DWARF，保留断言/溢出检查与全部锁覆盖。
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -927,6 +929,12 @@ jobs:
           echo "features=$FEATURES target=$HOME/1488-sequence-target"
       - name: Fetch locked dependencies (network allowed, #1488)
         run: cargo fetch --locked
+      - name: Optimize third-party dependencies in test builds (#1875)
+        run: |
+          cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          mkdir -p "$(dirname "$cfg")"
+          flock "$cfg.lock" bash -c 'grep -qF "[profile.dev.package.\"*\"]" "$1" 2>/dev/null || printf "[profile.dev.package.\"*\"]\nopt-level = 2\n" >> "$1"' _ "$cfg"
+          cat "$cfg" 2>/dev/null || echo "(no $cfg yet)"
       - name: Run sequence API, real memo, oracle and nonempty source locks (#1488)
         run: |
           set -euo pipefail
