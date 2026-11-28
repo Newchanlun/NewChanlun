@@ -973,8 +973,7 @@ def w14aCover : Opus.Center := ⟨0,4,by decide,⟨10,20⟩,⟨10,30⟩⟩
 theorem w14a_continuous_leave :
     Opus.trendFormingProspect .up (w14aSeq 40) w14aCover 3 = true ∧
     Opus.trendFormingProspect .up (w14aSeq 29) w14aCover 3 = true ∧
-    Astra.trendFormingProspect w14aAlt
-      ((Astra.Center.window? w14aAlt.items 0 3).toList) .up 6 = false := by
+    (∀ z ∈ Astra.windows w14aAlt.items, Astra.trendFormingProspect w14aAlt [z] .up 6 = false) := by
   decide
 
 def w14bSeq (high : Int) : List Seg :=
