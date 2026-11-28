@@ -93,6 +93,13 @@ def firstBreakOrExpand? (xs : List (Seg P)) (seed : Nat)
       else if !requireThird && crosses && hasExpansionAfter xs z k then some (cutEnd, true)
       else none
 
+/-- 按证据完成时刻扫描：从短到长逐个检查前缀，返回首个闭合事件。
+延拓不改变已检查的前缀，因此唯一的首个命中不会被后来完成的证据撤销。 -/
+def firstOnlineBreakOrExpand? (xs : List (Seg P)) (seed : Nat)
+    (requireThird : Bool) : Option (Nat × Bool) :=
+  (List.range (xs.length + 1)).findSome? fun t =>
+    firstBreakOrExpand? (xs.take t) seed requireThird
+
 /-- 成核档和触核延伸档保留原途径二：在块尾取证，前后枢各至多九段。 -/
 def earlyTimingPullback (xs : List (Seg P)) (seed j : Nat) : Bool :=
   (List.range 7).any fun extra =>
