@@ -722,7 +722,7 @@ def test_remote_cancel_before_claim_blocks_late_supervisor(tmp_path, monkeypatch
 def test_remote_deadline_writes_receipt_before_vm_stop(tmp_path, monkeypatch):
     boat_remote, root, request, path = supervisor_env(tmp_path, monkeypatch, node='sleep 60')
     started = time.monotonic()
-    process = supervise(boat_remote, path, time.time() + 3)
+    process = supervise(boat_remote, path, time.time() + 0.8)
     process.communicate(timeout=30)
     receipt = json.loads((root / 'claim/receipt.json').read_text())
     assert receipt['timed_out'] is True and receipt['exit_code'] == 143
