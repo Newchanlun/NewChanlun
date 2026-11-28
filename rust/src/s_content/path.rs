@@ -1373,8 +1373,16 @@ fn boundary_leaf(
     count: u64,
     right: bool,
 ) -> Result<NodeDigest, CodecError> {
-    let mut node = read_seq_node(source, root, count)?;
-    let mut n = count;
+    let node = read_seq_node(source, root, count)?;
+    boundary_leaf_from_node(source, node, count, right)
+}
+
+fn boundary_leaf_from_node(
+    source: &mut CodecContext<'_, '_>,
+    mut node: SeqNode,
+    mut n: u64,
+    right: bool,
+) -> Result<NodeDigest, CodecError> {
     loop {
         match node {
             SeqNode::Empty => {
@@ -1438,6 +1446,120 @@ fn find_field(
     find_field_optional(source, root, count, name)?.ok_or_else(|| field_missing_error(name))
 }
 
+fn read_single_chunk_key_bytes<'capture>(
+    source: &mut CodecContext<'_, 'capture>,
+    bytes_root: &NodeDigest,
+    declared: u64,
+) -> Result<Option<VerifierBody<'capture>>, CodecError> {
+    if declared > CHUNK_BYTES as u64 {
+        return Ok(None);
+    }
+    let (st, sbody) = source.read(bytes_root)?;
+    if declared == 0 {
+        if st == tag::SEQ_EMPTY && sbody.is_empty() {
+            return Ok(Some(VerifierBody::empty()));
+        }
+        return Ok(None);
+    }
+    if st != tag::SEQ_LEAF || sbody.len() != 32 {
+        return Ok(None);
+    }
+    let leaf = digest_at(&sbody, 0);
+    let (lt, chunk) = source.read(&leaf)?;
+    check_chunk(lt, &chunk)?;
+    Ok(Some(chunk))
+}
+
+fn cmp_single_chunk_vs_wanted(
+    chunk: &[u8],
+    declared: u64,
+    wanted: &[u8],
+) -> Result<Ordering, CodecError> {
+    let common = chunk.len().min(wanted.len());
+    match chunk[..common].cmp(&wanted[..common]) {
+        Ordering::Equal => {}
+        other => return Ok(other),
+    }
+    if chunk.len() > wanted.len() {
+        return Ok(Ordering::Greater);
+    }
+    if chunk.len() as u64 != declared {
+        return Err(byte_extent_error(chunk.len() as u64, declared));
+    }
+    Ok(if chunk.len() == wanted.len() {
+        Ordering::Equal
+    } else {
+        Ordering::Less
+    })
+}
+
+fn cmp_branch_keys_and_wanted(
+    source: &mut CodecContext<'_, '_>,
+    left_key: &NodeDigest,
+    right_key: &NodeDigest,
+    wanted: &[u8],
+    need_right_vs_wanted: bool,
+) -> Result<(Ordering, Option<Ordering>), CodecError> {
+    if left_key == right_key {
+        return Err(CodecError::new(
+            code::DUPLICATE_KEY,
+            "对象出现重复键（同一键摘要跨分支重复）".to_string(),
+        ));
+    }
+    let (root_a, declared_a) = read_string_header(source, left_key)?;
+    let (root_b, declared_b) = read_string_header(source, right_key)?;
+    if declared_a <= CHUNK_BYTES as u64 && declared_b <= CHUNK_BYTES as u64 {
+        if let Some(a_bytes) = read_single_chunk_key_bytes(source, &root_a, declared_a)? {
+            if let Some(b_bytes) = read_single_chunk_key_bytes(source, &root_b, declared_b)? {
+                match a_bytes[..].cmp(&b_bytes[..]) {
+                    Ordering::Less => {}
+                    Ordering::Greater => {
+                        return Err(CodecError::new(
+                            code::OBJECT_KEY_ORDER,
+                            "对象键未按 UTF-8 字节升序".to_string(),
+                        ))
+                    }
+                    Ordering::Equal => {
+                        if a_bytes.len() as u64 != declared_a {
+                            return Err(byte_extent_error(a_bytes.len() as u64, declared_a));
+                        }
+                        if b_bytes.len() as u64 != declared_b {
+                            return Err(byte_extent_error(b_bytes.len() as u64, declared_b));
+                        }
+                        return Err(CodecError::new(
+                            code::DUPLICATE_KEY,
+                            "对象出现重复键（同一键摘要跨分支重复）".to_string(),
+                        ));
+                    }
+                }
+                let left_vs_wanted = cmp_single_chunk_vs_wanted(&a_bytes, declared_a, wanted)?;
+                let right_vs_wanted = if need_right_vs_wanted && left_vs_wanted == Ordering::Less {
+                    Some(cmp_single_chunk_vs_wanted(&b_bytes, declared_b, wanted)?)
+                } else {
+                    None
+                };
+                return Ok((left_vs_wanted, right_vs_wanted));
+            }
+        }
+    }
+    match cmp_key_nodes(source, left_key, right_key)? {
+        Ordering::Less => {}
+        Ordering::Equal => {
+            return Err(CodecError::new(
+                code::DUPLICATE_KEY,
+                "对象出现重复键（同一键摘要跨分支重复）".to_string(),
+            ))
+        }
+        Ordering::Greater => {
+            return Err(CodecError::new(
+                code::OBJECT_KEY_ORDER,
+                "对象键未按 UTF-8 字节升序".to_string(),
+            ))
+        }
+    }
+    Ok((cmp_key_bytes(source, left_key, wanted)?, None))
+}
+
 fn find_field_optional(
     source: &mut CodecContext<'_, '_>,
     root: &NodeDigest,
@@ -1447,13 +1569,14 @@ fn find_field_optional(
     let wanted = name.as_bytes();
     let budget = source.work_budget();
     let mut branches: WorkVec<BranchFrame> = WorkVec::new_work(budget.as_ref());
-    let mut digest = *root;
     let mut n = count;
+    if n == 0 {
+        return Ok(None);
+    }
+    let preserve = source.preserve_sequence_read_trace();
+    let mut node = read_seq_node(source, root, n)?;
     loop {
-        if n == 0 {
-            return Ok(None);
-        }
-        match read_seq_node(source, &digest, n)? {
+        match node {
             SeqNode::Empty => return Ok(None),
             SeqNode::Leaf(field) => {
                 let (key, value) = read_field(source, &field)?;
@@ -1463,35 +1586,67 @@ fn find_field_optional(
                 };
             }
             SeqNode::Branch { k, left, right } => {
-                check_branch_children(source, &left, &right, n, k)?;
-                let left_max = boundary_leaf(source, &left, k, true)?;
-                let right_min = boundary_leaf(source, &right, n - k, false)?;
-                let left_key = read_field(source, &left_max)?.0;
-                let right_key = read_field(source, &right_min)?.0;
-                match cmp_key_nodes(source, &left_key, &right_key)? {
-                    Ordering::Less => {}
-                    Ordering::Equal => {
-                        return Err(CodecError::new(
-                            code::DUPLICATE_KEY,
-                            "对象出现重复键（同一键摘要跨分支重复）".to_string(),
-                        ))
+                let left_node = read_seq_node(source, &left, k)?;
+                let right_node = read_seq_node(source, &right, n - k)?;
+                let left_max = if preserve {
+                    boundary_leaf(source, &left, k, true)?
+                } else {
+                    boundary_leaf_from_node(source, left_node, k, true)?
+                };
+                let right_min = if preserve {
+                    boundary_leaf(source, &right, n - k, false)?
+                } else {
+                    boundary_leaf_from_node(source, right_node, n - k, false)?
+                };
+                let (left_key, left_val) = read_field(source, &left_max)?;
+                let (right_key, right_val) = read_field(source, &right_min)?;
+                let (left_vs_wanted, right_vs_wanted) = if preserve {
+                    match cmp_key_nodes(source, &left_key, &right_key)? {
+                        Ordering::Less => {}
+                        Ordering::Equal => {
+                            return Err(CodecError::new(
+                                code::DUPLICATE_KEY,
+                                "对象出现重复键（同一键摘要跨分支重复）".to_string(),
+                            ))
+                        }
+                        Ordering::Greater => {
+                            return Err(CodecError::new(
+                                code::OBJECT_KEY_ORDER,
+                                "对象键未按 UTF-8 字节升序".to_string(),
+                            ))
+                        }
                     }
-                    Ordering::Greater => {
-                        return Err(CodecError::new(
-                            code::OBJECT_KEY_ORDER,
-                            "对象键未按 UTF-8 字节升序".to_string(),
-                        ))
-                    }
-                }
-                if cmp_key_bytes(source, &left_key, wanted)? == Ordering::Less {
+                    (cmp_key_bytes(source, &left_key, wanted)?, None)
+                } else {
+                    cmp_branch_keys_and_wanted(
+                        source,
+                        &left_key,
+                        &right_key,
+                        wanted,
+                        matches!(right_node, SeqNode::Leaf(_)),
+                    )?
+                };
+                if left_vs_wanted == Ordering::Less {
                     branches.push(BranchFrame {
                         n,
                         left,
                         right,
                         went_left: false,
                     })?;
-                    digest = right;
+                    if !preserve && matches!(right_node, SeqNode::Leaf(_)) {
+                        if let Some(rv) = right_vs_wanted {
+                            return Ok(match rv {
+                                Ordering::Equal => Some((branches, right_key, right_val)),
+                                _ => None,
+                            });
+                        }
+                    }
                     n -= k;
+                    node = if preserve {
+                        read_seq_node(source, &right, n)?
+                    } else {
+                        right_node
+                    };
                 } else {
                     branches.push(BranchFrame {
                         n,
@@ -1499,8 +1654,18 @@ fn find_field_optional(
                         right,
                         went_left: true,
                     })?;
-                    digest = left;
+                    if !preserve && matches!(left_node, SeqNode::Leaf(_)) {
+                        return Ok(match left_vs_wanted {
+                            Ordering::Equal => Some((branches, left_key, left_val)),
+                            _ => None,
+                        });
+                    }
                     n = k;
+                    node = if preserve {
+                        read_seq_node(source, &left, n)?
+                    } else {
+                        left_node
+                    };
                 }
             }
         }
@@ -1531,31 +1696,44 @@ fn cmp_key_bytes(
     wanted: &[u8],
 ) -> Result<Ordering, CodecError> {
     let (bytes_root, declared) = read_string_header(source, key)?;
+    if declared <= CHUNK_BYTES as u64 && source.work_budget().is_none() {
+        let (st, sbody) = source.read(&bytes_root)?;
+        if st == tag::SEQ_EMPTY {
+            if !sbody.is_empty() {
+                return Err(body_shape_error(st, &sbody, "空序列 body 必须为空"));
+            }
+            if declared != 0 {
+                return Err(byte_extent_error(0, declared));
+            }
+            return Ok(if wanted.is_empty() {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            });
+        }
+        if st == tag::SEQ_LEAF && sbody.len() == 32 {
+            let leaf = digest_at(&sbody, 0);
+            let (lt, chunk) = source.read(&leaf)?;
+            check_chunk(lt, &chunk)?;
+            return cmp_single_chunk_vs_wanted(&chunk, declared, wanted);
+        }
+    }
     let mut iter = LeafIter::new(bytes_root, source.work_budget().as_ref())?;
     let mut pos = 0usize;
     let mut total: u64 = 0;
     while let Some((lt, _leaf, chunk)) = iter.next_context(source)? {
-        if lt != tag::BYTES_CHUNK {
-            return Err(byte_chunk_shape_error(format!(
-                "字节序列的叶必须是 0x10 块节点，读到 tag={lt:02x}"
-            )));
-        }
-        if chunk.is_empty() || chunk.len() > CHUNK_BYTES {
-            return Err(byte_chunk_shape_error(format!(
-                "块长度 {} 必须落在 1..=4096",
-                chunk.len()
-            )));
-        }
+        check_chunk(lt, &chunk)?;
         total += chunk.len() as u64;
-        for &byte in chunk.iter() {
-            if pos == wanted.len() {
-                return Ok(Ordering::Greater);
-            }
-            match byte.cmp(&wanted[pos]) {
-                Ordering::Equal => pos += 1,
-                other => return Ok(other),
-            }
+        let rem = &wanted[pos..];
+        let common = chunk.len().min(rem.len());
+        match chunk[..common].cmp(&rem[..common]) {
+            Ordering::Equal => {}
+            other => return Ok(other),
         }
+        if chunk.len() > rem.len() {
+            return Ok(Ordering::Greater);
+        }
+        pos += common;
     }
     if total != declared {
         return Err(byte_extent_error(total, declared));
