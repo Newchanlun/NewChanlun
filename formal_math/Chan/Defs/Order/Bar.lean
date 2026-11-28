@@ -8,8 +8,7 @@ namespace Chan.Defs.Order
 
 variable {P Q : Type _} [LinearOrder P] [LinearOrder Q]
 
-/-- K 线只保留精确的闭区间；单价区间也合法。
-[018:24] 则，中枢的区间就是（max（a2,b2,c2），min（a1,b1,c1））而实际上用目测就可以，不用这么复杂。 -/
+/-- K 线只保留精确的闭区间；单价区间也合法。 -/
 structure Bar (P : Type _) [LinearOrder P] where
   lo : P
   hi : P

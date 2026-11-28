@@ -27,8 +27,7 @@ structure OrderEmb (P Q : Type _) [LinearOrder P] [LinearOrder Q] where
 def OrderEmb.strict (f : P → Q) (h : StrictMono f) : OrderEmb P Q :=
   ⟨f, fun _ _ => h.le_iff_le⟩
 
-/-- 两端各取一次像，不添加任何价格。
-[018:24] 则，中枢的区间就是（max（a2,b2,c2），min（a1,b1,c1））而实际上用目测就可以，不用这么复杂。 -/
+/-- 两端各取一次像，不添加任何价格。 -/
 def mapBarEmb (f : OrderEmb P Q) (b : Bar P) : Bar Q :=
   ⟨f.apply b.lo, f.apply b.hi, (f.le_iff _ _).2 b.ordered⟩
 

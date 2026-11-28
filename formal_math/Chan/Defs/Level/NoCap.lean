@@ -17,10 +17,10 @@ variable {P : Type _} [LinearOrder P]
 def completesUncapped (xs : List (Seg P)) (i j : Nat) : Bool :=
   match firstSeedFrom xs i with
   | none => false
-  | some seed => match Center.window? xs seed j with
-    | none => false
-    | some z => z.destroyed xs ||
+  | some seed => (thirdEventEnd? xs seed == some j) ||
+      (Center.window? xs seed j).any (fun z =>
         (List.range (xs.length + 1)).any (fun stop => returningCenter xs z stop false)
+      )
 
 /-- 不设上限的块语言，与九段实例共享几何判定而不共享进位阈值。
 [018:40] 例如一个盘整，三个重叠的连续次级别走势类型后，盘整就可以随时完成，也就是说，只要三个重叠的连续次级别走势类型走出来后，盘整随时结束都是完美的，但这可以不结束，可以不断延伸下去，不断围绕这缠中说禅中枢上上下下地延伸下去直到无穷都是可以的。

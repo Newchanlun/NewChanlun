@@ -42,8 +42,7 @@ structure Seg (P : Type _) [LinearOrder P] where
   source : Span
   deriving DecidableEq
 
-/-- 反序只改变方向与价格区间，不改变来源。
-[020:58] 缠中说禅走势中枢中心定理二：前后同级别的两个缠中说禅走势中枢，后GG<前DD，等价于下跌及其延续；后DD>前GG等价于上涨及其延续。后ZG<前ZD且后GG>=前DD，或后ZD>前ZG且后DD=<前GG，则等价于形成高级别的走势中枢。 -/
+/-- 反序只改变方向与价格区间，不改变来源。 -/
 def dualSeg (s : Seg P) : Seg (OrderDual P) :=
   ⟨s.dir.flip, dualBar s.range, s.source⟩
 
@@ -59,8 +58,7 @@ structure AltSeq (P : Type _) [LinearOrder P] where
   alternating : items.IsChain (fun a b => a.dir ≠ b.dir)
   deriving DecidableEq
 
-/-- 整条序列同时取对偶，顺序不变。
-[020:58] 缠中说禅走势中枢中心定理二：前后同级别的两个缠中说禅走势中枢，后GG<前DD，等价于下跌及其延续；后DD>前GG等价于上涨及其延续。后ZG<前ZD且后GG>=前DD，或后ZD>前ZG且后DD=<前GG，则等价于形成高级别的走势中枢。 -/
+/-- 整条序列同时取对偶，顺序不变。 -/
 def dualAltSeq (s : AltSeq P) : AltSeq (OrderDual P) :=
   ⟨s.items.map dualSeg, List.isChain_map_of_isChain dualSeg (by
     intro a b h

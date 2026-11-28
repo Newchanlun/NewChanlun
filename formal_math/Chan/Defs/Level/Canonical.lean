@@ -19,6 +19,13 @@ def ValidDecomp (t : LevelTower r dir base) : Bool :=
     (cuts.zip cuts.tail).zipIdx.all fun p =>
       (r.rank entry.2 stage.items (cuts.take p.2).reverse p.1.1 p.1.2).isSome
 
+/-- 固定基底、规则和方向策略时，合法性只由各层切点决定。 -/
+theorem validDecomp_eq_of_sameCuts (a b : LevelTower r dir base)
+    (h : a.sameCuts b) : ValidDecomp a = ValidDecomp b := by
+  unfold LevelTower.sameCuts at h
+  unfold ValidDecomp LevelTower.stages?
+  rw [h]
+
 /-- 规范要求每层按规则择优、局部定尾且穷尽；最高层也不能再从起点成块。
 [038:18] 显然，一个好的分解，其分解规则下，必须保证分解的唯一性，否则这种分解就绝对不可能是好的分解。
 [099:26] 如果后面包括d+e+f延伸出9段，然后又直接上去了，划分中，必须首先保证5分钟中枢的成立。换言之，划分的原则很明确，就是必须保证中枢的确立，在这前提下，可以根据结合律，使得连接中枢的走势保持最完美的形态。 -/
@@ -30,6 +37,13 @@ def IsLocalCanonical (t : LevelTower r dir base) : Bool :=
       DeterministicBlocks r entry.2 entry.1.1.items entry.1.2) &&
       (List.range top.items.length).all
         (fun i => (r.ends levels.length top.items [] i).isEmpty)
+
+/-- 固定基底、规则和方向策略时，局部规范性也只由各层切点决定。 -/
+theorem isLocalCanonical_eq_of_sameCuts (a b : LevelTower r dir base)
+    (h : a.sameCuts b) : IsLocalCanonical a = IsLocalCanonical b := by
+  unfold LevelTower.sameCuts at h
+  unfold IsLocalCanonical LevelTower.stages?
+  rw [h]
 
 /-- 默认规范是局部声明；全局结合律偏好由 #2296（needs-fable）另定。
 

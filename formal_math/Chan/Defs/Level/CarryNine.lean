@@ -55,6 +55,21 @@ def nineAt (xs : List (Seg P)) (i : Nat) : Bool :=
     | some a, some b, some c => decide (overlapsList a.range [b.range,c.range])
     | _, _, _ => false
 
+/-- 前枢的触核延伸结束后，沿同一个核找首次严格回试破坏。
+连续离开计入块内，跳空离开从下一块起算。 -/
+def thirdEventEnd? (xs : List (Seg P)) (seed : Nat) : Option Nat := do
+  let z ← Center.window? xs seed (seed + extRun xs seed)
+  let next ← xs[z.stop]?
+  if decide (z.extendsWith next) then none else
+    let start := z.stop - 1
+    ((List.range (xs.length - (start + 1))).map (start + ·)).findSome? fun k => do
+      let leave ← xs[k]?
+      let back ← xs[k+1]?
+      let (third, gap) := match leave.dir with
+        | .up => (decide (z.thirdBuyEvent leave back), decide (z.leavesUp leave))
+        | .down => (decide (z.thirdSellEvent leave back), decide (z.leavesDown leave))
+      if third then some (if gap then k else k + 1) else none
+
 /-- 离开后的第一个新枢起点；允许以回试段作为第一成核段。
 不等待第三类事件时，仍须先走完前枢的触核延伸。 -/
 def firstReturnFrom (xs : List (Seg P)) (z : Center P) (requireThird : Bool) : Option Nat :=
@@ -129,7 +144,7 @@ def carryClass (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j 
       | some z, some leave => if decide (¬ z.extendsWith leave) then some 0 else none
       | _, _ => none
     | .thirdEvent =>
-      if (Center.window? xs seed j).any (fun z => z.destroyed xs) then some 0 else none
+      if thirdEventEnd? xs seed == some j then some 0 else none
 
 /-- 优先确立的升级占优；其他升级和普通成块仍可作为合法分解。 -/
 def carryScore (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat :=
