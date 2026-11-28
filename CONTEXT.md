@@ -494,3 +494,12 @@ _Avoid_: 裸称 epoch；因写者换代而改写来源纪元
 **结构代（Structure Generation）**（同上）:
 S 的发布代整数 `structure_generation`，对应结构切面 `structure_cut = cut-{gen}`；只与 S 的 generation 比较，不与 B/E/X 的 `commit_seq` 互比。
 _Avoid_: 称作代际（代际是声部嵌套代数 n）；把域提交切面 `cut` 与 `structure_cut` 合成一个字段
+
+### 账本与部署
+
+**部署位置（Deployment Location）**（[#2127](https://github.com/Newchanlun/NewChanlun/issues/2127)，[ADR 0038](docs/adr/0038-dual-run-determinism-recovery-seek-asknown.md#修订2127部署位置与双跑身份)）:
+本机运行目录、库/锁、Unix socket、Voice 证据文件及 cap 签署原件的定位。它参与合法启动、端点归属和取证，不是账本事实或会话身份；新格式的业务原件和根不依赖它。旧格式已承诺的路径按原版本保留和验证。
+_Avoid_: 把本机 socket 路径叫场所 `endpoint`；把改部署位置叫改会话身份；把路径从导出删掉当作修好了提交根。
+
+**非语义运行标签（Non-semantic Run Label）**（同上）:
+验收夹具报告头的 `run_id`，由验收方在双跑启动前冻结，只在报告头按一一映射对应。业务会话 ID、代际和原始提交根不随标签改名。
