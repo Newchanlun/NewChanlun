@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,26 +14,42 @@ const loader = import.meta.resolve("tsx");
 const identity = codeIdentity();
 /** 子进程里 receipt 核对用的是真实 checkout 身份；.sandcastle 有未提交改动时精确 head 不成立，该类用例只在干净提交上跑。 */
 const dirtySkip = identity.dirty ? ".sandcastle 有未提交改动，receipt 不精确（提交后重跑）" : false;
-function fixture(t: { after: (fn: () => void) => void }, conflict = false, runId = "precheck") {
-  const root = mkdtempSync(join(tmpdir(), "nc-precheck-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const repo = join(root, "repo"); const bin = join(root, "bin");
-  mkdirSync(repo); mkdirSync(bin);
-  const calls = join(root, "calls");
-  for (const name of ["docker", "gh", "codex"]) {
-    const path = join(bin, name);
-    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${name}' >> "$PROBE_CALLS"\nif [ '${name}' = docker ] && [ "$PROBE_NAMESPACE_OK" = 1 ]; then\n  case "$*" in *'--entrypoint sh'*) printf '%s\\n' 'apparmor=docker-default (enforce)' 'seccomp=2' 'capEff=0000000000000000' 'capBnd=00000000a80425fb' 'roWrite=touch: Read-only file system' 'rwWrite=ok' 'roChildInRw=Read-only file system' 'roFileAppend=Read-only file system' 'renameMountpoint=Device or resource busy' 'hardlinkAcross=Invalid cross-device link' 'symlinkIntoRo=Read-only file system'; exit 0 ;; esac\nfi\nexit 42\n`);
-    chmodSync(path, 0o755);
-  }
-  // #1742 旧入口准入替身：记录 drain-control 请求，不触碰本机生产冻结根；PROBE_FROZEN=1 模拟已冻结。
-  const drainCalls = join(root, "drain-calls");
-  writeFileSync(join(bin, "python3"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PROBE_DRAIN"\nif [ "$PROBE_FROZEN" = 1 ]; then echo frozen; exit 75; fi\necho admitted\ncat >/dev/null\n`);
-  chmodSync(join(bin, "python3"), 0o755);
+
+interface SeedInput {
+  issue: number;
+  branch: string;
+  sha: string;
+  acceptance: { head: string; status: "accepted"; reviewEvidence: string; verificationEvidence: string };
+}
+interface SeedTemplate {
+  repo: string;
+  base: string;
+  inputs: SeedInput[];
+}
+
+const seedRoot = mkdtempSync(join(tmpdir(), "nc-precheck-seed-"));
+const seedBin = join(seedRoot, "bin");
+mkdirSync(seedBin);
+for (const name of ["docker", "gh", "codex"]) {
+  const path = join(seedBin, name);
+  writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${name}' >> "$PROBE_CALLS"\nif [ '${name}' = docker ] && [ "$PROBE_NAMESPACE_OK" = 1 ]; then\n  case "$*" in *'--entrypoint sh'*) printf '%s\\n' 'apparmor=docker-default (enforce)' 'seccomp=2' 'capEff=0000000000000000' 'capBnd=00000000a80425fb' 'roWrite=touch: Read-only file system' 'rwWrite=ok' 'roChildInRw=Read-only file system' 'roFileAppend=Read-only file system' 'renameMountpoint=Device or resource busy' 'hardlinkAcross=Invalid cross-device link' 'symlinkIntoRo=Read-only file system'; exit 0 ;; esac\nfi\nexit 42\n`);
+  chmodSync(path, 0o755);
+}
+// #1742 旧入口准入替身：记录 drain-control 请求，不触碰本机生产冻结根；PROBE_FROZEN=1 模拟已冻结。
+writeFileSync(join(seedBin, "python3"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PROBE_DRAIN"\nif [ "$PROBE_FROZEN" = 1 ]; then echo frozen; exit 75; fi\necho admitted\ncat >/dev/null\n`);
+chmodSync(join(seedBin, "python3"), 0o755);
+
+const seedTemplates = new Map<boolean, SeedTemplate>();
+function getSeed(conflict: boolean): SeedTemplate {
+  const cached = seedTemplates.get(conflict);
+  if (cached) return cached;
+  const repo = join(seedRoot, conflict ? "repo-conflict" : "repo-clean");
+  mkdirSync(repo);
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" }).trim();
   git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
   writeFileSync(join(repo, "doc.md"), "base\n"); git("add", "."); git("commit", "-m", "base");
   const base = git("rev-parse", "HEAD");
-  const inputs = [1, 2].map(issue => {
+  const inputs: SeedInput[] = [1, 2].map(issue => {
     git("checkout", "-b", `sandcastle/issue-${issue}`, base);
     writeFileSync(join(repo, conflict ? "doc.md" : `doc${issue}.md`), `issue ${issue}\n`);
     git("add", "."); git("commit", "-m", `issue ${issue}`); const sha = git("rev-parse", "HEAD");
@@ -41,13 +57,44 @@ function fixture(t: { after: (fn: () => void) => void }, conflict = false, runId
       acceptance: { head: sha, status: "accepted", reviewEvidence: "fixture-review", verificationEvidence: "fixture-validation" } };
   });
   git("checkout", "main");
+  const built: SeedTemplate = { repo, base, inputs };
+  seedTemplates.set(conflict, built);
+  return built;
+}
+
+after(() => { rmSync(seedRoot, { recursive: true, force: true }); });
+
+function runCli(args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, args, { cwd: opts.cwd, encoding: "utf8", timeout: 30_000, env: opts.env }, (err, stdout, stderr) => {
+      if (!err) return resolve({ status: 0, stdout, stderr });
+      const e = err as NodeJS.ErrnoException & { code?: number | string; killed?: boolean };
+      if (typeof e.code === "number") return resolve({ status: e.code, stdout, stderr });
+      if (e.killed) return resolve({ status: null, stdout, stderr });
+      reject(err);
+    });
+  });
+}
+
+function fixture(t: { after: (fn: () => void) => void }, conflict = false, runId = "precheck") {
+  const seed = getSeed(conflict);
+  const root = mkdtempSync(join(tmpdir(), "nc-precheck-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = join(root, "repo"); const bin = join(root, "bin");
+  cpSync(seed.repo, repo, { recursive: true });
+  cpSync(seedBin, bin, { recursive: true });
+  const calls = join(root, "calls");
+  const drainCalls = join(root, "drain-calls");
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" }).trim();
+  const base = seed.base;
+  const inputs = seed.inputs;
   const manifest = { runId, branch: `sandcastle/merge-${runId}`, base, inputs };
   const path = join(root, "accepted.json"); writeFileSync(path, JSON.stringify(manifest));
   const worktree = join(repo, `.sandcastle/worktrees/sandcastle-merge-${runId}`);
   const checkpoint = join(repo, `.sandcastle/logs/merges/${runId}/checkpoint.json`);
   const acceptance = join(root, "accept"); // 进程内注入的验收目录（生产路径固定在账号主目录，子进程 HOME 重定向会被拒绝）
-  const run = (accepted = true, namespaceReady = false, frozen = false, row?: "13" | "14" | "15", extra: Record<string, string> = {}) => spawnSync(process.execPath, ["--import", loader, entry], {
-    cwd: repo, encoding: "utf8", timeout: 30_000,
+  const run = (accepted = true, namespaceReady = false, frozen = false, row?: "13" | "14" | "15", extra: Record<string, string> = {}) => runCli(["--import", loader, entry], {
+    cwd: repo,
     env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, PROBE_CALLS: calls,
       PROBE_DRAIN: drainCalls, PROBE_FROZEN: frozen ? "1" : "0",
       PROBE_NAMESPACE_OK: namespaceReady ? "1" : "0", CLIPROXY_LOCAL_KEY: "fixture-no-network",
@@ -72,89 +119,91 @@ function fixture(t: { after: (fn: () => void) => void }, conflict = false, runId
   return { root, repo, git, base, inputs, manifest, run, merge, called, drained, checkpoint, worktree, issue, acceptance };
 }
 
-test("#1867 公共 CLI：冻结时普通 swarm 与旧受控第 13 行调用都以 75 退出，在读队列、planner、预检、消费、gh 之前停止", t => {
-  const cases: Record<string, string>[] = [{}, { SANDCASTLE_DOCKER_ACCEPTANCE_ROW: "13", SANDCASTLE_DOCKER_ACCEPTANCE_TICKET: "4242" }];
-  for (const extra of cases) {
+describe("swarm-precheck-cli", { concurrency: 4 }, () => {
+  test("#1867 公共 CLI：冻结时普通 swarm 与旧受控第 13 行调用都以 75 退出，在读队列、planner、预检、消费、gh 之前停止", async t => {
+    const cases: Record<string, string>[] = [{}, { SANDCASTLE_DOCKER_ACCEPTANCE_ROW: "13", SANDCASTLE_DOCKER_ACCEPTANCE_TICKET: "4242" }];
+    await Promise.all(cases.map(async extra => {
+      const f = fixture(t);
+      const result = await f.run(false, true, true, undefined, extra);
+      assert.equal(result.status, 75, result.stderr);
+      assert.match(result.stdout + result.stderr, /冻结拒绝/);
+      assert.doesNotMatch(result.stdout, /All done/);
+      assert.deepEqual(f.called(), [], "没有 docker/gh/codex 调用");
+      assert.deepEqual(f.drained().filter(l => / hold /.test(l)).length, 1);
+      assert.equal(existsSync(join(f.root, ".sandcastle-host")), false, "没有验收状态写入");
+      assert.equal(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1);
+    }));
+  });
+
+  test("#1867 公共 CLI：冻结时空主控计划也以 75 退出，不读队列不认领", async t => {
     const f = fixture(t);
-    const result = f.run(false, true, true, undefined, extra);
+    const plan = join(f.root, "plan.json"); writeFileSync(plan, JSON.stringify({ queue: [], issues: [] }));
+    const result = await f.run(false, false, true, undefined, { SANDCASTLE_SWARM_PLAN: plan });
     assert.equal(result.status, 75, result.stderr);
-    assert.match(result.stdout + result.stderr, /冻结拒绝/);
-    assert.doesNotMatch(result.stdout, /All done/);
-    assert.deepEqual(f.called(), [], "没有 docker/gh/codex 调用");
-    assert.deepEqual(f.drained().filter(l => / hold /.test(l)).length, 1);
-    assert.equal(existsSync(join(f.root, ".sandcastle-host")), false, "没有验收状态写入");
+    assert.deepEqual(f.called(), [], "冻结时不读业务队列");
+  });
+
+  test("公共 CLI：Docker 不可用时无冲突 accepted 清单完成双父归并及幂等重入", async t => {
+    const f = fixture(t);
+    const first = await f.run();
+    assert.equal(first.status, 0, first.stderr);
+    const state = JSON.parse(readFileSync(f.checkpoint, "utf8"));
+    assert.equal(state.phase, "done"); assert.equal(state.position, 2);
+    assert.equal(state.entries.length, 2); assert.equal(state.checks.length, 2);
+    assert.equal(f.git("rev-parse", "main"), f.base);
+    let parent = f.base;
+    for (const [n, e] of state.entries.entries()) {
+      assert.equal(f.git("show", "-s", "--format=%P", e.head), `${parent} ${f.inputs[n]!.sha}`);
+      parent = e.head;
+    }
+    const before = readFileSync(f.checkpoint, "utf8");
+    const again = await f.run(); assert.equal(again.status, 0, again.stderr);
+    assert.equal(readFileSync(f.checkpoint, "utf8"), before);
+    assert.deepEqual(f.called(), []);
+    // 新归并在固定生产冻结根取一次准入；已存在的归并工位属已准入 run，重入不再申请。
+    const holds = f.drained().filter(l => / hold /.test(l));
+    assert.equal(holds.length, 1);
+    assert.match(holds[0]!, / hold --root \/Volumes\/AgentStorage\/newchanlun-legacy-drain$/);
+    assert.ok(f.drained().filter(l => !/ hold /.test(l)).every(l => / lock --path \S+\/sandcastle-worktree-init\.lock$/.test(l)));
+  });
+
+  test("公共 CLI：旧入口已冻结时新 accepted 清单退出 75，不建归并工位、检查点或分支", async t => {
+    const f = fixture(t);
+    const result = await f.run(true, false, true);
+    assert.equal(result.status, 75, result.stderr); assert.match(result.stderr, /旧入口已冻结/);
+    assert.equal(existsSync(f.checkpoint), false); assert.equal(existsSync(f.worktree), false);
+    assert.equal(f.git("branch", "--list", "sandcastle/merge-precheck"), "");
+    assert.equal(f.git("rev-parse", "main"), f.base);
+    assert.deepEqual(f.called(), []);
+  });
+
+  test("公共 CLI：冲突时 Docker 预检失败，保留 MERGE_HEAD/checkpoint 且不启动工蜂", async t => {
+    const f = fixture(t, true);
+    const first = await f.run();
+    assert.equal(first.status, 1); assert.match(first.stderr, /尚无精确验收 receipt.*未声明受控验收行/);
+    assert.ok(existsSync(f.checkpoint), "须在冲突现场检查准入，而不是入口直接拒绝");
+    const before = readFileSync(f.checkpoint, "utf8"); const state = JSON.parse(before);
+    assert.equal(state.phase, "conflict"); assert.equal(state.position, 1);
+    assert.deepEqual(state.allowed, ["doc.md"]);
+    assert.equal(state.snapshot.mergeHead, f.inputs[1]!.sha);
+    assert.equal(execFileSync("git", ["rev-parse", "MERGE_HEAD"], { cwd: f.worktree, encoding: "utf8" }).trim(), f.inputs[1]!.sha);
+    const conflict = readFileSync(join(f.worktree, "doc.md"), "utf8"); assert.match(conflict, /<<<<<<< HEAD/);
+    assert.equal(f.git("rev-parse", "main"), f.base);
+    assert.deepEqual(f.called(), [], "无 receipt 时不得为观测而启动任何容器");
+    const again = await f.run(); assert.equal(again.status, 1); assert.match(again.stderr, /尚无精确验收 receipt/);
+    assert.equal(readFileSync(f.checkpoint, "utf8"), before);
+    assert.equal(readFileSync(join(f.worktree, "doc.md"), "utf8"), conflict);
+    assert.deepEqual(f.called(), []);
+  });
+
+  test("公共 CLI：普通 swarm 在 planner/claim 前无 receipt 即拒绝，不启动容器", async t => {
+    const f = fixture(t); const result = await f.run(false);
+    assert.equal(result.status, 1); assert.match(result.stderr, /尚无精确验收 receipt/);
+    assert.deepEqual(f.called(), []);
+    assert.equal(existsSync(f.checkpoint), false);
     assert.equal(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1);
-  }
-});
-
-test("#1867 公共 CLI：冻结时空主控计划也以 75 退出，不读队列不认领", t => {
-  const f = fixture(t);
-  const plan = join(f.root, "plan.json"); writeFileSync(plan, JSON.stringify({ queue: [], issues: [] }));
-  const result = f.run(false, false, true, undefined, { SANDCASTLE_SWARM_PLAN: plan });
-  assert.equal(result.status, 75, result.stderr);
-  assert.deepEqual(f.called(), [], "冻结时不读业务队列");
-});
-
-test("公共 CLI：Docker 不可用时无冲突 accepted 清单完成双父归并及幂等重入", t => {
-  const f = fixture(t);
-  const first = f.run();
-  assert.equal(first.status, 0, first.stderr);
-  const state = JSON.parse(readFileSync(f.checkpoint, "utf8"));
-  assert.equal(state.phase, "done"); assert.equal(state.position, 2);
-  assert.equal(state.entries.length, 2); assert.equal(state.checks.length, 2);
-  assert.equal(f.git("rev-parse", "main"), f.base);
-  let parent = f.base;
-  for (const [n, e] of state.entries.entries()) {
-    assert.equal(f.git("show", "-s", "--format=%P", e.head), `${parent} ${f.inputs[n]!.sha}`);
-    parent = e.head;
-  }
-  const before = readFileSync(f.checkpoint, "utf8");
-  const again = f.run(); assert.equal(again.status, 0, again.stderr);
-  assert.equal(readFileSync(f.checkpoint, "utf8"), before);
-  assert.deepEqual(f.called(), []);
-  // 新归并在固定生产冻结根取一次准入；已存在的归并工位属已准入 run，重入不再申请。
-  const holds = f.drained().filter(l => / hold /.test(l));
-  assert.equal(holds.length, 1);
-  assert.match(holds[0]!, / hold --root \/Volumes\/AgentStorage\/newchanlun-legacy-drain$/);
-  assert.ok(f.drained().filter(l => !/ hold /.test(l)).every(l => / lock --path \S+\/sandcastle-worktree-init\.lock$/.test(l)));
-});
-
-test("公共 CLI：旧入口已冻结时新 accepted 清单退出 75，不建归并工位、检查点或分支", t => {
-  const f = fixture(t);
-  const result = f.run(true, false, true);
-  assert.equal(result.status, 75, result.stderr); assert.match(result.stderr, /旧入口已冻结/);
-  assert.equal(existsSync(f.checkpoint), false); assert.equal(existsSync(f.worktree), false);
-  assert.equal(f.git("branch", "--list", "sandcastle/merge-precheck"), "");
-  assert.equal(f.git("rev-parse", "main"), f.base);
-  assert.deepEqual(f.called(), []);
-});
-
-test("公共 CLI：冲突时 Docker 预检失败，保留 MERGE_HEAD/checkpoint 且不启动工蜂", t => {
-  const f = fixture(t, true);
-  const first = f.run();
-  assert.equal(first.status, 1); assert.match(first.stderr, /尚无精确验收 receipt.*未声明受控验收行/);
-  assert.ok(existsSync(f.checkpoint), "须在冲突现场检查准入，而不是入口直接拒绝");
-  const before = readFileSync(f.checkpoint, "utf8"); const state = JSON.parse(before);
-  assert.equal(state.phase, "conflict"); assert.equal(state.position, 1);
-  assert.deepEqual(state.allowed, ["doc.md"]);
-  assert.equal(state.snapshot.mergeHead, f.inputs[1]!.sha);
-  assert.equal(execFileSync("git", ["rev-parse", "MERGE_HEAD"], { cwd: f.worktree, encoding: "utf8" }).trim(), f.inputs[1]!.sha);
-  const conflict = readFileSync(join(f.worktree, "doc.md"), "utf8"); assert.match(conflict, /<<<<<<< HEAD/);
-  assert.equal(f.git("rev-parse", "main"), f.base);
-  assert.deepEqual(f.called(), [], "无 receipt 时不得为观测而启动任何容器");
-  const again = f.run(); assert.equal(again.status, 1); assert.match(again.stderr, /尚无精确验收 receipt/);
-  assert.equal(readFileSync(f.checkpoint, "utf8"), before);
-  assert.equal(readFileSync(join(f.worktree, "doc.md"), "utf8"), conflict);
-  assert.deepEqual(f.called(), []);
-});
-
-test("公共 CLI：普通 swarm 在 planner/claim 前无 receipt 即拒绝，不启动容器", t => {
-  const f = fixture(t); const result = f.run(false);
-  assert.equal(result.status, 1); assert.match(result.stderr, /尚无精确验收 receipt/);
-  assert.deepEqual(f.called(), []);
-  assert.equal(existsSync(f.checkpoint), false);
-  assert.equal(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1);
-  assert.equal(f.git("rev-parse", "main"), f.base);
+    assert.equal(f.git("rev-parse", "main"), f.base);
+  });
 });
 
 test("冲突入口：观测全部成立但无 receipt 或未声明验收行仍 FAIL-loud；预检失败不烧受控行（无 used/resume）", { skip: dirtySkip }, async t => {
