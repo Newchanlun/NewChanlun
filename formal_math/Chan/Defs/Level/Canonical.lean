@@ -6,8 +6,9 @@ public import Chan.Defs.Level.Tower
 
 namespace Chan.Defs.Level
 
-open Chan.Defs.Alt
-variable {P : Type _} [LinearOrder P] {r : BlockRule} {dir : CoarseDirPolicy P} {base : AltSeq P}
+open Chan.Defs.Alt Chan.Defs.Path
+universe u
+variable {P : Type u} [LinearOrder P] {r : BlockRule} {dir : CoarseDirPolicy} {base : AltSeq P}
 
 /-- 同一底层可有多条合法切点链；逐层检查每对相邻切点划出的连续块属于块语言。
 [057:40] 当行情走到6点时，34、45、56这三段，就可以看成是一个1分钟中枢了，当然，这种分法和原来[4087，4122]中枢的分解不同，但站在多义性的角度，这是绝对符合结合律的，当然是一个分解的方法。 -/
@@ -45,30 +46,47 @@ theorem isLocalCanonical_eq_of_sameCuts (a b : LevelTower r dir base)
   unfold IsLocalCanonical LevelTower.stages?
   rw [h]
 
-/-- 默认规范是局部声明；全局结合律偏好由 #2296（needs-fable）另定。
+/-- #2320 裁定二：规范分解固定采用逐层局部占优；在线确认只对此层定义。
 
 [038:18] 显然，一个好的分解，其分解规则下，必须保证分解的唯一性，否则这种分解就绝对不可能是好的分解。
 [099:22] 另外，根据结合律，连接中枢的走势，并不一定是完全的趋势类型，也就是说，一个线段类上涨后，可能第二类类中枢就消融在中阴状态的那个中枢里了。也就是说，a+b+c+d+e+f= a+b+c+（d+e+f），a+b+c+d+e是一个线段类上涨，c+d+e的重合部分构成最后的一个类中枢，f是类背驰后的回调，这时候，就可以马上构成一个1分钟的中枢，然后后面直接继续上涨，构成1分钟的上涨是完全合理的。因为，最终的划分，就必须把a+b+c+d+e给拆开了。
 -/
 abbrev IsCanonical (t : LevelTower r dir base) : Bool := IsLocalCanonical t
 
-/-- 全局规范：塔合法，且在合法分解中没有严格更优者；偏好关系由调用方提供。
+/-- 固定输入上的重组偏好。两个候选都只以原始切点表表示，不传塔或证书。 -/
+abbrev GlobalPref := List (List Nat) → List (List Nat) → Prop
+
+/-- 跨输入的偏好族须保序、镜像等变，且在每个输入上是严格偏序。不要求全序。 -/
+structure GlobalPrefLaws
+    (onBase : {A : Type u} → [LinearOrder A] → AltSeq A → GlobalPref) : Prop where
+  orderInvariant : ∀ {A B : Type u} [LinearOrder A] [LinearOrder B]
+    (f : OrderEmb A B) (s : AltSeq A) (a b : List (List Nat)),
+    onBase (s.mapEmb f) a b ↔ onBase s a b
+  mirrorEquivariant : ∀ {A : Type u} [LinearOrder A]
+    (s : AltSeq A) (a b : List (List Nat)), onBase (dualAltSeq s) a b ↔ onBase s a b
+  irrefl : ∀ {A : Type u} [LinearOrder A] (s : AltSeq A) (a : List (List Nat)), ¬ onBase s a a
+  trans : ∀ {A : Type u} [LinearOrder A] (s : AltSeq A) (a b c : List (List Nat)),
+    onBase s a b → onBase s b c → onBase s a c
+
+/-- 在合法分解中没有严格更优的切点表。调用方按 `GlobalPrefLaws` 提供偏好。
+所得塔只作跨级结合律重组视图，不产生确认，也不修订已经确认的局部切点。
 
 [099:26] 如果后面包括d+e+f延伸出9段，然后又直接上去了，划分中，必须首先保证5分钟中枢的成立。换言之，划分的原则很明确，就是必须保证中枢的确立，在这前提下，可以根据结合律，使得连接中枢的走势保持最完美的形态。
 -/
-def IsGlobalCanonical (pref : LevelTower r dir base → LevelTower r dir base → Prop)
+def IsGlobalCanonical (pref : GlobalPref)
     (t : LevelTower r dir base) : Prop :=
-  ValidDecomp t = true ∧ ∀ other, ValidDecomp other = true → ¬ pref other t
+  ValidDecomp t = true ∧
+    ∀ other : LevelTower r dir base, ValidDecomp other = true → ¬ pref other.cuts t.cuts
 
 /-- 合法且满足调用方所选声明式规范的塔。
 [038:18] 显然，一个好的分解，其分解规则下，必须保证分解的唯一性，否则这种分解就绝对不可能是好的分解。
 [101:52] 所谓走势必完美，就是本ID所给出的分型、笔、线段、不同级别走势类型所对应的递归函数，能将行情的任何走势唯一地分解。 -/
-abbrev CanonicalDecomp (r : BlockRule) (dir : CoarseDirPolicy P) (base : AltSeq P)
+abbrev CanonicalDecomp (r : BlockRule) (dir : CoarseDirPolicy) (base : AltSeq P)
     (canon : LevelTower r dir base → Prop) :=
   { t : LevelTower r dir base // ValidDecomp t = true ∧ canon t }
 
 /-- 以逐层局部占优和尾部穷尽为规范的合法分解。 -/
-abbrev LocalCanonicalDecomp (r : BlockRule) (dir : CoarseDirPolicy P) (base : AltSeq P) :=
-  CanonicalDecomp r dir base (fun t => IsLocalCanonical t = true)
+abbrev LocalCanonicalDecomp (r : BlockRule) (dir : CoarseDirPolicy) (base : AltSeq P) :=
+  CanonicalDecomp r dir base (fun t => IsCanonical t = true)
 
 end Chan.Defs.Level

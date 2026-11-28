@@ -9,14 +9,14 @@ namespace Chan.Defs.Level
 open Chan.Defs.Order Chan.Defs.Alt Chan.Defs.Center
 variable {P : Type _} [LinearOrder P]
 
-/-- #2296（needs-fable）：九段以前何时允许普通成块。 -/
+/-- #2320 裁定三：九段以前默认在首个脱核段处截块，三段成核档只作对照。 -/
 inductive TimingPolicy where
-  | seeded | coreBroken | thirdEvent
+  | seeded | coreBroken
   deriving DecidableEq
 
-/-- #2296（needs-fable）：进位后重新起核的三种单层口径。 -/
+/-- 进位后从该块的右开边界重新起算，不额外留进入段。 -/
 inductive RestartPolicy where
-  | afterNine | entryAfterCarry | atNextSeed
+  | afterNine
   deriving DecidableEq
 
 /-- 九段前的起核是否必须在独立进入段之后。 -/
@@ -24,7 +24,7 @@ inductive EntryPolicy where
   | mayIncludeFirst | requireEntry
   deriving DecidableEq
 
-/-- 三处未定分支由调用者分别选择；前导搜索可以关闭。
+/-- 进位规则的三轴参数；前导搜索可以关闭。
 
 [057:42] 显然，这10个线段，已经组成了一个更高级别的5分钟中枢，结合方式如下：（12+23+34）+（45+56+67）+（78+89+910），该中枢的区间是[4015，4122]。这一点其实由6这个第三类卖点的存在以及后面的背驰，就可以知道，这中枢级别的扩展，是必然的。
 -/
@@ -34,6 +34,13 @@ structure CarryNineParams where
   entry : EntryPolicy
   searchLead : Bool
   deriving DecidableEq
+
+/-- #2320 冻结默认：单段脱核，九段后重启，可含首段，搜索前导段。 -/
+def CarryNineParams.default : CarryNineParams := ⟨.coreBroken, .afterNine, .mayIncludeFirst, true⟩
+
+/-- 独立进入段若已触核，连续延伸可比九段封顶多一段。 -/
+def CarryNineParams.carryBound (p : CarryNineParams) : Nat :=
+  match p.entry with | .mayIncludeFirst => 9 | .requireEntry => 10
 
 /-- 在不早于 start 的最早位置搜索合法三段成核，不要求前导段本身成核。 -/
 def firstSeedFrom (xs : List (Seg P)) (start : Nat) : Option Nat :=
@@ -49,7 +56,7 @@ def firstSeedFrom (xs : List (Seg P)) (start : Nat) : Option Nat :=
 def nineAt (xs : List (Seg P)) (i : Nat) : Bool :=
   (Center.window? xs i (i+9)).isSome &&
     -- 此处只读凸包，粗化方向不影响三凸包的交。
-    let dir := CoarseDirPolicy.firstSegment (P := P)
+    let dir := CoarseDirPolicy.firstSegment
     match BlockRule.coarsen xs i (i+3) dir, BlockRule.coarsen xs (i+3) (i+6) dir,
           BlockRule.coarsen xs (i+6) (i+9) dir with
     | some a, some b, some c => decide (overlapsList a.range [b.range,c.range])
@@ -83,11 +90,14 @@ def firstBreakOrExpand? (xs : List (Seg P)) (seed : Nat)
     let start := z.stop - 1
     ((List.range (xs.length - start)).map (start + ·)).findSome? fun k => do
       let leave ← xs[k]?
-      let (crosses, gap, third) := match leave.dir with
+      let back ← xs[k+1]?
+      -- 回试起笔确定衔接的离开侧。在底层该侧等于 leave.dir；
+      -- 上层偶数离开块的起笔可能相反。
+      let (crosses, gap, third) := match back.dir.flip with
         | .up => (decide (z.core.hi < leave.range.hi), decide (z.leavesUp leave),
-            (xs[k+1]?).any (fun back => decide (z.thirdBuyEvent leave back)))
+            decide (z.thirdBuyEvent leave back))
         | .down => (decide (leave.range.lo < z.core.lo), decide (z.leavesDown leave),
-            (xs[k+1]?).any (fun back => decide (z.thirdSellEvent leave back)))
+            decide (z.thirdSellEvent leave back))
       let cutEnd := if gap then k else k + 1
       if third then some (cutEnd, hasExpansionAfter xs z k)
       else if !requireThird && crosses && hasExpansionAfter xs z k then some (cutEnd, true)
@@ -100,8 +110,9 @@ def firstOnlineBreakOrExpand? (xs : List (Seg P)) (seed : Nat)
   (List.range (xs.length + 1)).findSome? fun t =>
     firstBreakOrExpand? (xs.take t) seed requireThird
 
-/-- 成核档和触核延伸档保留原途径二：在块尾取证，前后枢各至多九段。 -/
+/-- 途径二在块尾取证，前后枢各至多九段。块尾之后的段不能补造升级证据。 -/
 def earlyTimingPullback (xs : List (Seg P)) (seed j : Nat) : Bool :=
+  let xs := xs.take j
   (List.range 7).any fun extra =>
     match Center.window? xs seed (seed + 3 + extra) with
     | none => false
@@ -116,61 +127,58 @@ def carrySeed? (p : CarryNineParams) (xs : List (Seg P)) (start : Nat) : Option 
   if p.searchLead then firstSeedFrom xs start
   else if (Center.window? xs start (start+3)).isSome then some start else none
 
-/-- 进位块的边界由重启策略决定；等待后核的策略只认第一个后核。 -/
+/-- 九段进位的右开边界；无需等待后核。 -/
 def nineEnd? (p : CarryNineParams) (xs : List (Seg P)) (seed : Nat) : Option Nat :=
   if !nineAt xs seed then none
   else match p.restart with
-  | .afterNine | .entryAfterCarry => some (seed+9)
-  | .atNextSeed => firstSeedFrom xs (seed+9)
+  | .afterNine => some (seed+9)
 
-/-- 从最近块首沿逆序历史还原前块的实际起核搜索位置。若前块以九段进位闭合，
-为当前块留一个进入段；普通入口已要求进入段时不再叠加。 -/
-def carryStart (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i : Nat) : Nat :=
-  if p.entry == .requireEntry then i + 1
-  else match p.restart, past with
-    | .entryAfterCarry, prev :: earlier =>
-      let priorNine := (carrySeed? p xs (carryStart p xs earlier prev)).any fun n =>
-        n + 9 == i && nineAt xs n
-      if priorNine then i + 1 else i
-    | _, _ => i
-termination_by structural past
+/-- 独立进入段不参与首核搜索；入口不依赖前块类别。 -/
+def carryStart (p : CarryNineParams) (i : Nat) : Nat :=
+  if p.entry == .requireEntry then i + 1 else i
 
-/-- 普通块与升级块均可合法。第三类事件档在同一离开切点检查后枢扩展证据。
-九段满足进位几何时，普通块须在九段前结束；三凸包不相交时则继续按普通时机封块。 -/
-def carryClass (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat := do
-  let seed ← carrySeed? p xs (carryStart p xs past i)
+/-- #2320 封顶：延伸满九段必截，三凸包是否相交只决定该块是否升级。
+未满九段时保留途径二，且合并前后枢的块也须满足块内单核延伸界。 -/
+def carryClass (p : CarryNineParams) (xs : List (Seg P)) (_past : List Nat)
+    (i j : Nat) : Option Nat := do
+  let seed ← carrySeed? p xs (carryStart p i)
   if j > xs.length || j < seed + 3 then none else
-    let nineBlocksOrdinary := j ≥ seed + 9 && nineAt xs seed
-    if nineEnd? p xs seed == some j then some 1
+    let cap := seed + 9
+    if cap ≤ j && (Center.window? xs seed cap).isSome then
+      if j != cap then none
+      else if nineEnd? p xs seed == some j then some 1 else some 0
+    else if earlyTimingPullback xs seed j && blockExtWithin p.carryBound (xs.extract i j) then some 1
+    else if cap ≤ j then none
     else match p.timing with
-    | .thirdEvent =>
-      let (cutEnd, expanded) ← firstBreakOrExpand? xs seed true
-      if j != cutEnd then none
-      else if expanded then some 1
-      else if nineBlocksOrdinary then none else some 0
-    | .seeded | .coreBroken =>
-      if earlyTimingPullback xs seed j then some 1
-      else if nineBlocksOrdinary then none
-      else if p.timing == .seeded then
-        if j == seed + 3 then some 0 else none
-      else
+      | .seeded => if j == seed + 3 then some 0 else none
+      | .coreBroken =>
         match Center.window? xs seed j, xs[j]? with
         | some z, some leave => if decide (¬ z.extendsWith leave) then some 0 else none
         | _, _ => none
+
+/-- 块在完整九段处封顶后，后续回拉不能再改写该切点。 -/
+def atCarryCap (p : CarryNineParams) (xs : List (Seg P)) (i j : Nat) : Bool :=
+  (carrySeed? p xs (carryStart p i)).any fun seed =>
+    j == seed + 9 && (Center.window? xs seed j).isSome
 
 /-- 优先确立的升级占优；其他升级和普通成块仍可作为合法分解。 -/
 def carryScore (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat :=
   match carryClass p xs past i j with
   | some 1 => some (if (List.range j).any (fun t => carryClass p xs past i t == some 1) then 1 else 2)
-  | other => other
+  | some 0 => some (if p.timing == .seeded && atCarryCap p xs i j then 1 else 0)
+  | _ => none
 
 /-- 显式选择三处策略；波动回拉和九段路径共享占优次序。
+首个升级和占优的九段封顶块可确认。九段前的普通候选仍可能让位于途径二，不先确认。
 
 [057:42] 显然，这10个线段，已经组成了一个更高级别的5分钟中枢，结合方式如下：（12+23+34）+（45+56+67）+（78+89+910），该中枢的区间是[4015，4122]。这一点其实由6这个第三类卖点的存在以及后面的背驰，就可以知道，这中枢级别的扩展，是必然的。
 [020:44] 缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。
 -/
 def carryNineRule (p : CarryNineParams) : BlockRule where
   rank _ xs past i j := carryScore p xs past i j
-  confirmed _ xs past i j := carryScore p xs past i j == some 2
+  confirmed _ xs past i j :=
+    carryScore p xs past i j == some 2 ||
+      (atCarryCap p xs i j &&
+        !(List.range j).any (fun t => carryClass p xs past i t == some 1))
 
 end Chan.Defs.Level

@@ -52,44 +52,42 @@ def BreakoutRetest (side : Dir) (zone : Bar P) (xs : List (Seg P)) (cut : Nat)
           ahead side exit limit && ahead side (edge side.flip test.range) limit
     | _, _ => false
 
-/-- #2296 / #2322（needs-fable U-2）：一类点离开核或再创新极值。 -/
-inductive FirstExitThreshold where
-  | core | hull
-  deriving DecidableEq
+/-- #2320 裁定四：离开段的实际终点须严格越过核边界，创新极值由力度判定负责。 -/
+def firstExit (z : Center P) (departure : Dir) (lastPrice : P) : Bool :=
+  ahead departure lastPrice (edge departure z.core)
 
 /-- 转折必须是已完成反向趋势的结束切点；最后中枢之后确有 c 段，并由同向比较段检验背驰。
 在 `cut = origin` 处阶段恒为中阴；此处真正的准入约束是结束于该切点的 `Finished` 认证。
 [017:60] 因为某种类型的走势完成以后就会转化为其他类型的走势，对于下跌的走势来说，一旦完成，只能转化为上涨与盘整，因此，一旦能把握下跌走势转化的关节点买入，就在市场中占据了一个最有利的位置，而这个买点，就是前面反复强调的“第一类买点”；
 [053:28] 第一类买卖点，就是该级别的背驰点，这足以应付最大多数的情况，但有一种情况是不可以的，就是前面反复强调的小级别转大级别的情况。 -/
-def firstPoint (d : Decomposition P) (judge : StrengthJudge P) (threshold : FirstExitThreshold)
+def firstPoint (d : Decomposition P) (judge : StrengthJudge P)
     (side : Dir) (cut : Nat) : Bool :=
   let trend := match side with | .up => TrendKind.downtrend | .down => TrendKind.uptrend
   decide (cut = d.origin ∧ phaseAt d cut = some .transition) &&
     d.ledger.completed.any fun b => decide (b.stop = cut ∧ classifyTrend b = some trend) &&
-      match b.centers.reverse, d.steps[cut-1]?, d.prices? (cut-1) with
-      | z :: prev :: _, some c, some (_,lastPrice) =>
-        let exitZone := match threshold with | .core => z.core | .hull => z.zone.hull
-        decide (z.stop < cut ∧ prev.stop < z.start ∧ c.dir = side.flip) &&
-          ahead side.flip lastPrice (edge side.flip exitZone) &&
+      match b.centers.reverse, d.closingDir? (cut-1), d.prices? (cut-1) with
+      | z :: prev :: _, some closing, some (_,lastPrice) =>
+        decide (z.stop < cut ∧ prev.stop < z.start ∧ closing = side.flip) &&
+          firstExit z side.flip lastPrice &&
           (List.range (z.start - prev.stop)).any fun n =>
             let i := prev.stop+n
             (d.steps[i]?).any fun connector =>
-              decide (connector.dir = c.dir) && judge d z i (cut-1)
+              decide (connector.dir = closing) && judge d z i (cut-1)
       | _, _, _ => false
 
 /-- 下跌趋势完成处的一买。
 [017:60] 因为某种类型的走势完成以后就会转化为其他类型的走势，对于下跌的走势来说，一旦完成，只能转化为上涨与盘整，因此，一旦能把握下跌走势转化的关节点买入，就在市场中占据了一个最有利的位置，而这个买点，就是前面反复强调的“第一类买点”；
 [101:20] 第一类买卖点就是背驰点，第三类买卖点就是中枢破坏点，这都是很清楚的。 -/
 def isFirstBuy (d : Decomposition P) (judge : StrengthJudge P)
-    (threshold : FirstExitThreshold) (cut : Nat) :=
-  firstPoint d judge threshold .up cut
+    (cut : Nat) :=
+  firstPoint d judge .up cut
 
 /-- 上涨趋势完成处的一卖。
 [017:70] “缠中说禅趋势转折定律”：任何级别的上涨转折都是由某级别的第一类卖点构成的；任何的下跌转折都是由某级别的第一类买点构成的。
 [101:20] 第一类买卖点就是背驰点，第三类买卖点就是中枢破坏点，这都是很清楚的。 -/
 def isFirstSell (d : Decomposition P) (judge : StrengthJudge P)
-    (threshold : FirstExitThreshold) (cut : Nat) :=
-  firstPoint d judge threshold .down cut
+    (cut : Nat) :=
+  firstPoint d judge .down cut
 
 /-- 最强、次强、较弱；后两类由二类点是否严格优于一类点区分。
 [101:28] 第二类买点刚好构成原来下跌的最后一个中枢开始的震荡走势的第三类买点，也就是第二、三类买点合一了，这是最强的走势，这情况，一般都对应V型反转的快速回升，是最有力度的。
@@ -128,8 +126,8 @@ def thirdGeometry (d : Decomposition P) (side : Dir) (cut : Nat) : Bool :=
 [101:32] 第二类买点跌破第一类买点，也就是第二类买点比第一类买点低，这是完全可以的，这里一般都构成盘整背驰
 [101:38] 这种情况下，第一、二、三买点，是依次向上，一个比一个高。 -/
 def secondStrength? (d : Decomposition P) (judge : StrengthJudge P)
-    (threshold : FirstExitThreshold) (side : Dir) (cut : Nat) : Option SecondStrength := do
-  if cut < 3 || !(firstPoint d judge threshold side (cut-2)) ||
+    (side : Dir) (cut : Nat) : Option SecondStrength := do
+  if cut < 3 || !(firstPoint d judge side (cut-2)) ||
       phaseAt d cut != some .transition then none else
     let rebound ← d.steps[cut-2]?
     let test ← d.steps[cut-1]?
@@ -145,15 +143,15 @@ def secondStrength? (d : Decomposition P) (judge : StrengthJudge P)
 /-- 中阴阶段，一买后次级别上、次级别下的结束点。
 [101:22] 其实，所谓第二类买点，就是第一类买点的次级别回抽结束后再次探底或回试的那个次级别走势的结束点。这个定义在前面说得很清楚。 -/
 def isSecondBuy (d : Decomposition P) (judge : StrengthJudge P)
-    (threshold : FirstExitThreshold) (cut : Nat) :=
-  (secondStrength? d judge threshold .up cut).isSome
+    (cut : Nat) :=
+  (secondStrength? d judge .up cut).isSome
 
 /-- 二卖使用完全相同的次级别时序，价格比较反序。
 [017:66] “缠中说禅买卖点定律一”：任何级别的第二类买卖点都由次级别相应走势的第一类买点构成。
 [101:22] 其实，所谓第二类买点，就是第一类买点的次级别回抽结束后再次探底或回试的那个次级别走势的结束点。这个定义在前面说得很清楚。 -/
 def isSecondSell (d : Decomposition P) (judge : StrengthJudge P)
-    (threshold : FirstExitThreshold) (cut : Nat) :=
-  (secondStrength? d judge threshold .down cut).isSome
+    (cut : Nat) :=
+  (secondStrength? d judge .down cut).isSome
 
 /-- 在所选观察阶段，确立后的最近同级枢由震荡转入离开；不按底部或顶部另设例外。
 [018:64] 某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。

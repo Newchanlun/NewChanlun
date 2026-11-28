@@ -50,18 +50,20 @@ structure StageLedger (r : BlockRule.{u}) (depth : Nat) (xs : List (Seg P))
   origin : Nat
   originBounded : origin ≤ xs.length
 
-/-- 规则、当前层段表、同坐标切点和认证账本。 -/
+/-- 规则、当前层段表、同坐标切点和认证账本。
+直接构造时，默认起笔即收笔；从塔还原时，按原始切点传入实际收笔。 -/
 structure Decomposition (P : Type u) [LinearOrder P] where
   depth : Nat
   rule : BlockRule.{u}
   steps : List (Seg P)
   marks : List Nat
   ledger : StageLedger rule depth steps marks
+  closingDir? : Nat → Option Dir := fun i => steps[i]?.map Seg.dir
 
 abbrev Decomposition.origin (d : Decomposition P) := d.ledger.origin
 
 /-- 从塔还原指定层的实际段表和局部切点；端点及中枢须由同一段表的证书提供。 -/
-def Decomposition.ofTowerStage? {r : BlockRule.{u}} {dir : CoarseDirPolicy P} {base : AltSeq P}
+def Decomposition.ofTowerStage? {r : BlockRule.{u}} {dir : CoarseDirPolicy} {base : AltSeq P}
     (t : LevelTower r dir base) (depth : Nat)
     (certify : (xs : List (Seg P)) → (marks : List Nat) → Option (StageLedger r depth xs marks)) :
     Option (Decomposition P) :=
@@ -73,7 +75,7 @@ def Decomposition.ofTowerStage? {r : BlockRule.{u}} {dir : CoarseDirPolicy P} {b
     | some (stage, marks) =>
       match certify stage.items marks with
       | none => none
-      | some ledger => some ⟨depth, r, stage.items, marks, ledger⟩
+      | some ledger => some ⟨depth, r, stage.items, marks, ledger, t.closingDir? depth⟩
 
 /-- 用段序号取实际端点，越界无观测。
 [070:48] 没有人规定分段的结束位置一定是最高、最低的，关键要有至少三笔，因为从37开始到最高的位置，没有三笔，所以不能认为线段已经完成。 -/

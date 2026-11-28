@@ -22,11 +22,13 @@ open Chan.Defs.Order Chan.Defs.Path Chan.Defs.Alt Chan.Defs.Center
 universe u
 variable {P Q : Type u} [LinearOrder P] [LinearOrder Q]
 
-/-- #2296（needs-fable U-1）：高阶块方向由调用方选取，暂不要求粗化结果交替。 -/
-abbrev CoarseDirPolicy (P : Type _) [LinearOrder P] := Seg P → List (Seg P) → Dir
+/-- #2320 裁定一：高阶段只记录起笔方向，不要求相邻高阶段的起笔交替。 -/
+inductive CoarseDirPolicy where
+  | firstSegment
+  deriving DecidableEq
 
-/-- 用首段方向的显式对照策略。 -/
-def CoarseDirPolicy.firstSegment : CoarseDirPolicy P := fun a _ => a.dir
+/-- 从块首段继承起笔方向。 -/
+def CoarseDirPolicy.dirOf (_ : CoarseDirPolicy) (a : Seg P) : Dir := a.dir
 
 /-- 块语言读取层深、段列、逆序的既往块首及本块起止。无值表示不合法，数值越大越优先。已确认标志另列。
 [038:18] 显然，一个好的分解，其分解规则下，必须保证分解的唯一性，否则这种分解就绝对不可能是好的分解。
@@ -42,12 +44,12 @@ structure BlockRule where
 [102:38] 也就是说，任何走势，都可以唯一地表示为a1A1+a5A5+a30A30的形式
 -/
 def BlockRule.coarsen (xs : List (Seg P)) (i j : Nat)
-    (dir : CoarseDirPolicy P) : Option (Seg P) :=
+    (dir : CoarseDirPolicy) : Option (Seg P) :=
   if i < j ∧ j ≤ xs.length then
     match xs.extract i j with
     | [] => none
     | a :: tail =>
-      some ⟨dir a tail, hullInterval a.range (tail.map Seg.range),
+      some ⟨dir.dirOf a, hullInterval a.range (tail.map Seg.range),
         tail.foldl (fun source s => source.join s.source) a.source⟩
   else none
 
@@ -119,18 +121,20 @@ def extRun (xs : List (Seg P)) (start : Nat) : Nat :=
 abbrev ExtRun (xs : List (Seg P)) (start len : Nat) : Prop :=
   3 ≤ len ∧ len ≤ extRun xs start
 
-/-- 只约束块内单核最长连续延伸，不把前导进入段计入延伸。
-九段几何不成立时（`nineAt = false`），普通块可以继续延伸；九段上界不是进位规则的保证。
-回归见证 `b2Extended` 给出 `CarryBounded carry 9 0 b2Extended [] 0 = false`。
+/-- 检查块内每个起点的连续延伸长度，包括从触核进入段开始的延伸。 -/
+def blockExtWithin (bound : Nat) (block : List (Seg P)) : Bool :=
+  (List.range block.length).all (fun start => decide (extRun block start ≤ bound))
+
+/-- 约束每个合法块内的最长单核连续延伸，不约束块的总长度。
+九段规则默认封顶为 9；独立进入段若触核，界为 10。
 
 [057:42] 显然，这10个线段，已经组成了一个更高级别的5分钟中枢，结合方式如下：（12+23+34）+（45+56+67）+（78+89+910），该中枢的区间是[4015，4122]。这一点其实由6这个第三类卖点的存在以及后面的背驰，就可以知道，这中枢级别的扩展，是必然的。
 -/
 def CarryBounded (r : BlockRule) (bound k : Nat) (xs : List (Seg P)) (past : List Nat)
     (i : Nat) : Bool :=
   (r.ends k xs past i).all fun p =>
-    let block := xs.extract i p.1
     decide (i + 3 ≤ p.1) &&
-      (List.range block.length).all (fun start => decide (extRun block start ≤ bound))
+      blockExtWithin bound (xs.extract i p.1)
 
 /-- 进位有界律：对所有价格载体、层深、段列与历史，逐点延伸界均成立。 -/
 def CarryBoundedProp (r : BlockRule.{u}) (bound : Nat) : Prop :=

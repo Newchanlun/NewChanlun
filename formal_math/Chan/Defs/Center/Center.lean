@@ -23,6 +23,7 @@ def Center.CanSeedCenter (xs : List (Seg P)) (i : Nat) : Bool :=
   | _, _, _ => false
 
 /-- 从 start 起三段成核；其余各段只能延伸此核。stop 与波动包络由覆盖段导出。
+按 #2320 裁定一，成核只读值域；底层方向交替由 `AltSeq` 保证，上级不要求交替。
 [020:48] 有了上面的定理，就可以很精确地讨论走势中枢的问题了：根据走势中枢的数学表达式： A、B、C，分别的高、低点是a1\a2,b1\b2,c1\c2，则中枢的区间就是[max（a2,b2,c2），min（a1,b1,c1）]。
 [020:56] 缠中说禅走势中枢中心定理一：走势中枢的延伸等价于任意区间[dn，gn]与[ZD，ZG]有重叠。换言之，若有Zn，使得dn>ZG或gn<ZD，则必然产生高级别的走势中枢或趋势及延续。 -/
 structure Center (P : Type _) [LinearOrder P] where
@@ -31,7 +32,6 @@ structure Center (P : Type _) [LinearOrder P] where
   b : Seg P
   c : Seg P
   more : List (Seg P)
-  alternating : (a :: b :: c :: more).IsChain (fun x y => x.dir ≠ y.dir)
   seed : (Center.seedBounds a b c).1 ≤ (Center.seedBounds a b c).2
   extension : ∀ s ∈ more, overlaps ⟨(Center.seedBounds a b c).1, (Center.seedBounds a b c).2, seed⟩ s.range
   deriving DecidableEq
@@ -71,10 +71,8 @@ def window? (xs : List (Seg P)) (i j : Nat) : Option (Center P) := do
   if j > xs.length then none else
     match xs.extract i j with
     | a :: b :: c :: tail =>
-      if h : (a :: b :: c :: tail).IsChain (fun x y => x.dir ≠ y.dir) then
-        if k : (seedBounds a b c).1 ≤ (seedBounds a b c).2 then
-          if e : ∀ s ∈ tail, overlaps ⟨_, _, k⟩ s.range then some ⟨i,a,b,c,tail,h,k,e⟩
-          else none
+      if k : (seedBounds a b c).1 ≤ (seedBounds a b c).2 then
+        if e : ∀ s ∈ tail, overlaps ⟨_, _, k⟩ s.range then some ⟨i,a,b,c,tail,k,e⟩
         else none
       else none
     | _ => none
@@ -93,19 +91,20 @@ abbrev leavesUp (z : Center P) (s : Seg P) := strictAbove s.range z.core.hi
 abbrev leavesDown (z : Center P) (s : Seg P) := strictBelow s.range z.core.lo
 
 /-- 候选离开段的极值须严格越过核上沿，回试段整体严格留在上方。
+方向只读回试起笔；偶数离开块的起笔方向可能与收笔相反。
 
 [018:64] 某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。
 [054:24] 当走势发展到d2时，一个1分钟级别的中枢就形成，区间是[d1,g1]。后面出现的线段，就要以该区间来决定是中枢震荡还是第三类买卖点。由于d1=g2，那么d2g2这段就属于[d1,g1]中枢的震荡。而到d3g3这段，显然已经不能触及[d1,g1]，所以g3就是第三类卖点。当然，如果前面d1>g2，那g2就是第三类卖点了。
 -/
 abbrev thirdBuyEvent (z : Center P) (leave back : Seg P) : Prop :=
-  leave.dir = .up ∧ z.core.hi < leave.range.hi ∧ back.dir = .down ∧ z.leavesUp back
+  z.core.hi < leave.range.hi ∧ back.dir = .down ∧ z.leavesUp back
 
 /-- 向下离开与首次向上回试；相触仍归核内震荡。
 
 [054:24] 当走势发展到d2时，一个1分钟级别的中枢就形成，区间是[d1,g1]。后面出现的线段，就要以该区间来决定是中枢震荡还是第三类买卖点。由于d1=g2，那么d2g2这段就属于[d1,g1]中枢的震荡。而到d3g3这段，显然已经不能触及[d1,g1]，所以g3就是第三类卖点。当然，如果前面d1>g2，那g2就是第三类卖点了。
 -/
 abbrev thirdSellEvent (z : Center P) (leave back : Seg P) : Prop :=
-  leave.dir = .down ∧ leave.range.lo < z.core.lo ∧ back.dir = .up ∧ z.leavesDown back
+  leave.range.lo < z.core.lo ∧ back.dir = .up ∧ z.leavesDown back
 
 /-- 只允许末覆盖段兼离开，或覆盖范围后紧接的跳空离开。 -/
 def thirdAt (z : Center P) (d : Dir) (xs : List (Seg P)) (k : Nat) : Bool :=
@@ -146,12 +145,7 @@ def destroyed (z : Center P) (xs : List (Seg P)) : Bool :=
 
 /-- 中枢取序对偶，保留来源位置和覆盖证据。 -/
 def dual (z : Center P) : Center (OrderDual P) := by
-  refine ⟨z.start, dualSeg z.a, dualSeg z.b, dualSeg z.c, z.more.map dualSeg, ?_, ?_, ?_⟩
-  · change List.IsChain _ (z.cover.map dualSeg)
-    exact List.isChain_map_of_isChain dualSeg (by
-      intro a b h
-      change a.dir.flip ≠ b.dir.flip
-      cases ha : a.dir <;> cases hb : b.dir <;> simp_all [Dir.flip]) z.alternating
+  refine ⟨z.start, dualSeg z.a, dualSeg z.b, dualSeg z.c, z.more.map dualSeg, ?_, ?_⟩
   · simpa only [seedBounds, dualSeg, dualBar, ← toDual_min, ← toDual_max, OrderDual.toDual_le_toDual] using z.seed
   · intro s hs
     obtain ⟨a, ha, rfl⟩ := List.mem_map.mp hs
