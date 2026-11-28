@@ -8,6 +8,41 @@ use super::{book, service, store};
 use crate::session_protocol::canonical_json;
 use serde_json::{json, Value};
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+thread_local! {
+    static TEST_CONNS: RefCell<HashMap<(PathBuf, bool), rusqlite::Connection>> =
+        RefCell::new(HashMap::new());
+}
+
+fn with_conn<T>(path: &Path, read_only: bool, f: impl FnOnce(&mut rusqlite::Connection) -> T) -> T {
+    let mut conn = TEST_CONNS
+        .with(|m| m.borrow_mut().remove(&(path.to_path_buf(), read_only)))
+        .unwrap_or_else(|| store::open(path, read_only).unwrap().0);
+    let out = f(&mut conn);
+    TEST_CONNS.with(|m| m.borrow_mut().insert((path.to_path_buf(), read_only), conn));
+    out
+}
+
+fn close_cached(path: &Path) {
+    // Drop read-only handle before read-write handle so SQLite checkpoints WAL cleanly on close.
+    TEST_CONNS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.remove(&(path.to_path_buf(), true));
+        if let Some(rw) = m.remove(&(path.to_path_buf(), false)) {
+            let _ = rw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+    });
+}
+
+fn raw_doc() -> &'static Value {
+    static DOC: OnceLock<Value> = OnceLock::new();
+    DOC.get_or_init(|| serde_json::from_str(raw_named("raw/chong-L1.json")).unwrap())
+}
+
 const SESSION: &str = "tb1768-unit";
 const CHILD: &str = "economic_session::domain_event_tests::domain_event_identity_child";
 
@@ -49,7 +84,14 @@ struct Domains {
     ec: store::Config,
     bc: store::Config,
     raw: &'static str,
-    doc: Value,
+    doc: &'static Value,
+}
+
+impl Drop for Domains {
+    fn drop(&mut self) {
+        close_cached(&self.ec.db);
+        close_cached(&self.bc.db);
+    }
 }
 
 fn setup(space: &Space, steps: usize) -> Domains {
@@ -64,7 +106,7 @@ fn setup(space: &Space, steps: usize) -> Domains {
         ec,
         bc,
         raw,
-        doc: serde_json::from_str(raw).unwrap(),
+        doc: raw_doc(),
     }
 }
 
@@ -76,8 +118,9 @@ fn apply_payload(receipt: &Value) -> Value {
     json!({"op":"ApplyAllocation","fact_key":receipt["fact_key"],"allocation_id":receipt["allocation_id"],"expected_fact_hash":receipt["fact_hash"]})
 }
 fn send(cfg: &store::Config, epoch: i64, message: Value) -> Value {
-    let (mut c, _) = store::open(&cfg.db, false).unwrap();
-    service::handle(&mut c, cfg, epoch, 1, &json!({}), &message)["payload"].clone()
+    with_conn(&cfg.db, false, |c| {
+        service::handle(c, cfg, epoch, 1, &json!({}), &message)["payload"].clone()
+    })
 }
 /// 经 service::handle 走一步：E Capture 第 i 条原件，再按其回执 ApplyAllocation 到 B。
 fn step(d: &Domains, i: usize, prefix: &str, b_epoch: i64) -> (Value, Value) {
@@ -98,47 +141,49 @@ fn step(d: &Domains, i: usize, prefix: &str, b_epoch: i64) -> (Value, Value) {
     (captured, applied)
 }
 fn events(cfg: &store::Config) -> Vec<Value> {
-    let (c, _) = store::open(&cfg.db, true).unwrap();
-    de::events(&c, cfg).unwrap()
+    with_conn(&cfg.db, true, |c| de::events(c, cfg).unwrap())
 }
 fn dump(cfg: &store::Config, sql: &str) -> Vec<Vec<String>> {
-    let (c, _) = store::open(&cfg.db, true).unwrap();
-    let mut s = c.prepare(sql).unwrap();
-    let n = s.column_count();
-    let rows = s
-        .query_map([], |r| {
-            (0..n)
-                .map(|k| {
-                    r.get::<_, rusqlite::types::Value>(k)
-                        .map(|v| format!("{v:?}"))
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap();
-    rows.map(Result::unwrap).collect()
+    with_conn(&cfg.db, true, |c| {
+        let mut s = c.prepare(sql).unwrap();
+        let n = s.column_count();
+        let rows = s
+            .query_map([], |r| {
+                (0..n)
+                    .map(|k| {
+                        r.get::<_, rusqlite::types::Value>(k)
+                            .map(|v| format!("{v:?}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    })
 }
 const COMMITS: &str = "SELECT seq,prev_root,root,commit_ns,image FROM commits ORDER BY seq";
 const APPLICATIONS: &str = "SELECT k,fact_key,json FROM applications ORDER BY k";
 fn cut_at(cfg: &store::Config, seq: i64) -> Value {
-    let (c, _) = store::open(&cfg.db, true).unwrap();
-    let root: String = c
-        .query_row("SELECT root FROM commits WHERE seq=?", [seq], |r| r.get(0))
-        .unwrap();
-    store::cut(cfg, seq, &root)
+    with_conn(&cfg.db, true, |c| {
+        let root: String = c
+            .query_row("SELECT root FROM commits WHERE seq=?", [seq], |r| r.get(0))
+            .unwrap();
+        store::cut(cfg, seq, &root)
+    })
 }
 fn tamper_commit(cfg: &store::Config, seq: i64) {
-    let (c, _) = store::open(&cfg.db, false).unwrap();
-    let raw: String = c
-        .query_row("SELECT image FROM commits WHERE seq=?", [seq], |r| r.get(0))
+    with_conn(&cfg.db, false, |c| {
+        let raw: String = c
+            .query_row("SELECT image FROM commits WHERE seq=?", [seq], |r| r.get(0))
+            .unwrap();
+        let mut image: Value = serde_json::from_str(&raw).unwrap();
+        let last = image["history"].as_array_mut().unwrap().last_mut().unwrap();
+        last["commit_ns"] = json!("1");
+        c.execute(
+            "UPDATE commits SET image=? WHERE seq=?",
+            rusqlite::params![canonical_json(&image), seq],
+        )
         .unwrap();
-    let mut image: Value = serde_json::from_str(&raw).unwrap();
-    let last = image["history"].as_array_mut().unwrap().last_mut().unwrap();
-    last["commit_ns"] = json!("1");
-    c.execute(
-        "UPDATE commits SET image=? WHERE seq=?",
-        rusqlite::params![canonical_json(&image), seq],
-    )
-    .unwrap();
+    });
 }
 
 /// 变异负控：按内容（而非身份）去重。
@@ -456,6 +501,7 @@ fn domain_event_withdrawn_is_appended_and_old_rows_unchanged() {
         .unwrap()
         .parse()
         .unwrap();
+    close_cached(&d.bc.db);
     for mutation in ["delete", "retarget"] {
         let copy = Space::new(&format!("1768-withdrawn-{mutation}"));
         std::fs::copy(&d.bc.db, copy.0.join("b.db")).unwrap();
@@ -1063,7 +1109,7 @@ fn domain_event_withdrawal_entry_in_unbound_domain_is_storage_unavailable() {
         ec,
         bc,
         raw,
-        doc: serde_json::from_str(raw).unwrap(),
+        doc: raw_doc(),
     };
     step(&d, 0, "", 1);
     step(&d, 1, "", 1);
