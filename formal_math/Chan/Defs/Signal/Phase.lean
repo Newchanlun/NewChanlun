@@ -61,8 +61,8 @@ structure Decomposition (P : Type u) [LinearOrder P] where
 abbrev Decomposition.origin (d : Decomposition P) := d.ledger.origin
 
 /-- 从塔还原指定层的实际段表和局部切点；端点及中枢须由同一段表的证书提供。 -/
-def Decomposition.ofTowerStage? {r : BlockRule.{u}} {base : AltSeq P}
-    (t : LevelTower r base) (depth : Nat)
+def Decomposition.ofTowerStage? {r : BlockRule.{u}} {dir : CoarseDirPolicy P} {base : AltSeq P}
+    (t : LevelTower r dir base) (depth : Nat)
     (certify : (xs : List (Seg P)) → (marks : List Nat) → Option (StageLedger r depth xs marks)) :
     Option (Decomposition P) :=
   match t.stages? with

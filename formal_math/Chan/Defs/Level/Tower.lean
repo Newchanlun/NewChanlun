@@ -37,28 +37,29 @@ def realize (dir : CoarseDirPolicy P) (s : Stage P) : List (List Nat) → Option
       let (levels, top) ← realize dir upper rows
       some ((s,cuts) :: levels, top)
 
-/-- 给定基底和规则的几何塔；证书保证每次粗化可还原，块语言合法性另由 ValidDecomp 判断。
+/-- 固定基底、规则和粗化方向策略的几何塔。证书保证各层可还原；块语言合法性另查。
 [101:52] 所谓走势必完美，就是本ID所给出的分型、笔、线段、不同级别走势类型所对应的递归函数，能将行情的任何走势唯一地分解。
 [053:20] 但无论这些显微镜如何转换，一个原则是不变的，就是当你用一个级别的显微镜时，就等于先把次级别的当成线段了，也就是说次级别不在该级别的观察中。 -/
-structure LevelTower (rule : BlockRule) (base : AltSeq P) where
-  dirPolicy : CoarseDirPolicy P
+structure LevelTower (rule : BlockRule) (dir : CoarseDirPolicy P) (base : AltSeq P) where
   partition : NestedCuts base.items.length
   anchored : ∀ row ∈ partition.rows, row.anchoredZero
-  realized : (realize dirPolicy (Stage.bottom base) (partition.rows.map CutChain.marks)).isSome = true
+  realized : (realize dir (Stage.bottom base) (partition.rows.map CutChain.marks)).isSome = true
+
+variable {r : BlockRule} {dir : CoarseDirPolicy P} {base : AltSeq P}
 
 /-- 由低到高提取原始下标；各层均使用同一底层坐标。
 [102:38] 也就是说，任何走势，都可以唯一地表示为a1A1+a5A5+a30A30的形式 -/
-def LevelTower.cuts {r : BlockRule} {base : AltSeq P} (t : LevelTower r base) :=
+def LevelTower.cuts (t : LevelTower r dir base) :=
   t.partition.rows.map CutChain.marks
 
-/-- 同底同规则逐行比较，不比较粗化证书。
+/-- 在固定基底、规则和方向策略下逐行比较切点，不比较粗化证书。
 [057:40] 当行情走到6点时，34、45、56这三段，就可以看成是一个1分钟中枢了，当然，这种分法和原来[4087，4122]中枢的分解不同，但站在多义性的角度，这是绝对符合结合律的，当然是一个分解的方法。
 [101:52] 所谓走势必完美，就是本ID所给出的分型、笔、线段、不同级别走势类型所对应的递归函数，能将行情的任何走势唯一地分解。 -/
-abbrev LevelTower.sameCuts {r : BlockRule} {base : AltSeq P} (a b : LevelTower r base) : Prop :=
+abbrev LevelTower.sameCuts (a b : LevelTower r dir base) : Prop :=
   a.cuts = b.cuts
 
 /-- 复用塔的粗化策略和原始切点，还原每层段表与局部切点。 -/
-def LevelTower.stages? {r : BlockRule} {base : AltSeq P} (t : LevelTower r base) :=
-  realize t.dirPolicy (Stage.bottom base) t.cuts
+def LevelTower.stages? (t : LevelTower r dir base) :=
+  realize dir (Stage.bottom base) t.cuts
 
 end Chan.Defs.Level

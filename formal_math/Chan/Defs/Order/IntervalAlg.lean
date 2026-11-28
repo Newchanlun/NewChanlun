@@ -23,8 +23,7 @@ abbrev overlapsList (a : Bar P) (bs : List (Bar P)) : Prop :=
 def interInterval (a b : Bar P) (h : overlaps a b) : Bar P :=
   ⟨max a.lo b.lo, min a.hi b.hi, h⟩
 
-/-- 取所有低点之最小和所有高点之最大，不以首尾两段代替包络。
-[020:58] 缠中说禅走势中枢中心定理二：前后同级别的两个缠中说禅走势中枢，后GG<前DD，等价于下跌及其延续；后DD>前GG等价于上涨及其延续。后ZG<前ZD且后GG>=前DD，或后ZD>前ZG且后DD=<前GG，则等价于形成高级别的走势中枢。 -/
+/-- 取所有低点之最小和所有高点之最大，不以首尾两段代替包络。 -/
 def hullInterval (a : Bar P) (bs : List (Bar P)) : Bar P :=
   bs.foldl (fun x b => ⟨min x.lo b.lo, max x.hi b.hi,
     le_trans (min_le_left _ _) (le_trans x.ordered (le_max_left _ _))⟩) a

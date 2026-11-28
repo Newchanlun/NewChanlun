@@ -16,8 +16,7 @@ inductive Dir where
   | up | down
   deriving DecidableEq
 
-/-- 多空互换。
-[020:58] 缠中说禅走势中枢中心定理二：前后同级别的两个缠中说禅走势中枢，后GG<前DD，等价于下跌及其延续；后DD>前GG等价于上涨及其延续。后ZG<前ZD且后GG>=前DD，或后ZD>前ZG且后DD=<前GG，则等价于形成高级别的走势中枢。 -/
+/-- 多空互换。 -/
 def Dir.flip : Dir → Dir
   | .up => .down
   | .down => .up
@@ -48,8 +47,7 @@ structure Seg (P : Type _) [LinearOrder P] where
 def dualSeg (s : Seg P) : Seg (OrderDual P) :=
   ⟨s.dir.flip, dualBar s.range, s.source⟩
 
-/-- 换价保持段方向与跨度。
-[018:24] 则，中枢的区间就是（max（a2,b2,c2），min（a1,b1,c1））而实际上用目测就可以，不用这么复杂。 -/
+/-- 换价保持段方向与跨度。 -/
 def Seg.mapEmb (f : OrderEmb P Q) (s : Seg P) : Seg Q :=
   ⟨s.dir, mapBarEmb f s.range, s.source⟩
 

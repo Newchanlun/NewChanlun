@@ -42,7 +42,7 @@ structure BlockRule where
 [102:38] 也就是说，任何走势，都可以唯一地表示为a1A1+a5A5+a30A30的形式
 -/
 def BlockRule.coarsen (xs : List (Seg P)) (i j : Nat)
-    (dir : CoarseDirPolicy P := CoarseDirPolicy.firstSegment) : Option (Seg P) :=
+    (dir : CoarseDirPolicy P) : Option (Seg P) :=
   if i < j ∧ j ≤ xs.length then
     match xs.extract i j with
     | [] => none
@@ -66,34 +66,43 @@ def BlockRule.preferred (r : BlockRule) (k : Nat) (xs : List (Seg P)) (past : Li
   | some score => decide (i < j ∧ j ≤ xs.length) &&
       (r.ends k xs past i).all (fun p => decide (p.2 ≤ score))
 
-/-- 五条接口律的逐点判定；只有已确认块承担延拓稳定义务。
+/-- 五条接口律的逐点判定。粗化后的段列可以不交替；只有已确认块承担延拓稳定义务。
 [043:44] 缠中说禅走势类型分解原则：一个某级别的走势类型中，不可能出现比该级别更大的中枢，一旦出现，就证明这不是一个某级别的走势类型，而是更大级别走势类型的一部分或几个该级别走势类型的连接。
-[018:24] 则，中枢的区间就是（max（a2,b2,c2），min（a1,b1,c1））而实际上用目测就可以，不用这么复杂。 -/
-def checkInterfaceLaws (r : BlockRule) (k : Nat) (s t : AltSeq P) (f : OrderEmb P Q)
+-/
+def checkStageInterfaceLaws (r : BlockRule) (k : Nat) (xs ys : List (Seg P)) (f : OrderEmb P Q)
     (past : List Nat) (i j : Nat) : Bool :=
-  let score := r.rank k s.items past i j
-  let contracts := !score.isSome || decide (i < j ∧ j ≤ s.items.length)
+  let score := r.rank k xs past i j
+  let confirmed := r.confirmed k xs past i j
+  let contracts := !score.isSome || decide (i < j ∧ j ≤ xs.length)
   let seeded := !score.isSome || (decide (i + 3 ≤ j) &&
-    (List.range (j - i - 2)).any (fun n => CanSeedCenter s.items (i+n)))
-  let orderInvariant := decide (r.rank k (s.mapEmb f).items past i j = score) &&
-    decide (r.confirmed k (s.mapEmb f).items past i j = r.confirmed k s.items past i j)
-  let mirrorInvariant := decide (r.rank k (dualAltSeq s).items past i j = score) &&
-    decide (r.confirmed k (dualAltSeq s).items past i j = r.confirmed k s.items past i j)
-  let stable := !r.confirmed k s.items past i j || !(s.items.isPrefixOf t.items) ||
-    (score.isSome && r.preferred k s.items past i j &&
-      decide (r.rank k t.items past i j = score) && r.preferred k t.items past i j &&
-      r.confirmed k t.items past i j)
+    (List.range (j - i - 2)).any (fun n => CanSeedCenter xs (i+n)))
+  let mapped := xs.map (Seg.mapEmb f)
+  let mirrored := xs.map dualSeg
+  let orderInvariant := decide (r.rank k mapped past i j = score) &&
+    decide (r.confirmed k mapped past i j = confirmed)
+  let mirrorInvariant := decide (r.rank k mirrored past i j = score) &&
+    decide (r.confirmed k mirrored past i j = confirmed)
+  let stable := !confirmed || !(xs.isPrefixOf ys) ||
+    (score.isSome && r.preferred k xs past i j &&
+      decide (r.rank k ys past i j = score) && r.preferred k ys past i j &&
+      r.confirmed k ys past i j)
   contracts && seeded && orderInvariant && mirrorInvariant && stable
 
-/-- 全称接口契约：合法块边界与成核、序嵌入、对偶，以及已确认前缀稳定。
+/-- 交替段列的逐点检查入口，与一般段列共用判定。 -/
+def checkInterfaceLaws (r : BlockRule) (k : Nat) (s t : AltSeq P) (f : OrderEmb P Q)
+    (past : List Nat) (i j : Nat) : Bool :=
+  checkStageInterfaceLaws r k s.items t.items f past i j
+
+/-- 底层和上层共用的全称接口契约：合法块边界与成核、序嵌入、对偶，以及已确认前缀稳定。
+量化范围包括任意段列，不以方向交替为前提。
 
 [099:22] 另外，根据结合律，连接中枢的走势，并不一定是完全的趋势类型，也就是说，一个线段类上涨后，可能第二类类中枢就消融在中阴状态的那个中枢里了。也就是说，a+b+c+d+e+f= a+b+c+（d+e+f），a+b+c+d+e是一个线段类上涨，c+d+e的重合部分构成最后的一个类中枢，f是类背驰后的回调，这时候，就可以马上构成一个1分钟的中枢，然后后面直接继续上涨，构成1分钟的上涨是完全合理的。因为，最终的划分，就必须把a+b+c+d+e给拆开了。
 [102:38] 也就是说，任何走势，都可以唯一地表示为a1A1+a5A5+a30A30的形式
 -/
 def InterfaceLaws (r : BlockRule.{u}) : Prop :=
   ∀ {A B : Type u} [LinearOrder A] [LinearOrder B] (k : Nat)
-    (s t : AltSeq A) (f : OrderEmb A B) (past : List Nat) (i j : Nat),
-    checkInterfaceLaws r k s t f past i j = true
+    (xs ys : List (Seg A)) (f : OrderEmb A B) (past : List Nat) (i j : Nat),
+    checkStageInterfaceLaws r k xs ys f past i j = true
 
 /-- 成核后三段以外仍逐段与固定核重叠；长度包含成核三段。 -/
 def extRun (xs : List (Seg P)) (start : Nat) : Nat :=
@@ -120,6 +129,11 @@ def CarryBounded (r : BlockRule) (bound k : Nat) (xs : List (Seg P)) (past : Lis
     let block := xs.extract i p.1
     decide (i + 3 ≤ p.1) &&
       (List.range block.length).all (fun start => decide (extRun block start ≤ bound))
+
+/-- 进位有界律：对所有价格载体、层深、段列与历史，逐点延伸界均成立。 -/
+def CarryBoundedProp (r : BlockRule.{u}) (bound : Nat) : Prop :=
+  ∀ {P : Type u} [LinearOrder P] (k : Nat) (xs : List (Seg P)) (past : List Nat) (i : Nat),
+    CarryBounded r bound k xs past i = true
 
 /-- 可选的总块长上界，与单核延伸上界分开。 -/
 def BlockLengthBounded (r : BlockRule) (bound k : Nat) (xs : List (Seg P)) (past : List Nat)

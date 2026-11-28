@@ -48,22 +48,28 @@ def firstSeedFrom (xs : List (Seg P)) (start : Nat) : Option Nat :=
 -/
 def nineAt (xs : List (Seg P)) (i : Nat) : Bool :=
   (Center.window? xs i (i+9)).isSome &&
-    match BlockRule.coarsen xs i (i+3), BlockRule.coarsen xs (i+3) (i+6),
-          BlockRule.coarsen xs (i+6) (i+9) with
+    -- 此处只读凸包，粗化方向不影响三凸包的交。
+    let dir := CoarseDirPolicy.firstSegment (P := P)
+    match BlockRule.coarsen xs i (i+3) dir, BlockRule.coarsen xs (i+3) (i+6) dir,
+          BlockRule.coarsen xs (i+6) (i+9) dir with
     | some a, some b, some c => decide (overlapsList a.range [b.range,c.range])
     | _, _, _ => false
 
-/-- 已完成离开后的第一个新枢起点；允许以回试段作为第一成核段。 -/
+/-- 离开后的第一个新枢起点；允许以回试段作为第一成核段。
+不等待第三类事件时，仍须先走完前枢的触核延伸。 -/
 def firstReturnFrom (xs : List (Seg P)) (z : Center P) (requireThird : Bool) : Option Nat :=
   let complete := z.departureIndex? .up xs <|> z.departureIndex? .down xs
-  let leave := if requireThird then complete else complete <|>
-    [z.stop - 1, z.stop].find? (fun k => (xs[k]?).any fun s =>
-      match s.dir with
-      | .up => if k == z.stop then decide (z.leavesUp s) else decide (z.core.hi < s.range.hi)
-      | .down => if k == z.stop then decide (z.leavesDown s) else decide (s.range.lo < z.core.lo))
+  let leave :=
+    if requireThird then complete
+    else if (xs[z.stop]?).any (fun s => decide (z.extendsWith s)) then none
+    else complete <|>
+      [z.stop - 1, z.stop].find? (fun k => (xs[k]?).any fun s =>
+        match s.dir with
+        | .up => if k == z.stop then decide (z.leavesUp s) else decide (z.core.hi < s.range.hi)
+        | .down => if k == z.stop then decide (z.leavesDown s) else decide (s.range.lo < z.core.lo))
   leave.bind (fun k => firstSeedFrom xs (k+1))
 
-/-- 途径二：离开后的后枢波动回拉至前枢波动区间。可选上界只约束后枢延伸。
+/-- 途径二：前后枢的核分离、波动区间相交。可选上界只约束后枢延伸。
 
 [020:44] 缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。
 [二级旁证 095:86] 次好的，就是在这里形成5分钟中枢后再出现第三类买点，这里有两种途径，一种是9次级别的震荡扩展出5分钟，一种是先1分钟的第三类卖点后底背驰上来再出来5分钟。这里就构成了N次必然的短线机会。
@@ -76,7 +82,9 @@ def returningCenter (xs : List (Seg P)) (z : Center P) (j : Nat)
     match Center.window? xs n j with
     | none => false
     | some next => bound.all (fun b => decide (next.cover.length ≤ b)) &&
-        decide (overlaps z.zone.hull next.zone.hull)
+        match relPos z.zone next.zone with
+        | .expansionUp | .expansionDown => true
+        | _ => false
 
 /-- 普通入口的第一成核点。 -/
 def carrySeed? (p : CarryNineParams) (xs : List (Seg P)) (start : Nat) : Option Nat :=
@@ -90,15 +98,20 @@ def nineEnd? (p : CarryNineParams) (xs : List (Seg P)) (seed : Nat) : Option Nat
   | .afterNine | .entryAfterCarry => some (seed+9)
   | .atNextSeed => firstSeedFrom xs (seed+9)
 
-/-- 来自已选前块的重启标记不取代普通的进入段约定。 -/
+/-- 从最近块首沿逆序历史还原前块的实际起核搜索位置。若前块以九段进位闭合，
+为当前块留一个进入段；普通入口已要求进入段时不再叠加。 -/
 def carryStart (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i : Nat) : Nat :=
-  let entry := p.entry == .requireEntry
-  let priorNine := past.head?.any fun prev =>
-    (carrySeed? p xs (prev + if entry then 1 else 0)).any fun n =>
-      n + 9 == i && nineAt xs n
-  i + if entry || (p.restart == .entryAfterCarry && priorNine) then 1 else 0
+  if p.entry == .requireEntry then i + 1
+  else match p.restart, past with
+    | .entryAfterCarry, prev :: earlier =>
+      let priorNine := (carrySeed? p xs (carryStart p xs earlier prev)).any fun n =>
+        n + 9 == i && nineAt xs n
+      if priorNine then i + 1 else i
+    | _, _ => i
+termination_by structural past
 
-/-- 普通块与升级块均可合法；升级只使用在块尾已经出现的证据。 -/
+/-- 普通块与升级块均可合法；升级只使用在块尾已经出现的证据。
+九段满足进位几何时，普通块须在九段前结束；三凸包不相交时则继续按普通时机封块。 -/
 def carryClass (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat := do
   let seed ← carrySeed? p xs (carryStart p xs past i)
   if j > xs.length || j < seed + 3 then none else
@@ -108,7 +121,7 @@ def carryClass (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j 
       | none => false
       | some z => returningCenter xs z j true (some 9)
     if nine || pullback then some 1
-    else if j ≥ seed + 9 then none
+    else if j ≥ seed + 9 && nineAt xs seed then none
     else match p.timing with
     | .seeded => if j == seed + 3 then some 0 else none
     | .coreBroken =>

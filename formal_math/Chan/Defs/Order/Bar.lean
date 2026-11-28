@@ -16,8 +16,7 @@ structure Bar (P : Type _) [LinearOrder P] where
   ordered : lo ≤ hi
   deriving DecidableEq
 
-/-- 甲覆盖乙；相同的端点不用分开。
-[054:24] 当走势发展到d2时，一个1分钟级别的中枢就形成，区间是[d1,g1]。后面出现的线段，就要以该区间来决定是中枢震荡还是第三类买卖点。由于d1=g2，那么d2g2这段就属于[d1,g1]中枢的震荡。而到d3g3这段，显然已经不能触及[d1,g1]，所以g3就是第三类卖点。当然，如果前面d1>g2，那g2就是第三类卖点了。 -/
+/-- 甲覆盖乙；相同的端点不用分开。 -/
 abbrev Bar.contains (a b : Bar P) : Prop := a.lo ≤ b.lo ∧ b.hi ≤ a.hi
 
 /-- 从甲到乙，两端都升高；不要求出现缺口。
