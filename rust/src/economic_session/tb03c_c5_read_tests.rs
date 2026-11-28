@@ -1,11 +1,250 @@
 //! #1406 C5 H2：真实 /1 handle 的源捕获借入受控 Job，隔离验证 SQL 累计与失败。
 //! 注入仅 cfg(test) 存在；不替代 /2 固定卷/内容节点容量验收，不修改原件/金额期望。
+use super::tb03c_book_tests::Space;
 use super::tb03c_c5_tests::{apply_sources, transfer_documents, Session};
+use super::{book, service, store};
 use crate::s_content::job::{Existing, Job, JobLimits, JobSnapshot, DEADLINE, LIMIT_EXCEEDED};
+use crate::session_protocol::canonical_json;
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+struct CachedTransferDocs {
+    source_applied: Value,
+    source_applied_raw: String,
+    source_unmatched: Value,
+    source_unmatched_raw: String,
+    target: Value,
+    target_raw: String,
+}
+
+fn cached_transfer_docs() -> &'static CachedTransferDocs {
+    static DOCS: OnceLock<CachedTransferDocs> = OnceLock::new();
+    DOCS.get_or_init(|| {
+        let (source, target, _) = transfer_documents();
+        let mut unmatched = source.clone();
+        unmatched["events"][3]["family_id"] = json!("other-source-family");
+        CachedTransferDocs {
+            source_applied_raw: canonical_json(&source),
+            source_applied: source,
+            source_unmatched_raw: canonical_json(&unmatched),
+            source_unmatched: unmatched,
+            target_raw: canonical_json(&target),
+            target,
+        }
+    })
+}
+
+struct ReadSession {
+    _space: Space,
+    configs: Vec<store::Config>,
+    connections: Vec<rusqlite::Connection>,
+    next: usize,
+}
+
+impl ReadSession {
+    fn new(tag: &str) -> Self {
+        let routes = [
+            ("S", "TEST-R", "1", "10"),
+            ("T", "TEST-R", "2", "5"),
+            ("U", "TEST-R", "3", "3"),
+        ];
+        let space = Space::new(tag);
+        let mut clocks = serde_json::Map::with_capacity(24);
+        for i in 0..24 {
+            let t = 1000 + 10 * i;
+            clocks.insert(
+                format!("m-{i}"),
+                json!({
+                    "received_ns": t.to_string(),
+                    "first_known_ns": (t + 1).to_string(),
+                    "commit_ns": (t + 2).to_string()
+                }),
+            );
+        }
+        let chongs: Vec<Value> = routes
+            .iter()
+            .map(|(id, symbol, level, q)| {
+                json!({
+                    "chong_id": id,
+                    "symbol": symbol,
+                    "operation_level": level,
+                    "fixed_q": q,
+                    "db": space.0.join(format!("{id}.db")),
+                    "socket": space.0.join(format!("{id}.sock"))
+                })
+            })
+            .collect();
+        let manifest = json!({
+            "schema_revision": "economic-manifest/1",
+            "session_id": "c5",
+            "session_generation": "1",
+            "book_revision": "tb03c-book/1",
+            "e": {"db": space.0.join("e.db"), "socket": space.0.join("e.sock")},
+            "chongs": chongs,
+            "authorized_sources": [{
+                "source_namespace": "unit",
+                "source_epoch": "1",
+                "producer_id": "c5",
+                "producer_epoch": "1",
+                "operations": ["CaptureExternal", "ResolveEvidence", "ApplyAllocation", "ReadView"]
+            }],
+            "resources": {
+                "max_frame_bytes": "1048576",
+                "read_timeout_ms": "1000",
+                "write_timeout_ms": "1000",
+                "response_timeout_ms": "2000",
+                "queue_capacity": "2",
+                "max_connections": "2"
+            },
+            "clock": {"kind": "TestOnly", "plan": {"init_ns": "1", "recover_ns": ["90000"], "messages": clocks}}
+        });
+        let path = space.0.join("manifest.json");
+        std::fs::write(&path, canonical_json(&manifest)).unwrap();
+        let owners: [Option<&str>; 4] = [None, Some("S"), Some("T"), Some("U")];
+        let mut pairs: Vec<(store::Config, rusqlite::Connection)> = std::thread::scope(|sc| {
+            let handles: Vec<_> = owners
+                .into_iter()
+                .map(|id| {
+                    let path = &path;
+                    let root = &space.0;
+                    sc.spawn(move || {
+                        let db = root.join(id.map_or("e.db".to_owned(), |id| format!("{id}.db")));
+                        let cfg = store::Config::load(path, &db, id).unwrap();
+                        store::init(&cfg).unwrap();
+                        let conn = store::open(&cfg.db, false).unwrap().0;
+                        (cfg, conn)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut configs = Vec::with_capacity(pairs.len());
+        let mut connections = Vec::with_capacity(pairs.len());
+        for (cfg, conn) in pairs.drain(..) {
+            configs.push(cfg);
+            connections.push(conn);
+        }
+        Self {
+            _space: space,
+            configs,
+            connections,
+            next: 0,
+        }
+    }
+
+    fn send(&mut self, owner: usize, payload: Value) -> Value {
+        let request = json!({
+            "schema_revision": "economic-session/1",
+            "session_id": "c5",
+            "session_generation": "1",
+            "message_id": format!("m-{}", self.next),
+            "source_namespace": "unit",
+            "source_epoch": "1",
+            "producer_id": "c5",
+            "producer_epoch": "1",
+            "payload_hash": book::hash(&payload),
+            "payload": payload,
+            "causal_refs": []
+        });
+        self.next += 1;
+        service::handle(
+            &mut self.connections[owner],
+            &self.configs[owner],
+            1,
+            1,
+            &json!({}),
+            &request,
+        )["payload"]
+            .clone()
+    }
+
+    fn capture_cached(&mut self, doc: &Value, raw: &str, index: usize) -> Value {
+        self.send(
+            0,
+            json!({
+                "op": "CaptureExternal",
+                "raw_utf8": raw,
+                "json_pointer": format!("/events/{index}"),
+                "token": format!("tok-{}", doc["events"][index]["allocation_id"].as_str().unwrap()),
+                "source_event_time": doc["events"][index]["source"]["source_event_time"]
+            }),
+        )
+    }
+
+    fn apply(&mut self, owner: usize, receipt: &Value) -> Value {
+        self.send(
+            owner,
+            json!({
+                "op": "ApplyAllocation",
+                "fact_key": receipt["fact_key"],
+                "allocation_id": receipt["allocation_id"],
+                "expected_fact_hash": receipt["fact_hash"]
+            }),
+        )
+    }
+
+    fn image(&self, owner: usize) -> Value {
+        store::latest(&self.connections[owner]).unwrap().3
+    }
+
+    fn audit(&mut self) {
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = self
+                .connections
+                .iter_mut()
+                .zip(&self.configs)
+                .map(|(c, config)| sc.spawn(move || store::audit(c, config).unwrap()))
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+    }
+
+    fn recover_all(&mut self) {
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = self
+                .connections
+                .iter_mut()
+                .zip(&self.configs)
+                .map(|(c, config)| {
+                    sc.spawn(move || {
+                        store::recover(config).unwrap();
+                        store::audit(c, config).unwrap();
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+    }
+
+    fn allocated(&self, owner: usize) -> u64 {
+        super::content_store::allocated(&self.configs[owner].db).unwrap()
+    }
+
+    fn row_counts(&self, owner: usize) -> Vec<i64> {
+        [
+            "facts",
+            "book",
+            "applications",
+            "receipts",
+            "commits",
+            "messages",
+        ]
+        .into_iter()
+        .map(|table| {
+            self.connections[owner]
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        })
+        .collect()
+    }
+}
 
 #[derive(Default)]
 struct Hooks {
@@ -100,7 +339,7 @@ fn limits() -> JobLimits {
         max_store_bytes: 16_777_216,
     }
 }
-fn arm(s: &Session, limit: JobLimits, expire_after: Option<usize>, corrupt_proof: bool) {
+fn arm(s: &ReadSession, limit: JobLimits, expire_after: Option<usize>, corrupt_proof: bool) {
     let clock = Rc::new(Cell::new(Instant::now()));
     let clock_for_job = clock.clone();
     let job = Job::new(
@@ -152,14 +391,24 @@ enum Source {
     Missing,
     Unmatched,
 }
-fn prepare(tag: &str, source_state: Source) -> (Session, Value, Value) {
-    let (mut source, target, _) = transfer_documents();
-    if source_state == Source::Unmatched {
-        source["events"][3]["family_id"] = json!("other-source-family");
+fn prepare(tag: &str, source_state: Source) -> (ReadSession, Value, Value) {
+    let docs = cached_transfer_docs();
+    let (source, source_raw) = if source_state == Source::Unmatched {
+        (&docs.source_unmatched, docs.source_unmatched_raw.as_str())
+    } else {
+        (&docs.source_applied, docs.source_applied_raw.as_str())
+    };
+    let mut s = ReadSession::new(tag);
+    for i in 0..3 {
+        let captured = s.capture_cached(source, source_raw, i);
+        assert_eq!(
+            captured["kind"], "Recorded",
+            "source capture {i}: {captured}"
+        );
+        let applied = s.apply(1, &captured);
+        assert_eq!(applied["kind"], "Applied", "source apply {i}: {applied}");
     }
-    let mut s = Session::new(tag);
-    apply_sources(&mut s, &source, 3);
-    let outgoing = s.capture(&source, 3);
+    let outgoing = s.capture_cached(source, source_raw, 3);
     assert_eq!(outgoing["kind"], "Recorded", "{outgoing}");
     if source_state != Source::Missing {
         let applied = s.apply(1, &outgoing);
@@ -173,11 +422,11 @@ fn prepare(tag: &str, source_state: Source) -> (Session, Value, Value) {
             "{applied}"
         );
     }
-    let incoming = s.capture(&target, 0);
+    let incoming = s.capture_cached(&docs.target, docs.target_raw.as_str(), 0);
     assert_eq!(incoming["kind"], "Recorded", "{incoming}");
     (s, outgoing, incoming)
 }
-fn assert_zero_target(s: &Session, before: &Value, rows: &[i64]) {
+fn assert_zero_target(s: &mut ReadSession, before: &Value, rows: &[i64]) {
     assert_eq!(&s.image(2), before);
     assert_eq!(s.row_counts(2), rows);
     s.audit();
@@ -201,7 +450,7 @@ fn c5_h2_missing_receipt_reads_count_and_retry_reuses_the_same_job() {
     assert!(first.wire_bytes > 0);
     assert_eq!(first.requests, 1);
     assert_eq!(first.stopped, None);
-    assert_zero_target(&s, &before, &rows);
+    assert_zero_target(&mut s, &before, &rows);
     assert_eq!(s.apply(1, &outgoing)["kind"], "Applied");
     rearm_same_job();
     let applied = s.apply(2, &incoming);
@@ -229,7 +478,7 @@ fn c5_h2_unmatched_receipt_preserves_audited_read_cost_and_zero_target() {
     let snapshot = checked_snapshot();
     assert!(snapshot.wire_bytes > 0);
     assert_eq!(snapshot.stopped, None);
-    assert_zero_target(&s, &before, &rows);
+    assert_zero_target(&mut s, &before, &rows);
     s.recover_all();
 }
 
@@ -250,7 +499,7 @@ fn c5_h2_proof_failure_keeps_full_read_cost_then_healthy_retry_can_apply() {
     let failed = checked_snapshot();
     assert!(failed.wire_bytes > 0);
     assert_eq!(failed.stopped, None);
-    assert_zero_target(&s, &before, &rows);
+    assert_zero_target(&mut s, &before, &rows);
     rearm_same_job();
     assert_eq!(s.apply(2, &incoming)["kind"], "Applied");
     let healthy = checked_snapshot();
@@ -276,7 +525,7 @@ fn c5_h2_read_completed_at_deadline_counts_before_stopping() {
     assert_eq!(snapshot.stopped, Some(DEADLINE));
     assert_eq!(snapshot.records, 0);
     assert!(snapshot.wire_bytes > 0);
-    assert_zero_target(&s, &before, &rows);
+    assert_zero_target(&mut s, &before, &rows);
     rearm_same_job();
     assert!(s.apply(2, &incoming)["error"]
         .as_str()
@@ -304,7 +553,7 @@ fn c5_h2_low_wire_limit_keeps_failed_bytes_and_does_not_charge_sql_rows_as_recor
     assert_eq!(snapshot.stopped, Some(LIMIT_EXCEEDED));
     assert!(snapshot.wire_bytes > 1);
     assert_eq!(snapshot.records, 0);
-    assert_zero_target(&s, &before, &rows);
+    assert_zero_target(&mut s, &before, &rows);
     rearm_same_job();
     assert!(s.apply(2, &incoming)["error"].is_string());
     assert_eq!(checked_snapshot().wire_bytes, snapshot.wire_bytes);
@@ -313,11 +562,35 @@ fn c5_h2_low_wire_limit_keeps_failed_bytes_and_does_not_charge_sql_rows_as_recor
 
 #[test]
 fn c5_h2_external_deadline_after_return_does_not_erase_read_accounting() {
-    let (mut s, _, incoming) = prepare("c5-h2-ingress", Source::Applied);
+    let (source, target, _) = transfer_documents();
+    let mut s = Session::new("c5-h2-ingress");
+    apply_sources(&mut s, &source, 3);
+    let outgoing = s.capture(&source, 3);
+    assert_eq!(outgoing["kind"], "Recorded", "{outgoing}");
+    assert_eq!(s.apply(1, &outgoing)["kind"], "Applied");
+    let incoming = s.capture(&target, 0);
+    assert_eq!(incoming["kind"], "Recorded", "{incoming}");
     let before = s.image(2);
     let rows = s.row_counts(2);
-    arm(&s, limits(), None, false);
-    HOOKS.with(|state| state.borrow_mut().expire_external_after = Some(1));
+    let clock = Rc::new(Cell::new(Instant::now()));
+    let clock_for_job = clock.clone();
+    let job = Job::new(
+        limits(),
+        Existing {
+            store_bytes: s.allocated(2),
+            staged_bytes: 0,
+        },
+        Box::new(move || clock_for_job.get()),
+    )
+    .unwrap();
+    HOOKS.with(|state| {
+        *state.borrow_mut() = Hooks {
+            ready: Some(job),
+            clock: Some(clock),
+            expire_external_after: Some(1),
+            ..Hooks::default()
+        }
+    });
     let rejected = s.apply(2, &incoming);
     assert!(
         rejected["error"]
@@ -331,7 +604,9 @@ fn c5_h2_external_deadline_after_return_does_not_erase_read_accounting() {
     assert!(snapshot.wire_bytes > 0);
     // Job 自身期限尚未到，先到的是外部 ingress；不能拿另一个钟覆盖它。
     assert_eq!(snapshot.stopped, None);
-    assert_zero_target(&s, &before, &rows);
+    assert_eq!(&s.image(2), &before);
+    assert_eq!(s.row_counts(2), rows);
+    s.recover_all();
 }
 
 #[test]
