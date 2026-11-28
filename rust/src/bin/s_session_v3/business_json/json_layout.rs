@@ -1,12 +1,15 @@
 //! #1527：生产mixed与Native测试臂共用的唯一JSON布局测量核。
 use std::mem::size_of;
 
+#[inline]
 pub(crate) fn sum(values: impl IntoIterator<Item = usize>) -> usize {
     values.into_iter().fold(0usize, usize::saturating_add)
 }
+#[inline]
 pub(crate) fn vec_bytes<T>(capacity: usize) -> usize {
     capacity.saturating_mul(size_of::<T>())
 }
+#[inline]
 pub(crate) fn tree_slots<K, V>(len: usize) -> usize {
     // 每个条目最多独占一棵含 11 key/value、12 edge 的节点；上界刻意不减费。
     len.saturating_mul(
@@ -15,6 +18,19 @@ pub(crate) fn tree_slots<K, V>(len: usize) -> usize {
             .saturating_add(16 * size_of::<usize>()),
     )
 }
+
+const ATOM_DELIM: [bool; 256] = {
+    let mut t = [false; 256];
+    t[b',' as usize] = true;
+    t[b']' as usize] = true;
+    t[b'}' as usize] = true;
+    t[b' ' as usize] = true;
+    t[b'\r' as usize] = true;
+    t[b'\n' as usize] = true;
+    t[b'\t' as usize] = true;
+    t[b':' as usize] = true;
+    t
+};
 
 /// 无分配词法计数，只产生内存上界；仍调用原 strict_json/原业务谓词，不赋予语法合法资格。
 /// 每个 value token 计一个可能数组槽（包含对象值/键会高估）；Vec 扩容峰值<=3*max(4,2*n)。
@@ -31,36 +47,47 @@ pub(crate) struct JsonShape {
 impl JsonShape {
     pub(crate) fn scan(bytes: &[u8]) -> Self {
         let mut out = Self::default();
-        let mut i = 0;
+        let len = bytes.len();
+        let mut i = 0usize;
         let mut depth = 0usize;
-        while i < bytes.len() {
-            match bytes[i] {
+        while i < len {
+            let b = bytes[i];
+            match b {
                 b'"' => {
                     let start = i + 1;
-                    i += 1;
-                    while i < bytes.len() && bytes[i] != b'"' {
-                        if bytes[i] == b'\\' {
-                            i = i.saturating_add(1);
+                    i = start;
+                    while i < len {
+                        let c = bytes[i];
+                        if c == b'"' {
+                            break;
                         }
-                        i = i.saturating_add(1);
+                        if c == b'\\' {
+                            i = i.saturating_add(2);
+                        } else {
+                            i += 1;
+                        }
                     }
                     let n = i.saturating_sub(start);
                     out.text = out.text.saturating_add(n);
-                    out.longest = out.longest.max(n);
+                    if n > out.longest {
+                        out.longest = n;
+                    }
                     out.values = out.values.saturating_add(1);
                 }
                 b'{' | b'[' => {
                     out.values = out.values.saturating_add(1);
-                    out.arrays += usize::from(bytes[i] == b'[');
+                    out.arrays += usize::from(b == b'[');
                     depth += 1;
-                    out.depth = out.depth.max(depth);
+                    if depth > out.depth {
+                        out.depth = depth;
+                    }
                 }
                 b'}' | b']' => depth = depth.saturating_sub(1),
                 b':' => out.fields += 1,
                 b',' | b' ' | b'\n' | b'\r' | b'\t' => {}
                 _ => {
                     out.values += 1;
-                    while i + 1 < bytes.len() && !b",]} \r\n\t:".contains(&bytes[i + 1]) {
+                    while i + 1 < len && !ATOM_DELIM[bytes[i + 1] as usize] {
                         i += 1;
                     }
                 }
@@ -101,6 +128,7 @@ impl JsonShape {
         visit(value, 0, &mut out);
         out
     }
+    #[inline]
     pub(crate) fn parse_peak(&self) -> usize {
         sum([
             self.text,
@@ -119,6 +147,7 @@ impl JsonShape {
     }
     /// canonical_json 的每层 keys/parts、join和format共存。6是单字节转义的最长UTF-8输出。
     #[cfg(feature = "s_incremental")]
+    #[inline]
     pub(crate) fn canonical_peak(&self) -> usize {
         let output = sum([
             self.text.saturating_mul(6),
