@@ -157,19 +157,16 @@ where
       let compatible := (a.first :: a.laterRev).filter fun (m, _) => edge m x
       compatible.head?.map fun (m, prefixRev) => (x, m :: prefixRev)
 
-  /-- 从待反证的同性帧开始。每跨一层必须先胜过该层极值或与之等值，
-  并重试其紧邻前驱；孤立异向帧或更强历史帧阻止回溯。
+  /-- 从待反证的同性帧开始。只有严格胜过该层极值才重试其紧邻前驱；
+  等值或更强的历史帧以及孤立异向帧均阻止回溯。
   [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
   rewindPivots (edge : LocalFractal P → LocalFractal P → Bool)
       (x : LocalFractal P) : List (PenPivotCluster P) → Option (List (PenPivotCluster P))
     | [] => none
     | p :: rest =>
-      let eqv := equalExtreme x p.first.1
-      if eqv || betterExtreme x p.first.1 then
+      if betterExtreme x p.first.1 then
         match linkPivot edge rest.head? x with
-        | some m =>
-          let frame := if eqv then { p with laterRev := m :: p.laterRev } else ⟨m, []⟩
-          some (frame :: rest)
+        | some m => some (⟨m, []⟩ :: rest)
         | none =>
           match rest with
           | _ :: earlier => rewindPivots edge x earlier
