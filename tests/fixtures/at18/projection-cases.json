@@ -1,0 +1,70 @@
+{
+  "schema_version": "at18-contract-cases/1",
+  "scopes": {
+    "slice": "TB-01",
+    "kind": "detail",
+    "id": "A/a~%@",
+    "basis": ["x/y~%@.json", ""],
+    "domain": ["simulation", null],
+    "expected": [
+      "key:TB-01/detail/A~1a~0%25%40",
+      "key:TB-01/detail/A~1a~0%25%40@basis:x~1y~0%25%40.json@",
+      "key:TB-01/detail/A~1a~0%25%40@simulation@none",
+      "key:TB-01/detail/A~1a~0%25%40@basis:x~1y~0%25%40.json@@simulation@none"
+    ],
+    "ticket": "ticket:1279@a%25%40/b",
+    "slot": "slot:tb.simulation.TB-01@none"
+  },
+  "authorization_absent": {
+    "required": [
+      {"obligation": "slot:permission.experiment@P1-demo", "tb_ids": ["TB-09"], "destination_ids": ["DST-05"]},
+      {"obligation": "slot:migration.experiment@P1-demo", "tb_ids": ["TB-10"], "destination_ids": ["DST-02", "DST-03", "DST-05"]},
+      {"obligation": "slot:post_gate.experiment@P1-demo", "tb_ids": ["TB-11"], "destination_ids": []}
+    ],
+    "reason": "AUTH_REQUIRED",
+    "blocker_or_gap": "ticket:2133",
+    "required_flag": true
+  },
+  "landing": {
+    "sha_by_ticket": {"100": ["shared", "A"], "101": ["shared", "B"], "102": ["C"], "103": ["D"]},
+    "native": {"100": "TB-01"},
+    "attributions": [
+      {"ticket": 101, "attribution_scopes": ["TB-01", "TB-09"]},
+      {"ticket": 102, "attribution_scopes": ["TB-10"]},
+      {"ticket": 103, "attribution_scopes": ["GRAPH"]}
+    ],
+    "dst_closure": ["TB-01", "TB-09"],
+    "dst_tickets": [[100, "TB-01"], [101, "TB-01"], [101, "TB-09"], [103, "GRAPH"]],
+    "dst_commits": ["A", "B", "D", "F", "shared"]
+  },
+  "deferrals": {
+    "keys": [
+      {"slice_id": "TB-09", "kind": "story", "id": "S1", "gate": "ISSUE_1561_P2_FIRST_SEND"},
+      {"slice_id": "TB-10", "kind": "family", "id": "F1", "gate": "ADR_0036_POST_GATE_EXPERIMENT"},
+      {"slice_id": "TB-08", "kind": "story", "id": "S2", "gate": "ADR_0036_POST_GATE_PRODUCTION"}
+    ],
+    "dst_closure": ["TB-09", "TB-10", "TB-08", "TB-11"],
+    "dst_coverage": [["story", "S1"], ["family", "F1"]],
+    "expected_dst": ["ADR_0036_POST_GATE_EXPERIMENT", "ISSUE_1561_P2_FIRST_SEND"],
+    "expected_tb": {
+      "TB-08": ["ADR_0036_POST_GATE_PRODUCTION"],
+      "TB-09": ["ISSUE_1561_P2_FIRST_SEND"],
+      "TB-10": ["ADR_0036_POST_GATE_EXPERIMENT"],
+      "TB-11": ["ISSUE_1320_HEAVY_MEASUREMENT"]
+    }
+  },
+  "references": {
+    "authorization_declaration": "AUTHORIZATION",
+    "parameter_version": "AUTHORIZATION",
+    "gate_reached_event": "RUN_RECORD",
+    "first_activation": "RUN_RECORD",
+    "non_activation_evidence": "RUN_RECORD",
+    "runtime_verification": "RUN_RECORD",
+    "non_empty_evidence_refs": "RUN_RECORD"
+  },
+  "scalar_mismatch": {
+    "actual": {"tb_summaries": [{"gate_satisfied": false, "tb_id": "TB-11"}]},
+    "expected": {"tb_summaries": [{"gate_satisfied": true, "tb_id": "TB-11"}]},
+    "pointers": ["/tb_summaries/0/gate_satisfied"]
+  }
+}

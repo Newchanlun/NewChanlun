@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "crosswalk_sha256",
+    "adapter_contract_sha256",
+    "experiment_profile_id",
+    "checks",
+    "bindings",
+    "pregate"
+  ],
+  "properties": {
+    "schema_version": {"const": "at18-registry/1"},
+    "crosswalk_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "adapter_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "experiment_profile_id": {
+      "anyOf": [
+        {"allOf": [{"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}, {"not": {"const": "none"}}]},
+        {"type": "null"}
+      ]
+    },
+    "checks": {"type": "array", "items": {"$ref": "#/$defs/Check"}},
+    "bindings": {"type": "array", "items": {"$ref": "#/$defs/Binding"}},
+    "pregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["census_sha256", "landings"],
+      "properties": {
+        "census_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "landings": {"type": "array", "items": {"$ref": "#/$defs/Landing"}}
+      }
+    }
+  },
+  "$defs": {
+    "Check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_id",
+        "group",
+        "evidence_class",
+        "profile_id",
+        "runner",
+        "selector",
+        "expected_count",
+        "key_aware",
+        "source",
+        "record"
+      ],
+      "properties": {
+        "check_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "group": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "evidence_class": {"enum": ["simulation", "experiment", "production"]},
+        "profile_id": {
+          "anyOf": [
+            {"allOf": [{"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}, {"not": {"const": "none"}}]},
+            {"type": "null"}
+          ]
+        },
+        "runner": {"enum": ["cargo-test", "node-test", "pytest", "command"]},
+        "selector": {"type": "string", "minLength": 1},
+        "expected_count": {"type": "integer", "minimum": 1},
+        "key_aware": {"type": "boolean"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "record": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+      }
+    },
+    "Binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding_id", "slice_id", "basis", "keys", "domains"],
+      "properties": {
+        "binding_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "slice_id": {"type": "string", "pattern": "^TB-(?:0[1-9]|10)$"},
+        "basis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "pointer"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "pointer": {"type": "string", "pattern": "^(?:/(?:[^~]|~[01])*)?$"}
+          }
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id"],
+            "properties": {"kind": {"enum": ["story", "family", "detail"]}, "id": {"type": "string", "minLength": 1}}
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "domains": {"type": "array", "items": {"$ref": "#/$defs/Domain"}, "minItems": 1}
+      }
+    },
+    "Domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_class", "profile_id", "result", "deferred_gate", "checks"],
+      "properties": {
+        "evidence_class": {"enum": ["simulation", "experiment", "production"]},
+        "profile_id": {
+          "anyOf": [
+            {"allOf": [{"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}, {"not": {"const": "none"}}]},
+            {"type": "null"}
+          ]
+        },
+        "result": {"enum": ["VERIFIED", "PRESERVED_BOUNDARY", "BOUNDED_DEFERRED"]},
+        "deferred_gate": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "checks": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+          "uniqueItems": true
+        }
+      }
+    },
+    "Landing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ticket", "commits", "attribution_scopes", "cure_checks"],
+      "properties": {
+        "ticket": {"type": "integer", "minimum": 1},
+        "commits": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "attribution_scopes": {
+          "type": "array",
+          "items": {"anyOf": [{"type": "string", "pattern": "^TB-(?:0[1-9]|10)$"}, {"const": "GRAPH"}]},
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "cure_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commit", "run_id", "kind", "target", "check_id"],
+            "properties": {
+              "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+              "run_id": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+              "kind": {"enum": ["test", "step"]},
+              "target": {"type": "string", "minLength": 1},
+              "check_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+            }
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}
