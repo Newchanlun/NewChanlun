@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..6fd8d68 100644
+index e69de29..4c2f612 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,340 @@
 +package middleware
 +
 +import (
@@ -31,6 +31,42 @@ index e69de29..6fd8d68 100644
 +
 +func hasAnyHeaderValue(h http.Header, key string) bool {
 +	return len(h.Values(key)) > 0
++}
++
++// HasPreflightOrReviewHeader reports whether the request carries either the
++// formal review launch header or any Session-Id value in the preflight- namespace.
++func HasPreflightOrReviewHeader(h http.Header) bool {
++	if h == nil {
++		return false
++	}
++	if len(h.Values(preflightreceipt.ReviewHeader)) > 0 {
++		return true
++	}
++	for _, sv := range h.Values("Session-Id") {
++		for _, part := range strings.Split(sv, ",") {
++			if strings.HasPrefix(strings.TrimSpace(part), "preflight-") {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++// IsAllowedPreflightOrReviewEntry reports whether r targets one of the exact
++// supported entry points handled by the /v1 route group (POST /v1/responses, or
++// POST /v1/review-receipts/seal when carrying the review launch header), without
++// a WebSocket/protocol Upgrade header.
++func IsAllowedPreflightOrReviewEntry(r *http.Request) bool {
++	if r == nil || r.URL == nil || r.Method != http.MethodPost || hasAnyHeaderValue(r.Header, "Upgrade") {
++		return false
++	}
++	if r.URL.Path == "/v1/responses" {
++		return true
++	}
++	if r.URL.Path == "/v1/review-receipts/seal" && len(r.Header.Values(preflightreceipt.ReviewHeader)) > 0 {
++		return true
++	}
++	return false
 +}
 +
 +func uniqueValidReviewLaunch(h http.Header) (string, bool) {
@@ -1724,10 +1760,10 @@ index 0000000..9cdebe2
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..7630ee7 100644
+index e69de29..1c6fe9c 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1472 @@
+@@ -0,0 +1,1624 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -3200,8 +3236,204 @@ index e69de29..7630ee7 100644
 +
 +func (d *deadlineRecorder) SetReadDeadline(time.Time) error  { return nil }
 +func (d *deadlineRecorder) SetWriteDeadline(time.Time) error { return nil }
++
++func TestReviewReceiptUnmatchedMethodAndPathTaintOnlyWhenAuthenticated(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R89): authenticated requests carrying an existing review launch header
++	// to unregistered HTTP methods (e.g. PUT /v1/responses), unregistered paths (POST /v1/unknown),
++	// or /v1/realtime routes MUST reject with 400 and taint the launch so prior turns cannot seal;
++	// unauthenticated requests to those same methods/paths MUST NOT mutate the ledger.
++	root := filepath.Join(t.TempDir(), "receipts-unmatched")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++	upstream, transport := newHostTLSServer(t, "chatgpt.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_um_ok","object":"response","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_um","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n")
++	}))
++	defer upstream.Close()
++	defer transport.CloseIdleConnections()
++
++	newReviewServer := func(handleMethodNotAllowed bool) *Server {
++		server := newTestServer(t)
++		server.engine.HandleMethodNotAllowed = handleMethodNotAllowed
++		manager := server.handlers.AuthManager
++		manager.SetRoundTripperProvider(preflightTransportProvider{transport})
++		manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(server.cfg))
++		const id = "receipt-codex-unmatched"
++		cred := &auth.Auth{
++			ID: id, Provider: "codex", Status: auth.StatusActive,
++			Attributes: map[string]string{auth.AttributeAuthKind: auth.AuthKindOAuth},
++			Metadata:   map[string]any{"access_token": "offline-fake", "websockets": true},
++		}
++		if _, err := manager.Register(context.Background(), cred); err != nil {
++			t.Fatal(err)
++		}
++		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "gpt-6.2-sol"}})
++		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
++		return server
++	}
++
++	runCleanTurn := func(s *Server, launch, session string) {
++		t.Helper()
++		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true,"input":"ok"}`))
++		req.Header.Set("Authorization", "Bearer test-key")
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("Session-Id", session)
++		req.Header.Set(preflightreceipt.ReviewHeader, launch)
++		res := newDeadlineRecorder()
++		s.engine.ServeHTTP(res, req)
++		if res.Code != http.StatusOK {
++			t.Fatalf("clean turn %s HTTP %d: %s", launch, res.Code, res.Body.String())
++		}
++		deadline := time.Now().Add(5 * time.Second)
++		for time.Now().Before(deadline) {
++			if raw, err := os.ReadFile(filepath.Join(root, launch, "receipt.json")); err == nil {
++				var rr preflightreceipt.ReviewReceipt
++				if json.Unmarshal(raw, &rr) == nil && rr.Complete && rr.Requests == 1 && !rr.Tainted {
++					return
++				}
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++		t.Fatalf("clean turn %s did not persist receipt.json in time", launch)
++	}
++
++	sealLaunch := func(s *Server, launch, session string) (int, string) {
++		t.Helper()
++		deadline := time.Now().Add(5 * time.Second)
++		for {
++			req := httptest.NewRequest(http.MethodPost, "/v1/review-receipts/seal", nil)
++			req.Header.Set("Authorization", "Bearer test-key")
++			req.Header.Set("Session-Id", session)
++			req.Header.Set(preflightreceipt.ReviewHeader, launch)
++			res := newDeadlineRecorder()
++			s.engine.ServeHTTP(res, req)
++			body := res.Body.String()
++			if res.Code == http.StatusConflict && strings.Contains(body, `"in_flight"`) && time.Now().Before(deadline) {
++				time.Sleep(5 * time.Millisecond)
++				continue
++			}
++			return res.Code, body
++		}
++	}
++
++	sendDisallowed := func(s *Server, method, path, launch, session string, withAuth bool) *httptest.ResponseRecorder {
++		t.Helper()
++		req := httptest.NewRequest(method, path, nil)
++		if withAuth {
++			req.Header.Set("Authorization", "Bearer test-key")
++		}
++		req.Header.Set("Session-Id", session)
++		req.Header.Set(preflightreceipt.ReviewHeader, launch)
++		res := newDeadlineRecorder()
++		s.engine.ServeHTTP(res, req)
++		return res.ResponseRecorder
++	}
++
++	for _, handle405 := range []bool{false, true} {
++		srv := newReviewServer(handle405)
++		tag := "no405"
++		if handle405 {
++			tag = "with405"
++		}
++		t.Run(tag, func(t *testing.T) {
++			suffix := "1"
++			if handle405 {
++				suffix = "2"
++			}
++			// 1. Unauthenticated unmatched method + unmatched path MUST NOT taint existing launch.
++			lUnauth := "review-e4010101-2222-4333-8444-5555555550" + suffix + "1"
++			sUnauth := "019d0000-0000-7000-8000-e401010100" + suffix + "1"
++			runCleanTurn(srv, lUnauth, sUnauth)
++			_ = sendDisallowed(srv, http.MethodPut, "/v1/responses", lUnauth, sUnauth, false)
++			_ = sendDisallowed(srv, http.MethodPost, "/v1/does-not-exist", lUnauth, sUnauth, false)
++			_ = sendDisallowed(srv, http.MethodDelete, "/v1/review-receipts/seal", lUnauth, sUnauth, false)
++			if code, body := sealLaunch(srv, lUnauth, sUnauth); code != http.StatusOK {
++				t.Fatalf("unauthenticated disallowed requests tainted launch: seal HTTP %d (%s), want 200", code, body)
++			}
++
++			// 2. Authenticated PUT /v1/responses MUST return 400 and taint launch so seal returns 409 rejected.
++			lPut := "review-e4010101-2222-4333-8444-5555555550" + suffix + "2"
++			sPut := "019d0000-0000-7000-8000-e401010100" + suffix + "2"
++			runCleanTurn(srv, lPut, sPut)
++			putRec := sendDisallowed(srv, http.MethodPut, "/v1/responses", lPut, sPut, true)
++			if putRec.Code != http.StatusBadRequest {
++				t.Fatalf("authenticated PUT /v1/responses HTTP %d, want 400", putRec.Code)
++			}
++			if code, body := sealLaunch(srv, lPut, sPut); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
++				t.Fatalf("seal after authenticated PUT /v1/responses = (%d, %s), want (409, rejected)", code, body)
++			}
++
++			// 3. Authenticated unknown path MUST return 400 and taint launch so seal returns 409 rejected.
++			lUnknown := "review-e4010101-2222-4333-8444-5555555550" + suffix + "3"
++			sUnknown := "019d0000-0000-7000-8000-e401010100" + suffix + "3"
++			runCleanTurn(srv, lUnknown, sUnknown)
++			unkRec := sendDisallowed(srv, http.MethodPost, "/v1/does-not-exist", lUnknown, sUnknown, true)
++			if unkRec.Code != http.StatusBadRequest {
++				t.Fatalf("authenticated POST /v1/does-not-exist HTTP %d, want 400", unkRec.Code)
++			}
++			if code, body := sealLaunch(srv, lUnknown, sUnknown); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
++				t.Fatalf("seal after authenticated POST /v1/does-not-exist = (%d, %s), want (409, rejected)", code, body)
++			}
++
++			// 4. Authenticated /v1/realtime MUST return 400 and taint launch so seal returns 409 rejected.
++			lRT := "review-e4010101-2222-4333-8444-5555555550" + suffix + "4"
++			sRT := "019d0000-0000-7000-8000-e401010100" + suffix + "4"
++			runCleanTurn(srv, lRT, sRT)
++			rtRec := sendDisallowed(srv, http.MethodPost, "/v1/realtime/sessions", lRT, sRT, true)
++			if rtRec.Code != http.StatusBadRequest {
++				t.Fatalf("authenticated POST /v1/realtime/sessions HTTP %d, want 400", rtRec.Code)
++			}
++			if code, body := sealLaunch(srv, lRT, sRT); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
++				t.Fatalf("seal after authenticated POST /v1/realtime/sessions = (%d, %s), want (409, rejected)", code, body)
++			}
++		})
++	}
++}
+diff --git a/internal/api/server.go b/internal/api/server.go
+index 099b5dd..aae9bfc 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -198,6 +198,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 		engine.Use(mw)
+ 	}
+ 
++	engine.Use(s.preflightDisallowedEndpointGuard())
+ 	engine.Use(corsMiddleware())
+ 	engine.Use(s.responseCompressionMiddleware())
+ 	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
+diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
+index 9450038..b81e87f 100644
+--- a/internal/api/server_middleware.go
++++ b/internal/api/server_middleware.go
+@@ -485,6 +485,27 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+ 	return accessAuthMiddleware(manager, false)
+ }
+ 
++func (s *Server) preflightDisallowedEndpointGuard() gin.HandlerFunc {
++	guard := middleware.PreflightReceipt()
++	return func(c *gin.Context) {
++		if c == nil || c.Request == nil || !middleware.HasPreflightOrReviewHeader(c.Request.Header) {
++			c.Next()
++			return
++		}
++		if middleware.IsAllowedPreflightOrReviewEntry(c.Request) {
++			c.Next()
++			return
++		}
++		if s != nil && s.accessManager != nil {
++			if _, authErr := s.accessManager.Authenticate(c.Request.Context(), c.Request); authErr != nil {
++				c.Next()
++				return
++			}
++		}
++		guard(c)
++	}
++}
++
+ func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+ 	return accessAuthMiddleware(manager, true)
+ }
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index e2b039a..07de86f 100644
+index e2b039a..5abb343 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
 @@ -65,6 +65,7 @@ func (s *Server) setupRoutes() {
@@ -3220,7 +3452,39 @@ index e2b039a..07de86f 100644
  		v1.POST("/alpha/search", s.codexAlphaSearch)
  		v1.POST("/live", s.codexLiveHandler.Handle)
  		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
-@@ -111,6 +113,7 @@ func (s *Server) setupRoutes() {
+@@ -94,23 +96,25 @@ func (s *Server) setupRoutes() {
+ 
+ 	realtimeAuth := realtimeAuthMiddleware(s.accessManager, s.codexLiveHandler)
+ 	standardAuth := realtimeStandardAuthMiddleware(s.accessManager)
+-	s.engine.GET("/v1/realtime", realtimeAuth, s.codexLiveHandler.HandleRealtimeWebsocket)
+-	s.engine.POST("/v1/realtime", realtimeAuth, s.codexLiveHandler.Handle)
+-	s.engine.POST("/v1/realtime/calls", realtimeAuth, s.codexLiveHandler.Handle)
+-	s.engine.GET("/v1/realtime/calls/:call_id", realtimeAuth, s.codexLiveHandler.HandleSideband)
+-	s.engine.POST("/v1/realtime/client_secrets", standardAuth, s.codexLiveHandler.CreateClientSecret)
+-	s.engine.POST("/v1/realtime/sessions", standardAuth, s.codexLiveHandler.CreateLegacySession)
+-	s.engine.POST("/v1/realtime/transcription_sessions", standardAuth, s.codexLiveHandler.HandleTranscriptionSession)
+-	s.engine.GET("/v1/realtime/translations", realtimeAuth, s.codexLiveHandler.HandleTranslation)
+-	s.engine.POST("/v1/realtime/translations", realtimeAuth, s.codexLiveHandler.HandleTranslation)
+-	s.engine.POST("/v1/realtime/translations/client_secrets", standardAuth, s.codexLiveHandler.HandleTranslation)
+-	s.engine.POST("/v1/realtime/calls/:call_id/hangup", standardAuth, s.codexLiveHandler.HandleHangup)
+-	s.engine.POST("/v1/realtime/calls/:call_id/accept", standardAuth, s.codexLiveHandler.HandleSIPControl)
+-	s.engine.POST("/v1/realtime/calls/:call_id/reject", standardAuth, s.codexLiveHandler.HandleSIPControl)
+-	s.engine.POST("/v1/realtime/calls/:call_id/refer", standardAuth, s.codexLiveHandler.HandleSIPControl)
++	preflightMW := middleware.PreflightReceipt()
++	s.engine.GET("/v1/realtime", realtimeAuth, preflightMW, s.codexLiveHandler.HandleRealtimeWebsocket)
++	s.engine.POST("/v1/realtime", realtimeAuth, preflightMW, s.codexLiveHandler.Handle)
++	s.engine.POST("/v1/realtime/calls", realtimeAuth, preflightMW, s.codexLiveHandler.Handle)
++	s.engine.GET("/v1/realtime/calls/:call_id", realtimeAuth, preflightMW, s.codexLiveHandler.HandleSideband)
++	s.engine.POST("/v1/realtime/client_secrets", standardAuth, preflightMW, s.codexLiveHandler.CreateClientSecret)
++	s.engine.POST("/v1/realtime/sessions", standardAuth, preflightMW, s.codexLiveHandler.CreateLegacySession)
++	s.engine.POST("/v1/realtime/transcription_sessions", standardAuth, preflightMW, s.codexLiveHandler.HandleTranscriptionSession)
++	s.engine.GET("/v1/realtime/translations", realtimeAuth, preflightMW, s.codexLiveHandler.HandleTranslation)
++	s.engine.POST("/v1/realtime/translations", realtimeAuth, preflightMW, s.codexLiveHandler.HandleTranslation)
++	s.engine.POST("/v1/realtime/translations/client_secrets", standardAuth, preflightMW, s.codexLiveHandler.HandleTranslation)
++	s.engine.POST("/v1/realtime/calls/:call_id/hangup", standardAuth, preflightMW, s.codexLiveHandler.HandleHangup)
++	s.engine.POST("/v1/realtime/calls/:call_id/accept", standardAuth, preflightMW, s.codexLiveHandler.HandleSIPControl)
++	s.engine.POST("/v1/realtime/calls/:call_id/reject", standardAuth, preflightMW, s.codexLiveHandler.HandleSIPControl)
++	s.engine.POST("/v1/realtime/calls/:call_id/refer", standardAuth, preflightMW, s.codexLiveHandler.HandleSIPControl)
  
  	openaiV1 := s.engine.Group("/openai/v1")
  	openaiV1.Use(AuthMiddleware(s.accessManager))
@@ -3228,7 +3492,7 @@ index e2b039a..07de86f 100644
  	{
  		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
  		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
-@@ -120,6 +123,7 @@ func (s *Server) setupRoutes() {
+@@ -120,6 +124,7 @@ func (s *Server) setupRoutes() {
  	// Codex CLI direct route aliases (chatgpt_base_url compatible)
  	codexDirect := s.engine.Group("/backend-api/codex")
  	codexDirect.Use(AuthMiddleware(s.accessManager))
@@ -3236,7 +3500,7 @@ index e2b039a..07de86f 100644
  	{
  		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
  		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
-@@ -130,6 +134,7 @@ func (s *Server) setupRoutes() {
+@@ -130,6 +135,7 @@ func (s *Server) setupRoutes() {
  	// Gemini compatible API routes
  	v1beta := s.engine.Group("/v1beta")
  	v1beta.Use(AuthMiddleware(s.accessManager))
@@ -3244,6 +3508,35 @@ index e2b039a..07de86f 100644
  	{
  		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
  		v1beta.POST("/interactions", geminiHandlers.Interactions)
+@@ -589,6 +595,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
+ 	s.wsRouteMu.Unlock()
+ 
+ 	authMiddleware := AuthMiddleware(s.accessManager)
++	preflightMW := middleware.PreflightReceipt()
+ 	conditionalAuth := func(c *gin.Context) {
+ 		if !s.wsAuthEnabled.Load() {
+ 			middleware.CaptureAuthenticatedRequestBody(c)
+@@ -600,12 +607,19 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
+ 		}
+ 		authMiddleware(c)
+ 	}
++	conditionalPreflight := func(c *gin.Context) {
++		if !s.wsAuthEnabled.Load() {
++			c.Next()
++			return
++		}
++		preflightMW(c)
++	}
+ 	finalHandler := func(c *gin.Context) {
+ 		handler.ServeHTTP(c.Writer, c.Request)
+ 		c.Abort()
+ 	}
+ 
+-	s.engine.GET(trimmed, conditionalAuth, finalHandler)
++	s.engine.GET(trimmed, conditionalAuth, conditionalPreflight, finalHandler)
+ }
+ 
+ // isAnthropicModelsRequest reports whether a /v1/models request should be served in
 diff --git a/internal/pluginhost/preflight_receipt_test.go b/internal/pluginhost/preflight_receipt_test.go
 index e69de29..6cebb36 100644
 --- a/internal/pluginhost/preflight_receipt_test.go
@@ -7984,10 +8277,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..8683516 100644
+index e69de29..b189f1b 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,13540 @@
+@@ -0,0 +1,13963 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -7996,6 +8289,7 @@ index e69de29..8683516 100644
 +	"bytes"
 +	"compress/gzip"
 +	"context"
++	"crypto/hmac"
 +	"crypto/rand"
 +	"crypto/sha256"
 +	"crypto/tls"
@@ -8514,6 +8808,7 @@ index e69de29..8683516 100644
 +	cancelOpReleasePendingGuard
 +	cancelOpFailAndReleaseReservation
 +	cancelOpReleaseReviewWithSlot
++	cancelOpRollbackUnpersisted
 +)
 +
 +type cancelSlotReleaseOp struct {
@@ -8557,9 +8852,10 @@ index e69de29..8683516 100644
 +	maxFinalizeQueue              = 64
 +	failurePersistQueue           []*reviewEntry
 +	failurePersistWorkers         int
++	finalizeQueueMu               sync.Mutex
 +	finalizeQueue                 []*reviewEntry
-+	finalizePendingJobs           int
-+	finalizeWorkers               int
++	finalizePendingJobs           atomic.Int64
++	finalizeWorkers               atomic.Int64
 +	cancelFailMu                  sync.Mutex
 +	activeCancelKeys              = make(map[string]bool)
 +	cancelFailPending             = make(map[string]cancelFailRecord)
@@ -9097,6 +9393,10 @@ index e69de29..8683516 100644
 +			failAndReleaseReservationEntryLocked(op.entry, op.turnSeq, op.pendingTainted, op.pendingFailedSeq, op.holdsSlot)
 +		case cancelOpReleaseReviewWithSlot:
 +			releaseReviewWithSlotLocked(op.entry, op.holdsSlot)
++		case cancelOpRollbackUnpersisted:
++			if evictFD := rollbackUnpersistedEntryLocked(op.key, op.entry); evictFD != nil {
++				closeBudgetedPinnedDirFD(evictFD)
++			}
 +		}
 +	}
 +}
@@ -9295,7 +9595,7 @@ index e69de29..8683516 100644
 +			needRootRecoveryCheck = true
 +		}
 +	}
-+	if pendingReviewTotal >= maxPendingReviewInFlight || finalizePendingJobs >= maxFinalizeQueue {
++	if pendingReviewTotal >= maxPendingReviewInFlight || finalizePendingJobs.Load() >= int64(maxFinalizeQueue) {
 +		if st != nil && turnSeq > st.failedTurnSeq {
 +			st.failedTurnSeq = turnSeq
 +		}
@@ -9501,9 +9801,12 @@ index e69de29..8683516 100644
 +}
 +
 +type toolItemMeta struct {
-+	callID      string
-+	name        string
-+	serverLabel string
++	callID          string
++	name            string
++	serverLabel     string
++	hasValidAction  bool
++	hasValidQueries bool
++	hasValidResult  bool
 +}
 +
 +type toolPayloadField struct {
@@ -9889,6 +10192,10 @@ index e69de29..8683516 100644
 +	CodeSHA          string                      `json:"-"`
 +	CodeStr          string                      `json:"-"`
 +	CodeIsStr        bool                        `json:"-"`
++	HasContent       bool                        `json:"-"`
++	HasValidAction   bool                        `json:"-"`
++	HasValidQueries  bool                        `json:"-"`
++	HasValidResult   bool                        `json:"-"`
 +	CanonicalItemSHA string                      `json:"-"`
 +	Content          []responseOutputContentPart `json:"content"`
 +}
@@ -9897,7 +10204,7 @@ index e69de29..8683516 100644
 +	return status == "" || status == "completed"
 +}
 +
-+func isValidCompletedToolItem(itemType, callID, name, serverLabel string, argsIsStr, inputIsStr bool) bool {
++func isValidCompletedToolItem(itemType, callID, name, serverLabel string, argsIsStr, inputIsStr, codeIsStr, hasValidAction, hasValidQueries, hasValidResult bool) bool {
 +	switch itemType {
 +	case "function_call":
 +		return callID != "" && strings.TrimSpace(callID) == callID &&
@@ -9911,6 +10218,14 @@ index e69de29..8683516 100644
 +		return name != "" && strings.TrimSpace(name) == name &&
 +			serverLabel != "" && strings.TrimSpace(serverLabel) == serverLabel &&
 +			argsIsStr
++	case "web_search_call":
++		return hasValidAction
++	case "file_search_call":
++		return hasValidQueries
++	case "code_interpreter_call":
++		return codeIsStr
++	case "image_generation_call":
++		return hasValidResult
 +	default:
 +		return true
 +	}
@@ -9925,6 +10240,9 @@ index e69de29..8683516 100644
 +}
 +
 +func isValidOutputItemStatus(itemType, itemRole, status string, allowCompleted bool) bool {
++	if itemType == "message" && itemRole != "" && itemRole != "assistant" {
++		return false
++	}
 +	if status == "" {
 +		return true
 +	}
@@ -9990,17 +10308,23 @@ index e69de29..8683516 100644
 +	if itemType == "" {
 +		return itemKindUnknown
 +	}
-+	if itemType == "message" && itemRole == "assistant" {
-+		if itemPhase == "final_answer" {
-+			return itemKindFinalAssistant
++	if itemType == "message" {
++		if itemRole == "assistant" {
++			if itemPhase == "final_answer" {
++				return itemKindFinalAssistant
++			}
++			if itemPhase != "" {
++				return itemKindCommentary
++			}
++			if isDone {
++				return itemKindFinalAssistant
++			}
++			return itemKindMessageAny
 +		}
-+		if itemPhase != "" {
-+			return itemKindCommentary
++		if itemRole == "" && !isDone {
++			return itemKindMessageAny
 +		}
-+		if isDone {
-+			return itemKindFinalAssistant
-+		}
-+		return itemKindMessageAny
++		return itemKindUnknown
 +	}
 +	return itemKindNonMessage
 +}
@@ -10189,12 +10513,12 @@ index e69de29..8683516 100644
 +		return false
 +	}
 +	for _, item := range output {
-+		if item.Type == "message" && item.Role == "assistant" {
-+			if !isTerminalAssistantItemStatus(item.Status) {
++		if item.Type == "message" {
++			if item.Role != "assistant" || !item.HasContent || !isTerminalAssistantItemStatus(item.Status) {
 +				return false
 +			}
 +		} else if !isCompletedNonMessageItemStatus(item.Status) ||
-+			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr) {
++			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
 +			return false
 +		}
 +	}
@@ -10449,7 +10773,7 @@ index e69de29..8683516 100644
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
 +		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
-+		"call_id": {}, "name": {}, "server_label": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {},
++		"call_id": {}, "name": {}, "server_label": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {}, "result": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {}, "refusal": {},
@@ -10830,7 +11154,40 @@ index e69de29..8683516 100644
 +	if !okCode {
 +		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
-+	return toolItemMeta{callID: callID, name: name, serverLabel: serverLabel}, args, input, code, true
++	hasValidAction := false
++	if rawAction, exists := fields["action"]; exists && hasResponseError(rawAction) {
++		if actionFields, aerr := decodeExactJSONObject(rawAction, nil); aerr == nil {
++			actionType, hasAT, okAT := exactOptionalStringPresent(actionFields, "type")
++			if hasAT && okAT && actionType != "" && strings.TrimSpace(actionType) == actionType && len(actionType) <= maxStrictIdentityBytes {
++				hasValidAction = true
++			}
++		}
++	}
++	hasValidQueries := false
++	if rawQueries, exists := fields["queries"]; exists && hasResponseError(rawQueries) {
++		if forEachJSONArrayElement(trimJSONSpace(rawQueries), maxTrackedContentParts, func(elem json.RawMessage) bool {
++			trimmed := trimJSONSpace(elem)
++			if len(trimmed) == 0 || trimmed[0] != '"' {
++				return false
++			}
++			var q string
++			return json.Unmarshal(trimmed, &q) == nil
++		}) {
++			hasValidQueries = true
++		}
++	}
++	hasValidResult := false
++	if resStr, hasRes, okRes := exactOptionalStringPresent(fields, "result"); okRes && hasRes && strings.TrimSpace(resStr) != "" {
++		hasValidResult = true
++	}
++	return toolItemMeta{
++		callID:          callID,
++		name:            name,
++		serverLabel:     serverLabel,
++		hasValidAction:  hasValidAction,
++		hasValidQueries: hasValidQueries,
++		hasValidResult:  hasValidResult,
++	}, args, input, code, true
 +}
 +
 +func canonicalCompletedItemDigest(fields map[string]json.RawMessage) (string, bool) {
@@ -10940,14 +11297,22 @@ index e69de29..8683516 100644
 +			CodeSHA:          codeField.sha,
 +			CodeStr:          codeField.str,
 +			CodeIsStr:        codeField.isStr,
++			HasValidAction:   meta.hasValidAction,
++			HasValidQueries:  meta.hasValidQueries,
++			HasValidResult:   meta.hasValidResult,
 +			CanonicalItemSHA: canonItemSHA,
 +		}
-+		if typ == "message" && role == "assistant" {
-+			parts, okParts := decodeExactAssistantContentParts(fields["content"])
++		if typ == "message" {
++			if role != "" && role != "assistant" {
++				return false
++			}
++			rawContent, hasContent := fields["content"]
++			parts, okParts := decodeExactAssistantContentParts(rawContent)
 +			if !okParts {
 +				return false
 +			}
 +			item.Content = parts
++			item.HasContent = hasContent && hasResponseError(rawContent)
 +		}
 +		items = append(items, item)
 +		return true
@@ -11046,7 +11411,10 @@ index e69de29..8683516 100644
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
 +		}
-+		if itemType == "message" && (itemRole == "" || itemRole == "assistant") {
++		if itemType == "message" {
++			if itemRole != "" && itemRole != "assistant" {
++				return false
++			}
 +			if rawContent, hasContent := frame.itemFields["content"]; hasContent && hasResponseError(rawContent) {
 +				if _, okParts := decodeExactAssistantContentParts(rawContent); !okParts {
 +					return false
@@ -11071,8 +11439,15 @@ index e69de29..8683516 100644
 +			len(itemPhase) > maxStrictIdentityBytes || len(itemStatus) > maxStrictIdentityBytes {
 +			return false
 +		}
-+		if itemType == "message" && itemRole == "assistant" {
-+			if _, okParts := decodeExactAssistantContentParts(frame.itemFields["content"]); !okParts {
++		if itemType == "message" {
++			if itemRole != "assistant" {
++				return false
++			}
++			rawContent, hasContent := frame.itemFields["content"]
++			if !hasContent || !hasResponseError(rawContent) {
++				return false
++			}
++			if _, okParts := decodeExactAssistantContentParts(rawContent); !okParts {
 +				return false
 +			}
 +		}
@@ -13250,9 +13625,20 @@ index e69de29..8683516 100644
 +			if seenSnapKeys != nil && canonKey != "" {
 +				seenSnapKeys[canonKey] = struct{}{}
 +			}
-+			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
-+			if !isValidOutputItemStatus(item.Type, item.Role, item.Status, true) ||
-+				(item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr)) {
++			isMsg := item.Type == "message"
++			isAssistantMsg := isMsg && item.Role == "assistant"
++			if !isValidOutputItemStatus(item.Type, item.Role, item.Status, true) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
++			if isMsg {
++				if (item.Status == "completed" || item.Status == "incomplete") && (!isAssistantMsg || !item.HasContent) {
++					c.mu.Unlock()
++					c.taintStreamAnomaly()
++					return
++				}
++			} else if item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -13821,13 +14207,13 @@ index e69de29..8683516 100644
 +		}
 +		doneKind := classifyOutputItemKind(itemType, itemRole, itemPhase, true)
 +		isAssistantMsg := itemType == "message" && itemRole == "assistant"
-+		if isAssistantMsg {
-+			if !isTerminalAssistantItemStatus(itemStatus) {
++		if itemType == "message" {
++			if !isAssistantMsg || !isTerminalAssistantItemStatus(itemStatus) {
 +				c.taintStreamAnomaly()
 +				return
 +			}
 +		} else if !isCompletedNonMessageItemStatus(itemStatus) ||
-+			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneArgs.isStr, doneInput.isStr) {
++			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneArgs.isStr, doneInput.isStr, doneCode.isStr, doneMeta.hasValidAction, doneMeta.hasValidQueries, doneMeta.hasValidResult) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
@@ -14662,6 +15048,10 @@ index e69de29..8683516 100644
 +		"schema":     receiptJSONString,
 +		"launch":     receiptJSONString,
 +		"started_ns": receiptJSONInt64,
++	}
++	stagingKeyJSONKeys = map[string]receiptJSONKind{
++		"schema": receiptJSONString,
++		"key":    receiptJSONString,
 +	}
 +)
 +
@@ -15744,11 +16134,10 @@ index e69de29..8683516 100644
 +	})
 +}
 +
-+func rollbackUnpersistedEntry(key string, entry *reviewEntry) {
++func rollbackUnpersistedEntryLocked(key string, entry *reviewEntry) *os.File {
 +	if entry == nil {
-+		return
++		return nil
 +	}
-+	reviewMu.Lock()
 +	if entry.inFlight > 0 {
 +		entry.inFlight--
 +	}
@@ -15768,8 +16157,28 @@ index e69de29..8683516 100644
 +			syncActiveCancelKeyLocked(key)
 +		}
 +	}
-+	reviewMu.Unlock()
-+	closeBudgetedPinnedDirFD(evictFD)
++	return evictFD
++}
++
++func rollbackUnpersistedEntryNonBlocking(key string, entry *reviewEntry) {
++	if entry == nil {
++		return
++	}
++	if reviewMu.TryLock() {
++		evictFD := rollbackUnpersistedEntryLocked(key, entry)
++		reviewMu.Unlock()
++		closeBudgetedPinnedDirFD(evictFD)
++		return
++	}
++	enqueueCancelSlotRelease(cancelSlotReleaseOp{
++		kind:  cancelOpRollbackUnpersisted,
++		key:   key,
++		entry: entry,
++	})
++}
++
++func rollbackUnpersistedEntry(key string, entry *reviewEntry) {
++	rollbackUnpersistedEntryNonBlocking(key, entry)
 +}
 +
 +func finishReserveReviewEntryContext(ctx context.Context, root, key string, entry *reviewEntry, turnSeq uint64, pendingTainted bool, pendingFailedSeq uint64) (*ReviewReservation, error) {
@@ -15857,9 +16266,9 @@ index e69de29..8683516 100644
 +
 +				if left {
 +					if persistErr != nil {
-+						rollbackUnpersistedEntry(key, entry)
++						rollbackUnpersistedEntryNonBlocking(key, entry)
 +					} else {
-+						failAndReleaseReservationEntry(entry, turnSeq, pendingTainted, pendingFailedSeq)
++						failAndReleaseReservationEntryNonBlocking(entry, turnSeq, pendingTainted, pendingFailedSeq, false)
 +					}
 +				}
 +			}()
@@ -16232,9 +16641,9 @@ index e69de29..8683516 100644
 +			isUnpersistedEmpty := !ent.markerPersisted && !ent.tainted && !ent.sealed && ent.requests == 0
 +			ent.mu.Unlock()
 +			if isUnpersistedEmpty {
-+				rollbackUnpersistedEntry(key, ent)
++				rollbackUnpersistedEntryNonBlocking(key, ent)
 +			} else {
-+				failAndReleaseReservationEntry(ent, turnSeq, false, 0)
++				failAndReleaseReservationEntryNonBlocking(ent, turnSeq, false, 0, false)
 +			}
 +		}
 +		go func() {
@@ -18041,18 +18450,134 @@ index e69de29..8683516 100644
 +	Started int64  `json:"started_ns"`
 +}
 +
++const stagingKeySchema = "cliproxy-staging-key-v1"
++
++type stagingKeyFile struct {
++	Schema string `json:"schema"`
++	Key    string `json:"key"`
++}
++
 +const maxStagingCreateRetries = 8
 +
 +var (
-+	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker)-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
-+	stagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
-+	stageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
-+	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}$`)
++	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker|pending-key)-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	stagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
++	stageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
++	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}(?:-[0-9a-f]{32})?$`)
 +	stagingOrphanAge    = 5 * time.Minute
 +
 +	activeStagingMu sync.Mutex
 +	activeStaging   = make(map[string]int)
 +)
++
++func readStagingKey(rootHandle *os.Root) ([]byte, bool) {
++	if rootHandle == nil {
++		return nil, false
++	}
++	raw, _, _, _, ok := readPrivateRegularFileInSubdir(rootHandle, ".staging-key", 1024)
++	if !ok {
++		return nil, false
++	}
++	var sk stagingKeyFile
++	if decodeExactReceiptJSON(raw, stagingKeyJSONKeys, &sk) != nil || sk.Schema != stagingKeySchema || !isSHA256Hex(sk.Key) {
++		return nil, false
++	}
++	keyBytes, err := hex.DecodeString(sk.Key)
++	if err != nil || len(keyBytes) != 32 {
++		return nil, false
++	}
++	return keyBytes, true
++}
++
++func signStagingDirName(key []byte, base string) string {
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write([]byte("cliproxy-staging-dir-v1\x00"))
++	_, _ = mac.Write([]byte(base))
++	return base + "-" + hex.EncodeToString(mac.Sum(nil)[:16])
++}
++
++func verifyStagingDirName(key []byte, prefix, name string) bool {
++	if len(key) != 32 || !strings.HasPrefix(name, prefix+"-") || len(name) <= len(prefix)+1+33 {
++		return false
++	}
++	sepIdx := len(name) - 33
++	if name[sepIdx] != '-' {
++		return false
++	}
++	base := name[:sepIdx]
++	tagHex := name[sepIdx+1:]
++	for i := 0; i < len(tagHex); i++ {
++		c := tagHex[i]
++		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
++			return false
++		}
++	}
++	gotTag, err := hex.DecodeString(tagHex)
++	if err != nil || len(gotTag) != 16 {
++		return false
++	}
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write([]byte("cliproxy-staging-dir-v1\x00"))
++	_, _ = mac.Write([]byte(base))
++	return hmac.Equal(gotTag, mac.Sum(nil)[:16])
++}
++
++func ensureStagingKeyLocked(rootHandle, stagingRoot *os.Root, root string) error {
++	if rootHandle == nil || stagingRoot == nil {
++		return ErrUnavailable
++	}
++	if _, err := rootHandle.Lstat(".staging-key"); err == nil {
++		if _, ok := readStagingKey(rootHandle); !ok {
++			return ErrUnavailable
++		}
++		return nil
++	} else if !errors.Is(err, os.ErrNotExist) {
++		return ErrUnavailable
++	}
++	var rawKey [32]byte
++	if _, err := rand.Read(rawKey[:]); err != nil {
++		return ErrUnavailable
++	}
++	data, err := json.Marshal(stagingKeyFile{
++		Schema: stagingKeySchema,
++		Key:    hex.EncodeToString(rawKey[:]),
++	})
++	if err != nil {
++		return ErrUnavailable
++	}
++	rootDirFD, _, _, _, err := openPinnedDirFD(rootHandle)
++	if err != nil {
++		return ErrUnavailable
++	}
++	defer rootDirFD.Close()
++	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
++	if err != nil {
++		return ErrUnavailable
++	}
++	defer stagingDirFD.Close()
++	tmp, f, releaseTmp, err := createStagingFile(rootHandle, stagingRoot, root, "pending-key")
++	if err != nil {
++		return err
++	}
++	defer releaseTmp()
++	_, errW := f.Write(data)
++	errS := f.Sync()
++	errC := f.Close()
++	if errW != nil || errS != nil || errC != nil {
++		_ = stagingRoot.Remove(tmp)
++		return ErrUnavailable
++	}
++	if renErr := renameatNoReplacePinned(stagingDirFD, tmp, rootDirFD, ".staging-key"); renErr != nil {
++		_ = stagingRoot.Remove(tmp)
++		if os.IsExist(renErr) {
++			if _, ok := readStagingKey(rootHandle); ok {
++				return nil
++			}
++		}
++		return ErrUnavailable
++	}
++	return syncPinnedDir(rootHandle, root)
++}
 +
 +func stagingEntryKey(root, name string) string {
 +	return root + "\x00" + name
@@ -18184,6 +18709,10 @@ index e69de29..8683516 100644
 +	if stagingRoot == nil || !isSingleBaseName(prefix) {
 +		return "", nil, nil, ErrUnavailable
 +	}
++	stagingKey, okKey := readStagingKey(rootHandle)
++	if !okKey {
++		return "", nil, nil, ErrUnavailable
++	}
 +	stagingQuotaMu.Lock()
 +	if err := ensureStagingQuotaLocked(rootHandle, stagingRoot, root); err != nil {
 +		stagingQuotaMu.Unlock()
@@ -18196,7 +18725,8 @@ index e69de29..8683516 100644
 +			stagingQuotaMu.Unlock()
 +			return "", nil, nil, ErrUnavailable
 +		}
-+		name := fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok)
++		base := fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok)
++		name := signStagingDirName(stagingKey, base)
 +		trackStagingEntry(root, name)
 +		if mkErr := stagingRoot.Mkdir(name, 0700); mkErr != nil {
 +			untrackStagingEntry(root, name)
@@ -18264,13 +18794,40 @@ index e69de29..8683516 100644
 +	return raw, dev, ino, hasID, true
 +}
 +
-+// removeVerifiedFileInSubdir holds the target file descriptor open across stat/content SHA-256
-+// verification, re-checks Lstat identity, and unlinks via descriptor-pinned unix.Unlinkat before
-+// closing the fd. Under the dedicated single-writer 0700 receipt-root contract (root-inode flock),
-+// this prevents inode-number reuse during verification and refuses to unlink pre-existing or
-+// previously swapped files (POSIX unlinkat is inherently name-based, so concurrent adversarial
-+// same-UID mutations inside the dedicated private root remain outside POSIX process isolation).
-+func removeVerifiedFileInSubdir(subRoot *os.Root, childName string, dev, ino uint64, hasID bool, expectSHA string, maxBytes int64) bool {
++func readPrivateRegularFileInSubdirAllowEmpty(subRoot *os.Root, childName string, maxBytes int64) ([]byte, uint64, uint64, bool, bool) {
++	if subRoot == nil || !isSingleBaseName(childName) || maxBytes <= 0 {
++		return nil, 0, 0, false, false
++	}
++	cfi, cerr := subRoot.Lstat(childName)
++	if cerr != nil || !cfi.Mode().IsRegular() || cfi.Mode()&os.ModeSymlink != 0 || cfi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(cfi) || cfi.Size() < 0 || cfi.Size() > maxBytes {
++		return nil, 0, 0, false, false
++	}
++	f, oerr := subRoot.OpenFile(childName, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
++	if oerr != nil {
++		return nil, 0, 0, false, false
++	}
++	fStat, serr := f.Stat()
++	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() < 0 || fStat.Size() > maxBytes {
++		_ = f.Close()
++		return nil, 0, 0, false, false
++	}
++	raw, rerr := io.ReadAll(io.LimitReader(f, maxBytes+1))
++	_ = f.Close()
++	if rerr != nil || int64(len(raw)) > maxBytes {
++		return nil, 0, 0, false, false
++	}
++	dev, ino, hasID := statDevIno(fStat)
++	return raw, dev, ino, hasID, true
++}
++
++func isTruncatedJSONObjectPrefix(raw []byte) bool {
++	if len(raw) == 0 {
++		return true
++	}
++	return raw[0] == '{' && !json.Valid(raw)
++}
++
++func removeVerifiedFileInSubdirMode(subRoot *os.Root, childName string, dev, ino uint64, hasID bool, expectSHA string, maxBytes int64, allowEmpty bool) bool {
 +	if subRoot == nil || !isSingleBaseName(childName) || !hasID || expectSHA == "" || maxBytes <= 0 {
 +		return false
 +	}
@@ -18285,7 +18842,7 @@ index e69de29..8683516 100644
 +	}
 +	defer f.Close()
 +	fStat, serr := f.Stat()
-+	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() <= 0 || fStat.Size() > maxBytes {
++	if serr != nil || !fStat.Mode().IsRegular() || fStat.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fStat) || fStat.Size() > maxBytes || (!allowEmpty && fStat.Size() <= 0) || fStat.Size() < 0 {
 +		return false
 +	}
 +	curDev, curIno, curHasID := statDevIno(fStat)
@@ -18293,7 +18850,7 @@ index e69de29..8683516 100644
 +		return false
 +	}
 +	raw, rerr := io.ReadAll(io.LimitReader(f, maxBytes+1))
-+	if rerr != nil || len(raw) == 0 || int64(len(raw)) > maxBytes || sha256Hex(string(raw)) != expectSHA {
++	if rerr != nil || (!allowEmpty && len(raw) == 0) || int64(len(raw)) > maxBytes || sha256Hex(string(raw)) != expectSHA {
 +		return false
 +	}
 +	lfi, lerr := subRoot.Lstat(childName)
@@ -18308,7 +18865,28 @@ index e69de29..8683516 100644
 +	return unlinkErr == nil
 +}
 +
++// removeVerifiedFileInSubdir holds the target file descriptor open across stat/content SHA-256
++// verification, re-checks Lstat identity, and unlinks via descriptor-pinned unix.Unlinkat before
++// closing the fd. Under the dedicated single-writer 0700 receipt-root contract (root-inode flock),
++// this prevents inode-number reuse during verification and refuses to unlink pre-existing or
++// previously swapped files (POSIX unlinkat is inherently name-based, so concurrent adversarial
++// same-UID mutations inside the dedicated private root remain outside POSIX process isolation).
++func removeVerifiedFileInSubdir(subRoot *os.Root, childName string, dev, ino uint64, hasID bool, expectSHA string, maxBytes int64) bool {
++	return removeVerifiedFileInSubdirMode(subRoot, childName, dev, ino, hasID, expectSHA, maxBytes, false)
++}
++
 +func verifyStagingRegularFile(stagingRoot *os.Root, name string) (verifiedLeafChild, bool) {
++	if strings.HasPrefix(name, "pending-key-") {
++		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(stagingRoot, name, 1024)
++		if !ok {
++			return verifiedLeafChild{}, false
++		}
++		var sk stagingKeyFile
++		if decodeExactReceiptJSON(raw, stagingKeyJSONKeys, &sk) == nil && sk.Schema == stagingKeySchema && isSHA256Hex(sk.Key) {
++			return verifiedLeafChild{name: name, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, true
++		}
++		return verifiedLeafChild{}, false
++	}
 +	if strings.HasPrefix(name, "pending-marker-") {
 +		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(stagingRoot, name, 4096)
 +		if !ok {
@@ -18402,10 +18980,109 @@ index e69de29..8683516 100644
 +		sealPendingDisk.SealedAt >= reviewDisk.Finished
 +}
 +
-+func cleanOrphanStageSealDir(rootHandle, stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
-+	children, truncated, err := readDirCapped(subRoot, maxProducerLeafFiles)
-+	if err != nil || truncated || len(children) == 0 {
++func removeVerifiedEmptyStagingSubdir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
++	rem, truncR, rerr := readDirCapped(subRoot, 0)
++	_ = subRoot.Close()
++	if rerr != nil || truncR || len(rem) != 0 {
 +		return false
++	}
++	curFI, curErr := stagingRoot.Lstat(name)
++	if curErr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
++		return false
++	}
++	if curDev, curIno, okCur := statDevIno(curFI); okCur && hasSubID && (curDev != subDev || curIno != subIno) {
++		return false
++	}
++	return stagingRoot.Remove(name) == nil
++}
++
++func cleanSignedPartialStageSealDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool, children []os.DirEntry) bool {
++	names := make(map[string]struct{}, len(children))
++	for _, ch := range children {
++		cname := ch.Name()
++		if cname != "producer.json" && cname != "seal.pending.json" && cname != "seal.sha256" {
++			return false
++		}
++		names[cname] = struct{}{}
++	}
++	switch len(names) {
++	case 1:
++		if _, ok := names["producer.json"]; !ok {
++			return false
++		}
++		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "producer.json", 4096)
++		if !ok || !isTruncatedJSONObjectPrefix(raw) {
++			return false
++		}
++		if !removeVerifiedFileInSubdirMode(subRoot, "producer.json", dev, ino, hasID, sha256Hex(string(raw)), 4096, true) {
++			return false
++		}
++		return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
++	case 2:
++		if _, ok1 := names["producer.json"]; !ok1 {
++			return false
++		}
++		if _, ok2 := names["seal.pending.json"]; !ok2 {
++			return false
++		}
++		markerCh, owner, _, okM := readVerifiedStagingMarkerFile(subRoot)
++		if !okM || !ValidReviewLaunch(owner) {
++			return false
++		}
++		raw, dev, ino, hasID, okP := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "seal.pending.json", maxReviewReceiptBytes)
++		if !okP || !isTruncatedJSONObjectPrefix(raw) {
++			return false
++		}
++		if !removeVerifiedFileInSubdirMode(subRoot, "seal.pending.json", dev, ino, hasID, sha256Hex(string(raw)), maxReviewReceiptBytes, true) {
++			return false
++		}
++		if !removeVerifiedFileInSubdir(subRoot, markerCh.name, markerCh.dev, markerCh.ino, markerCh.hasID, markerCh.sha256, 4096) {
++			return false
++		}
++		return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
++	case 3:
++		markerCh, markerLaunch, markerStarted, okM := readVerifiedStagingMarkerFile(subRoot)
++		if !okM || !ValidReviewLaunch(markerLaunch) {
++			return false
++		}
++		pRaw, pDev, pIno, pHasID, okP := readPrivateRegularFileInSubdir(subRoot, "seal.pending.json", maxReviewReceiptBytes)
++		if !okP {
++			return false
++		}
++		var rr ReviewReceipt
++		if decodeExactReceiptJSON(pRaw, reviewReceiptJSONKeys, &rr) != nil || rr.Launch != markerLaunch || rr.Started != markerStarted || !isValidProducerReviewReceipt(rr, rr.Launch) || !rr.Sealed {
++			return false
++		}
++		pendingSHA := sha256Hex(string(pRaw))
++		sRaw, sDev, sIno, sHasID, okS := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "seal.sha256", 64)
++		if !okS || len(sRaw) >= 64 || !strings.HasPrefix(pendingSHA, string(sRaw)) {
++			return false
++		}
++		if !removeVerifiedFileInSubdirMode(subRoot, "seal.sha256", sDev, sIno, sHasID, sha256Hex(string(sRaw)), 64, true) {
++			return false
++		}
++		if !removeVerifiedFileInSubdir(subRoot, "seal.pending.json", pDev, pIno, pHasID, pendingSHA, maxReviewReceiptBytes) {
++			return false
++		}
++		if !removeVerifiedFileInSubdir(subRoot, markerCh.name, markerCh.dev, markerCh.ino, markerCh.hasID, markerCh.sha256, 4096) {
++			return false
++		}
++		return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
++	default:
++		return false
++	}
++}
++
++func cleanOrphanStageSealDir(rootHandle, stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID, signedOwner bool) bool {
++	children, truncated, err := readDirCapped(subRoot, maxProducerLeafFiles)
++	if err != nil || truncated {
++		return false
++	}
++	if len(children) == 0 {
++		if !signedOwner {
++			return false
++		}
++		return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
 +	}
 +	verified := make(map[string]verifiedLeafChild, len(children))
 +	var markerLaunch string
@@ -18416,13 +19093,15 @@ index e69de29..8683516 100644
 +	var sealDigest string
 +	hasMarker := false
 +	hasSeal := false
++	strictOK := true
 +	for _, child := range children {
 +		cname := child.Name()
 +		switch cname {
 +		case "producer.json":
 +			ch, owner, started, ok := readVerifiedStagingMarkerFile(subRoot)
 +			if !ok || !ValidReviewLaunch(owner) {
-+				return false
++				strictOK = false
++				break
 +			}
 +			markerLaunch = owner
 +			markerStarted = started
@@ -18431,11 +19110,13 @@ index e69de29..8683516 100644
 +		case "seal.pending.json":
 +			raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, cname, maxReviewReceiptBytes)
 +			if !ok {
-+				return false
++				strictOK = false
++				break
 +			}
 +			var rr ReviewReceipt
 +			if decodeExactReceiptJSON(raw, reviewReceiptJSONKeys, &rr) != nil || !ValidReviewLaunch(rr.Launch) || !isValidProducerReviewReceipt(rr, rr.Launch) || !rr.Sealed {
-+				return false
++				strictOK = false
++				break
 +			}
 +			pendingLaunch = rr.Launch
 +			pendingStarted = rr.Started
@@ -18444,7 +19125,8 @@ index e69de29..8683516 100644
 +		case "seal.sha256":
 +			d, dev, ino, hasID, ok := readVerifiedSealDigestWithIdentityFromRoot(subRoot)
 +			if !ok {
-+				return false
++				strictOK = false
++				break
 +			}
 +			sealDigest = d
 +			hasSeal = true
@@ -18452,6 +19134,15 @@ index e69de29..8683516 100644
 +		default:
 +			return false
 +		}
++		if !strictOK {
++			break
++		}
++	}
++	if !strictOK {
++		if signedOwner {
++			return cleanSignedPartialStageSealDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID, children)
++		}
++		return false
 +	}
 +	// Cross-check launch ownership and started_ns independently of directory enumeration order.
 +	if !hasMarker || markerLaunch == "" {
@@ -18496,11 +19187,18 @@ index e69de29..8683516 100644
 +	return stagingRoot.Remove(name) == nil
 +}
 +
-+func cleanOrphanReclaimDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool) bool {
++func cleanOrphanReclaimDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID, signedOwner bool) bool {
 +	children, truncated, err := readDirCapped(subRoot, maxProducerLeafFiles)
-+	if err != nil || truncated || len(children) == 0 {
-+		// Never delete an empty or oversized foreign directory.
++	if err != nil || truncated {
 +		return false
++	}
++	if len(children) == 0 {
++		// Never delete an unverified/foreign empty directory; reclaim empty dirs ONLY when
++		// cryptographically authenticated by this root's producer staging key.
++		if !signedOwner {
++			return false
++		}
++		return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
 +	}
 +	if len(children) > 0 {
 +		verified := make(map[string]verifiedLeafChild, len(children))
@@ -18746,6 +19444,7 @@ index e69de29..8683516 100644
 +	if len(names) == 0 {
 +		return 0
 +	}
++	stagingKey, hasStagingKey := readStagingKey(rootHandle)
 +	now := time.Now()
 +	removed := 0
 +	for _, name := range names {
@@ -18767,6 +19466,8 @@ index e69de29..8683516 100644
 +			maxB := int64(maxReviewReceiptBytes)
 +			if strings.HasPrefix(name, "pending-marker-") {
 +				maxB = 4096
++			} else if strings.HasPrefix(name, "pending-key-") {
++				maxB = 1024
 +			}
 +			if removeVerifiedFileInSubdir(stagingRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, maxB) {
 +				removed++
@@ -18786,31 +19487,42 @@ index e69de29..8683516 100644
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
++			signedOwner := hasStagingKey && verifyStagingDirName(stagingKey, "stage-dir", name)
 +			children, truncC, cerr := readDirCapped(subRoot, 1)
-+			if cerr != nil || truncC || len(children) != 1 || children[0].Name() != "producer.json" {
++			if cerr != nil || truncC {
++				_ = subRoot.Close()
++				continue
++			}
++			if len(children) == 0 {
++				if signedOwner && removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++					removed++
++				} else {
++					_ = subRoot.Close()
++				}
++				continue
++			}
++			if len(children) != 1 || children[0].Name() != "producer.json" {
 +				_ = subRoot.Close()
 +				continue
 +			}
 +			ch, _, _, ok := readVerifiedStagingMarkerFile(subRoot)
-+			if !ok {
-+				_ = subRoot.Close()
-+				continue
-+			}
-+			if !removeVerifiedFileInSubdir(subRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, 4096) {
-+				_ = subRoot.Close()
-+				continue
-+			}
-+			rem, truncR, rerr := readDirCapped(subRoot, 0)
-+			_ = subRoot.Close()
-+			if rerr == nil && !truncR && len(rem) == 0 {
-+				curFI, curErr := stagingRoot.Lstat(name)
-+				if curErr == nil && curFI.IsDir() && curFI.Mode()&os.ModeSymlink == 0 && curFI.Mode().Perm()&0077 == 0 && ownedByCurrentUser(curFI) {
-+					if curDev, curIno, okCur := statDevIno(curFI); !okCur || !hasSubID || (curDev == subDev && curIno == subIno) {
-+						if stagingRoot.Remove(name) == nil {
-+							removed++
-+						}
-+					}
++			if ok {
++				if !removeVerifiedFileInSubdir(subRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, 4096) {
++					_ = subRoot.Close()
++					continue
 +				}
++			} else if signedOwner {
++				raw, pDev, pIno, pHasID, okP := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "producer.json", 4096)
++				if !okP || !isTruncatedJSONObjectPrefix(raw) || !removeVerifiedFileInSubdirMode(subRoot, "producer.json", pDev, pIno, pHasID, sha256Hex(string(raw)), 4096, true) {
++					_ = subRoot.Close()
++					continue
++				}
++			} else {
++				_ = subRoot.Close()
++				continue
++			}
++			if removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++				removed++
 +			}
 +			continue
 +		}
@@ -18827,7 +19539,8 @@ index e69de29..8683516 100644
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			if cleanOrphanStageSealDir(rootHandle, stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++			signedOwner := hasStagingKey && verifyStagingDirName(stagingKey, "stage-seal", name)
++			if cleanOrphanStageSealDir(rootHandle, stagingRoot, name, subRoot, subDev, subIno, hasSubID, signedOwner) {
 +				removed++
 +			} else {
 +				_ = subRoot.Close()
@@ -18847,7 +19560,8 @@ index e69de29..8683516 100644
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			if cleanOrphanReclaimDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++			signedOwner := hasStagingKey && verifyStagingDirName(stagingKey, "reclaim", name)
++			if cleanOrphanReclaimDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID, signedOwner) {
 +				removed++
 +			} else {
 +				_ = subRoot.Close()
@@ -18907,6 +19621,10 @@ index e69de29..8683516 100644
 +	staging, _, err := openVerifiedSubdir(rootHandle, ".staging")
 +	if err != nil {
 +		return nil, ErrUnavailable
++	}
++	if err := ensureStagingKeyLocked(rootHandle, staging, root); err != nil {
++		_ = staging.Close()
++		return nil, err
 +	}
 +	return staging, nil
 +}
@@ -19209,7 +19927,7 @@ index e69de29..8683516 100644
 +	names := make([]string, 0, len(entries))
 +	for _, ent := range entries {
 +		name := ent.Name()
-+		if name == ".writer.lock" || name == ".staging" {
++		if name == ".writer.lock" || name == ".staging" || name == ".staging-key" {
 +			continue
 +		}
 +		if isReviewBucketName(name) != reviewBucket {
@@ -19275,6 +19993,12 @@ index e69de29..8683516 100644
 +		return false
 +	}
 +
++	stagingKey, okKey := readStagingKey(rootHandle)
++	if !okKey {
++		_ = subRoot.Close()
++		return false
++	}
++
 +	var reclaimName string
 +	var releaseReclaim func()
 +	moved := false
@@ -19285,7 +20009,8 @@ index e69de29..8683516 100644
 +			if terr != nil {
 +				break
 +			}
-+			cand := fmt.Sprintf("reclaim-%d-%d-%s", os.Getpid(), tmpSeq.Add(1), tok)
++			base := fmt.Sprintf("reclaim-%d-%d-%s", os.Getpid(), tmpSeq.Add(1), tok)
++			cand := signStagingDirName(stagingKey, base)
 +			trackStagingEntry(root, cand)
 +			renErr := renameatNoReplacePinned(rootDirFD, name, stagingDirFD, cand)
 +			if renErr == nil {
@@ -19812,8 +20537,8 @@ index e69de29..8683516 100644
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
 +
-+	markerTmp, mf, releaseMarkerTmp, err := createStagingFile(rootHandle, stagingRoot, root, "pending-marker")
-+	if err != nil {
++	mf, merr := stageSubRoot.OpenFile("producer.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if merr != nil {
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
@@ -19825,8 +20550,7 @@ index e69de29..8683516 100644
 +	errS := mf.Sync()
 +	errC := mf.Close()
 +	if mStatErr != nil || errW != nil || errS != nil || errC != nil {
-+		_ = stagingRoot.Remove(markerTmp)
-+		releaseMarkerTmp()
++		_ = stageSubRoot.Remove("producer.json")
 +		_ = stageSubFD.Close()
 +		_ = stageSubRoot.Close()
 +		_ = stagingRoot.Remove(stageDirName)
@@ -19835,16 +20559,6 @@ index e69de29..8683516 100644
 +	}
 +	mDev, mIno, hasMID := statDevIno(mfi)
 +	mSHA := sha256Hex(string(markerData))
-+	if renErr := renameatPinned(stagingDirFD, markerTmp, stageSubFD, "producer.json"); renErr != nil {
-+		_ = stagingRoot.Remove(markerTmp)
-+		releaseMarkerTmp()
-+		_ = stageSubFD.Close()
-+		_ = stageSubRoot.Close()
-+		_ = stagingRoot.Remove(stageDirName)
-+		bState.mu.Unlock()
-+		return nil, nil, false, 0, 0, false, "", ErrUnavailable
-+	}
-+	releaseMarkerTmp()
 +	_ = stageSubFD.Close()
 +	if err := syncPinnedDir(stageSubRoot, filepath.Join(root, ".staging", stageDirName)); err != nil {
 +		removeVerifiedMarkerInSubdir(stageSubRoot, mDev, mIno, hasMID, mSHA)
@@ -21160,35 +21874,37 @@ index e69de29..8683516 100644
 +}
 +
 +func enqueueReviewFinalize(job *reviewFinalizeJob) {
-+	reviewMu.Lock()
-+	if !job.publish && job.turnSeq > 0 && job.entry != nil && !job.entry.sealedFlag && job.entry.sealDecision.Load() != sealDecisionCommitted {
-+		updateMaxUint64Atomic(&job.entry.pendingFailedTurnSeq, job.turnSeq)
++	if job == nil {
++		return
 +	}
 +	entry := job.entry
 +	if entry == nil {
-+		reviewMu.Unlock()
 +		close(job.done)
 +		return
 +	}
++	if !job.publish && job.turnSeq > 0 && entry.sealDecision.Load() != sealDecisionCommitted {
++		updateMaxUint64Atomic(&entry.pendingFailedTurnSeq, job.turnSeq)
++	}
++	finalizeQueueMu.Lock()
 +	entry.finalizeJobs = append(entry.finalizeJobs, job)
-+	finalizePendingJobs++
++	finalizePendingJobs.Add(1)
 +	if !entry.finalizeQueued && !entry.finalizeRunning {
 +		entry.finalizeQueued = true
 +		finalizeQueue = append(finalizeQueue, entry)
-+		if finalizeWorkers < maxFinalizeWorkers {
-+			finalizeWorkers++
++		if int(finalizeWorkers.Load()) < maxFinalizeWorkers {
++			finalizeWorkers.Add(1)
 +			go runFinalizeWorker()
 +		}
 +	}
-+	reviewMu.Unlock()
++	finalizeQueueMu.Unlock()
 +}
 +
 +func runFinalizeWorker() {
 +	for {
-+		reviewMu.Lock()
++		finalizeQueueMu.Lock()
 +		if len(finalizeQueue) == 0 {
-+			finalizeWorkers--
-+			reviewMu.Unlock()
++			finalizeWorkers.Add(-1)
++			finalizeQueueMu.Unlock()
 +			return
 +		}
 +		entry := finalizeQueue[0]
@@ -21199,13 +21915,13 @@ index e69de29..8683516 100644
 +		}
 +		entry.finalizeQueued = false
 +		entry.finalizeRunning = true
-+		reviewMu.Unlock()
++		finalizeQueueMu.Unlock()
 +
 +		for {
-+			reviewMu.Lock()
++			finalizeQueueMu.Lock()
 +			if len(entry.finalizeJobs) == 0 {
 +				entry.finalizeRunning = false
-+				reviewMu.Unlock()
++				finalizeQueueMu.Unlock()
 +				break
 +			}
 +			job := entry.finalizeJobs[0]
@@ -21214,10 +21930,10 @@ index e69de29..8683516 100644
 +			if len(entry.finalizeJobs) == 0 {
 +				entry.finalizeJobs = nil
 +			}
-+			if finalizePendingJobs > 0 {
-+				finalizePendingJobs--
++			if finalizePendingJobs.Add(-1) < 0 {
++				finalizePendingJobs.Store(0)
 +			}
-+			reviewMu.Unlock()
++			finalizeQueueMu.Unlock()
 +
 +			executeReviewFinalizeJob(job)
 +			releaseReview(entry)
@@ -21529,10 +22245,10 @@ index e69de29..8683516 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..1fcc1af 100644
+index e69de29..a5496d8 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,16963 @@
+@@ -0,0 +1,17430 @@
 +package preflightreceipt
 +
 +import (
@@ -26473,9 +27189,9 @@ index e69de29..1fcc1af 100644
 +		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}` + "\n\n" +
 +		"data: " + `{"type":"response.web_search_call.completed","output_index":0,"item_id":"ws_1"}` + "\n\n" +
 +		"data: " + `{"type":"response.web_search_call.in_progress","output_index":0,"item_id":"ws_1"}` + "\n\n" +
-+		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"completed"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}}}` + "\n\n" +
 +		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_sctip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
-+		"data: " + `{"type":"response.completed","response":{"id":"resp_sctip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed"},{"id":"msg_sctip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++		"data: " + `{"type":"response.completed","response":{"id":"resp_sctip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}},{"id":"msg_sctip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555ba", "019d0000-0000-7000-8000-8888888881ba", sseSubCompletedThenInProg); st != SealRejected {
 +		t.Fatalf("web_search_call.completed followed by .in_progress seal = %v, want SealRejected", st)
 +	}
@@ -26483,9 +27199,9 @@ index e69de29..1fcc1af 100644
 +		"data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"ws_2","type":"web_search_call","status":"in_progress"}}` + "\n\n" +
 +		"data: " + `{"type":"response.web_search_call.completed","output_index":0,"item_id":"ws_2"}` + "\n\n" +
 +		"data: " + `{"type":"response.in_progress","response":{"id":"resp_scsip","status":"in_progress","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"in_progress"}]}}` + "\n\n" +
-+		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_2","type":"web_search_call","status":"completed"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_2","type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}}}` + "\n\n" +
 +		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_scsip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
-+		"data: " + `{"type":"response.completed","response":{"id":"resp_scsip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"completed"},{"id":"msg_scsip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++		"data: " + `{"type":"response.completed","response":{"id":"resp_scsip","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"completed","action":{"type":"search","query":"q"}},{"id":"msg_scsip","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-5555555555bb", "019d0000-0000-7000-8000-8888888881bb", sseSubCompletedThenSnapInProg); st != SealRejected {
 +		t.Fatalf("web_search_call.completed followed by response.in_progress regression seal = %v, want SealRejected", st)
 +	}
@@ -34639,7 +35355,7 @@ index e69de29..1fcc1af 100644
 +		t.Fatal(err)
 +	}
 +	sDev, sIno, hasSID := statDevIno(subRevFI)
-+	if cleanOrphanReclaimDir(stagingRoot, revReclaimName, subRev, sDev, sIno, hasSID) {
++	if cleanOrphanReclaimDir(stagingRoot, revReclaimName, subRev, sDev, sIno, hasSID, false) {
 +		t.Fatalf("cleanOrphanReclaimDir deleted formal review reclaim dir missing producer.json")
 +	}
 +	_ = subRev.Close()
@@ -34665,7 +35381,7 @@ index e69de29..1fcc1af 100644
 +		t.Fatal(err)
 +	}
 +	pDev, pIno, hasPID := statDevIno(subPreFI)
-+	if !cleanOrphanReclaimDir(stagingRoot, preReclaimName, subPre, pDev, pIno, hasPID) {
++	if !cleanOrphanReclaimDir(stagingRoot, preReclaimName, subPre, pDev, pIno, hasPID, false) {
 +		t.Fatalf("cleanOrphanReclaimDir failed to clean valid legacy preflight reclaim dir without producer.json")
 +	}
 +	_ = subPre.Close()
@@ -35014,7 +35730,7 @@ index e69de29..1fcc1af 100644
 +		return sr, dev, ino, hasID
 +	}
 +	sr1, dev1, ino1, ok1 := openReclaim(reclaimMismatch)
-+	if cleanOrphanReclaimDir(stagingRoot, reclaimMismatch, sr1, dev1, ino1, ok1) {
++	if cleanOrphanReclaimDir(stagingRoot, reclaimMismatch, sr1, dev1, ino1, ok1, false) {
 +		t.Fatalf("cleanOrphanReclaimDir deleted legacy preflight reclaim dir with mismatched started_ns")
 +	}
 +	_ = sr1.Close()
@@ -35023,12 +35739,12 @@ index e69de29..1fcc1af 100644
 +	}
 +
 +	sr2, dev2, ino2, ok2 := openReclaim(reclaimMatch)
-+	if !cleanOrphanReclaimDir(stagingRoot, reclaimMatch, sr2, dev2, ino2, ok2) {
++	if !cleanOrphanReclaimDir(stagingRoot, reclaimMatch, sr2, dev2, ino2, ok2, false) {
 +		_ = sr2.Close()
 +		t.Fatalf("cleanOrphanReclaimDir failed on matching legacy preflight reclaim dir")
 +	}
 +	sr3, dev3, ino3, ok3 := openReclaim(reclaimReceiptOnly)
-+	if !cleanOrphanReclaimDir(stagingRoot, reclaimReceiptOnly, sr3, dev3, ino3, ok3) {
++	if !cleanOrphanReclaimDir(stagingRoot, reclaimReceiptOnly, sr3, dev3, ino3, ok3, false) {
 +		_ = sr3.Close()
 +		t.Fatalf("cleanOrphanReclaimDir failed on receipt-only legacy preflight reclaim dir")
 +	}
@@ -37011,7 +37727,7 @@ index e69de29..1fcc1af 100644
 +			drain := time.Now().Add(2 * time.Second)
 +			for {
 +				reviewMu.Lock()
-+				busy := finalizeWorkers + failurePersistWorkers
++				busy := int(finalizeWorkers.Load()) + failurePersistWorkers
 +				reviewMu.Unlock()
 +				if busy == 0 {
 +					break
@@ -37149,7 +37865,7 @@ index e69de29..1fcc1af 100644
 +		drain := time.Now().Add(2 * time.Second)
 +		for {
 +			reviewMu.Lock()
-+			busy := finalizeWorkers + failurePersistWorkers
++			busy := int(finalizeWorkers.Load()) + failurePersistWorkers
 +			reviewMu.Unlock()
 +			cancelFailMu.Lock()
 +			cfBusy := cancelFailRunning
@@ -37268,7 +37984,7 @@ index e69de29..1fcc1af 100644
 +		drain := time.Now().Add(3 * time.Second)
 +		for {
 +			reviewMu.Lock()
-+			busy := finalizeWorkers + failurePersistWorkers
++			busy := int(finalizeWorkers.Load()) + failurePersistWorkers
 +			reviewMu.Unlock()
 +			if busy == 0 {
 +				break
@@ -37289,7 +38005,7 @@ index e69de29..1fcc1af 100644
 +	<-enteredSync
 +
 +	reviewMu.Lock()
-+	gotWorkers := finalizeWorkers
++	gotWorkers := int(finalizeWorkers.Load())
 +	reviewMu.Unlock()
 +	if gotWorkers != 1 {
 +		t.Fatalf("finalizeWorkers occupied by single stalled launch = %d, want 1", gotWorkers)
@@ -37477,7 +38193,7 @@ index e69de29..1fcc1af 100644
 +		deadline := time.Now().Add(3 * time.Second)
 +		for {
 +			reviewMu.Lock()
-+			busy := diskTaintWorkers + failurePersistWorkers + finalizeWorkers
++			busy := diskTaintWorkers + failurePersistWorkers + int(finalizeWorkers.Load())
 +			reviewMu.Unlock()
 +			if busy == 0 || time.Now().After(deadline) {
 +				break
@@ -37750,7 +38466,7 @@ index e69de29..1fcc1af 100644
 +			deadline := time.Now().Add(2 * time.Second)
 +			for {
 +				reviewMu.Lock()
-+				busy := failurePersistWorkers + finalizeWorkers
++				busy := failurePersistWorkers + int(finalizeWorkers.Load())
 +				reviewMu.Unlock()
 +				cancelFailMu.Lock()
 +				cfBusy := cancelFailRunning
@@ -37901,7 +38617,7 @@ index e69de29..1fcc1af 100644
 +			deadline := time.Now().Add(2 * time.Second)
 +			for {
 +				reviewMu.Lock()
-+				busy := pendingReviewTotal + failurePersistWorkers + finalizeWorkers
++				busy := pendingReviewTotal + failurePersistWorkers + int(finalizeWorkers.Load())
 +				reviewMu.Unlock()
 +				cancelFailMu.Lock()
 +				cfBusy := cancelFailRunning
@@ -38037,7 +38753,7 @@ index e69de29..1fcc1af 100644
 +		deadline := time.Now().Add(2 * time.Second)
 +		for {
 +			reviewMu.Lock()
-+			busy := failurePersistWorkers + finalizeWorkers
++			busy := failurePersistWorkers + int(finalizeWorkers.Load())
 +			reviewMu.Unlock()
 +			cancelFailMu.Lock()
 +			cfBusy := cancelFailRunning
@@ -38132,7 +38848,7 @@ index e69de29..1fcc1af 100644
 +		deadline := time.Now().Add(2 * time.Second)
 +		for {
 +			reviewMu.Lock()
-+			busy := failurePersistWorkers + finalizeWorkers
++			busy := failurePersistWorkers + int(finalizeWorkers.Load())
 +			reviewMu.Unlock()
 +			cancelFailMu.Lock()
 +			cfBusy := cancelFailRunning
@@ -38215,7 +38931,7 @@ index e69de29..1fcc1af 100644
 +		for {
 +			reviewMu.Lock()
 +			drainCancelFailLocked()
-+			busy := pendingReviewTotal + failurePersistWorkers + finalizeWorkers
++			busy := pendingReviewTotal + failurePersistWorkers + int(finalizeWorkers.Load())
 +			reviewMu.Unlock()
 +			cancelFailMu.Lock()
 +			cfBusy := cancelFailRunning
@@ -38470,7 +39186,7 @@ index e69de29..1fcc1af 100644
 +		for {
 +			reviewMu.Lock()
 +			drainCancelFailLocked()
-+			busy := failurePersistWorkers + finalizeWorkers
++			busy := failurePersistWorkers + int(finalizeWorkers.Load())
 +			reviewMu.Unlock()
 +			cancelFailMu.Lock()
 +			cfBusy := cancelFailRunning
@@ -38494,6 +39210,473 @@ index e69de29..1fcc1af 100644
 +	reviewMu.Unlock()
 +	if gotInFlight != 0 {
 +		t.Fatalf("entry.inFlight after tail cancel drain = %d, want 0", gotInFlight)
++	}
++}
++
++func TestStagingSignedDirsRecoverAllCrashWindowsWhilePreservingForeignEmptyDirs(t *testing.T) {
++	// Sol P1 (PR #2280 R89): producer staging dirs (stage-dir-*, stage-seal-*, reclaim-*) carry an
++	// HMAC tag bound to <root>/.staging-key so crashes after mkdir, during partial file writes, or
++	// after unlinking producer.json before rmdir remain verifiably recoverable by both quota sweep
++	// and restart sweep without ever blind-deleting unsigned foreign empty dirs or contradicting dirs.
++	oldMaxStaging := maxStagingEntries
++	oldOrphanAge := stagingOrphanAge
++	maxStagingEntries = 6
++	stagingOrphanAge = time.Second
++	defer func() {
++		maxStagingEntries = oldMaxStaging
++		stagingOrphanAge = oldOrphanAge
++	}()
++
++	root := filepath.Join(t.TempDir(), "staging-signed-recovery")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		lease.Close()
++		t.Fatal(err)
++	}
++	key, ok := readStagingKey(lease.dir)
++	if !ok {
++		_ = stagingRoot.Close()
++		lease.Close()
++		t.Fatalf("readStagingKey failed right after ensureStagingDir")
++	}
++	stagingPath := filepath.Join(root, ".staging")
++	ancient := time.Now().Add(-time.Hour)
++	launch := "review-e1010101-2222-4333-8444-555555555501"
++	markerRaw, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch, Started: ancient.UnixNano()})
++	sealedRec := ReviewReceipt{
++		Schema:           ReviewSchema,
++		Launch:           launch,
++		Session:          "019d0000-0000-7000-8000-e10101010101",
++		Started:          ancient.UnixNano(),
++		Finished:         ancient.UnixNano(),
++		SealedAt:         ancient.UnixNano(),
++		Complete:         true,
++		Sealed:           true,
++		Requests:         1,
++		Routes:           []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs:   []string{sha256Hex("resp_e1")},
++		LastResponseID:   sha256Hex("resp_e1"),
++		LastOutputSHA256: sha256Hex("VERDICT: PASS"),
++	}
++	sealedRaw, _ := json.Marshal(sealedRec)
++	sealedSHA := sha256Hex(string(sealedRaw))
++
++	mkSignedDir := func(prefix, tok string) string {
++		name := signStagingDirName(key, fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok))
++		p := filepath.Join(stagingPath, name)
++		if err := os.Mkdir(p, 0700); err != nil {
++			t.Fatal(err)
++		}
++		return p
++	}
++	// 1. Fill all 6 slots with producer-signed crash-window dirs across all 3 prefixes:
++	//    empty stage-dir, truncated producer.json stage-dir, empty stage-seal, partial seal.pending.json,
++	//    partial seal.sha256 prefix, and empty reclaim dir.
++	dEmptyStage := mkSignedDir("stage-dir", "1111111111111111")
++	dPartialStage := mkSignedDir("stage-dir", "2222222222222222")
++	if err := os.WriteFile(filepath.Join(dPartialStage, "producer.json"), []byte(`{"schema":"cliproxy`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	dEmptySeal := mkSignedDir("stage-seal", "3333333333333333")
++	dPartialSealPending := mkSignedDir("stage-seal", "4444444444444444")
++	if err := os.WriteFile(filepath.Join(dPartialSealPending, "producer.json"), markerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dPartialSealPending, "seal.pending.json"), []byte(`{"schema":"cliproxy`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	dPartialSealSHA := mkSignedDir("stage-seal", "5555555555555555")
++	if err := os.WriteFile(filepath.Join(dPartialSealSHA, "producer.json"), markerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dPartialSealSHA, "seal.pending.json"), sealedRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dPartialSealSHA, "seal.sha256"), []byte(sealedSHA[:16]), 0600); err != nil {
++		t.Fatal(err)
++	}
++	dEmptyReclaim := mkSignedDir("reclaim", "66666666666666666666666666666666")
++	for _, p := range []string{dEmptyStage, dPartialStage, dEmptySeal, dPartialSealPending, dPartialSealSHA, dEmptyReclaim} {
++		_ = os.Chtimes(p, ancient, ancient)
++	}
++
++	// Quota is at 6/6: quota sweep MUST reclaim all 6 signed crash-window dirs and allow new staging.
++	createdName, sub, rel, cerr := createStagingDir(lease.dir, stagingRoot, root)
++	if cerr != nil {
++		_ = stagingRoot.Close()
++		lease.Close()
++		t.Fatalf("createStagingDir after signed crash-window backlog = %v, want nil", cerr)
++	}
++	_ = sub.Close()
++	_ = stagingRoot.Remove(createdName)
++	rel()
++	for _, p := range []string{dEmptyStage, dPartialStage, dEmptySeal, dPartialSealPending, dPartialSealSHA, dEmptyReclaim} {
++		if _, err := os.Lstat(p); !os.IsNotExist(err) {
++			t.Fatalf("signed crash-window dir %s survived quota sweep: %v", p, err)
++		}
++	}
++
++	// 2. Unsigned foreign empty dirs AND signed stage-seal with contradicting sha256 MUST stay preserved on restart sweep.
++	unsignedStage := filepath.Join(stagingPath, fmt.Sprintf("stage-dir-%d-99-abcdef0123456701", os.Getpid()))
++	unsignedSeal := filepath.Join(stagingPath, fmt.Sprintf("stage-seal-%d-99-abcdef0123456702", os.Getpid()))
++	unsignedReclaim := filepath.Join(stagingPath, fmt.Sprintf("reclaim-%d-99-abcdef0123456703", os.Getpid()))
++	for _, p := range []string{unsignedStage, unsignedSeal, unsignedReclaim} {
++		if err := os.Mkdir(p, 0700); err != nil {
++			t.Fatal(err)
++		}
++		_ = os.Chtimes(p, ancient, ancient)
++	}
++	contradictSignedSeal := mkSignedDir("stage-seal", "7777777777777777")
++	if err := os.WriteFile(filepath.Join(contradictSignedSeal, "producer.json"), markerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictSignedSeal, "seal.pending.json"), sealedRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(contradictSignedSeal, "seal.sha256"), []byte(strings.Repeat("0", 64)), 0600); err != nil {
++		t.Fatal(err)
++	}
++	// Also test restart sweep removes a brand-new empty signed dir (forceAllInactive=true).
++	freshSignedEmpty := mkSignedDir("stage-seal", "8888888888888888")
++	_ = stagingRoot.Close()
++	lease.Close()
++
++	// Evict rootLocks entry to simulate cold restart acquiring exclusive flock.
++	rootLockMu.Lock()
++	if h := rootLocks[root]; h != nil {
++		delete(rootLocks, root)
++		h.refs--
++		if h.refs == 0 {
++			_ = h.file.Close()
++			if h.dir != nil {
++				_ = h.dir.Close()
++			}
++			if h.parentFD != nil {
++				_ = h.parentFD.Close()
++			}
++		}
++	}
++	rootLockMu.Unlock()
++
++	lease2, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lease2.Close()
++
++	if _, err := os.Lstat(freshSignedEmpty); !os.IsNotExist(err) {
++		t.Fatalf("fresh signed empty stage-seal dir survived restart sweep: %v", err)
++	}
++	for _, preserved := range []string{unsignedStage, unsignedSeal, unsignedReclaim, contradictSignedSeal} {
++		if _, err := os.Lstat(preserved); err != nil {
++			t.Fatalf("unsigned or contradicting staging dir %s was deleted instead of preserved: %v", preserved, err)
++		}
++	}
++}
++
++func TestVerifyCompletedOutputRejectsInvalidMessageRoleOrContentAndIncompleteTools(t *testing.T) {
++	// Astra P1 #1 + P2 #3 (PR #2280 R89): type=message MUST enforce role=assistant and valid content
++	// array (even when followed by a valid assistant reply in a response.completed-only stream), and
++	// every parser-supported completed tool item (web_search_call, file_search_call, code_interpreter_call,
++	// image_generation_call) MUST enforce its required terminal fields.
++	root := filepath.Join(t.TempDir(), "r89-completed-output")
++	runSSE := func(launch, sess, sse string) SealStatus {
++		ctx, c, err := BeginReview(context.Background(), root, launch, sess, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview %s: %v", launch, err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("Start %s: %v", launch, err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: 200,
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
++				Body:       io.NopCloser(strings.NewReader(sse)),
++				TLS:        verifiedTLSState("chatgpt.com"),
++			}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("Do %s: %v", launch, err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, raw)
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		st, _ := SealReviewWithDigest(root, launch, sess)
++		return st
++	}
++
++	badCases := []struct {
++		name   string
++		launch string
++		sess   string
++		sse    string
++	}{
++		{
++			name:   "message_missing_role_with_bogus_content_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555501",
++			sess:   "019d0000-0000-7000-8000-e20101010101",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_m1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_bad","type":"message","status":"completed","content":"not-an-array"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "message_missing_role_valid_content_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555502",
++			sess:   "019d0000-0000-7000-8000-e20101010102",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_m2","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_bad","type":"message","status":"completed","content":[{"type":"output_text","text":"spoof"}]},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "message_user_role_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555503",
++			sess:   "019d0000-0000-7000-8000-e20101010103",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_m3","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_u","type":"message","role":"user","status":"completed","content":[{"type":"output_text","text":"hi"}]},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "message_missing_content_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555504",
++			sess:   "019d0000-0000-7000-8000-e20101010104",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_m4","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_nc","type":"message","role":"assistant","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "web_search_call_missing_action_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555505",
++			sess:   "019d0000-0000-7000-8000-e20101010105",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_ws1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "web_search_call_missing_action_done_and_completed",
++			launch: "review-e2010101-2222-4333-8444-555555555506",
++			sess:   "019d0000-0000-7000-8000-e20101010106",
++			sse: `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ws_2","type":"web_search_call","status":"completed"}}` + "\n\n" +
++				`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++				`data: {"type":"response.completed","response":{"id":"resp_ws2","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_2","type":"web_search_call","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "file_search_call_missing_queries_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555507",
++			sess:   "019d0000-0000-7000-8000-e20101010107",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_fs1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"fs_1","type":"file_search_call","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "code_interpreter_call_missing_code_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555508",
++			sess:   "019d0000-0000-7000-8000-e20101010108",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_ci1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "image_generation_call_missing_result_completed_only",
++			launch: "review-e2010101-2222-4333-8444-555555555509",
++			sess:   "019d0000-0000-7000-8000-e20101010109",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_ig1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ig_1","type":"image_generation_call","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++	}
++	for _, tc := range badCases {
++		if st := runSSE(tc.launch, tc.sess, tc.sse); st != SealRejected {
++			t.Fatalf("%s: seal = %v, want SealRejected", tc.name, st)
++		}
++	}
++
++	validSSE := `data: {"type":"response.completed","response":{"id":"resp_allok","status":"completed","model":"gpt-6.2-sol","output":[` +
++		`{"id":"ws_ok","type":"web_search_call","status":"completed","action":{"type":"search","query":"chanlun"}},` +
++		`{"id":"fs_ok","type":"file_search_call","status":"completed","queries":["q1"]},` +
++		`{"id":"ci_ok","type":"code_interpreter_call","status":"completed","code":"print(1)"},` +
++		`{"id":"ig_ok","type":"image_generation_call","status":"completed","result":"aGVsbG8="},` +
++		`{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE("review-e2010101-2222-4333-8444-55555555550a", "019d0000-0000-7000-8000-e2010101010a", validSSE); st != SealOK {
++		t.Fatalf("valid completed tool items + assistant reply seal = %v, want SealOK", st)
++	}
++}
++
++func TestHandlerDoneAndRollbackUnpersistedDoNotBlockOnContendedReviewMu(t *testing.T) {
++	// Astra P2 #4 + P2 #5 (PR #2280 R89):
++	// 1. HandlerDone -> publishLocked -> enqueueReviewFinalize MUST NOT block on global reviewMu,
++	//    so an already-canceled/expired turn exits immediately while keeping entry.inFlight > 0 until
++	//    the background finalize worker finishes accounting.
++	// 2. rollbackUnpersistedEntry (both when initialPersistSem is saturated and when ctx.Done fires
++	//    with a persist error) MUST NOT block on global reviewMu, and MUST decrement entry.inFlight
++	//    exactly once and evict the unpersisted entry when reviewMu drains.
++	root := filepath.Join(t.TempDir(), "r89-nonblocking-finalize-rollback")
++	launchA := "review-e3010101-2222-4333-8444-555555555501"
++	sessA := "019d0000-0000-7000-8000-e30101010101"
++
++	// Part A: establish a clean turn, then start turn 2 with a deadline, hold reviewMu, cancel turn 2,
++	// and verify HandlerDone(false) returns immediately while entry.inFlight stays > 0 until drain.
++	ctx0, c0, err := BeginReview(context.Background(), root, launchA, sessA, "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx0, e0, err := c0.Start(ctx0, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatal(err)
++	}
++	cl0 := httptransport.Decorate(ctx0, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200,
++			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
++			Body:       io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{"id":"resp_a1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n")),
++			TLS:        verifiedTLSState("chatgpt.com"),
++		}, nil
++	})})
++	req0, _ := http.NewRequestWithContext(ctx0, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp0, err := cl0.Do(req0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	raw0, _ := io.ReadAll(resp0.Body)
++	_ = resp0.Body.Close()
++	observeStrictSSEForTest(c0, raw0)
++	e0.End()
++	c0.Complete(true)
++	c0.HandlerDone(true)
++
++	turnCtx, turnCancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer turnCancel()
++	pend, err := BeginPendingReviewContext(turnCtx, root, launchA)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res, existed, err := ReserveExistingReviewContext(turnCtx, root, launchA, pend.TurnSeq())
++	if err != nil || !existed {
++		pend.Release()
++		t.Fatalf("ReserveExistingReviewContext = (%v, %v, %v)", res, existed, err)
++	}
++	res.SetTurnSeq(pend.TurnSeq())
++	res.AttachPendingSlot(pend)
++	pend.Release()
++	_, c2, err := BeginReviewReserved(turnCtx, res, sessA, "gpt-6.2-sol")
++	if err != nil {
++		res.Release()
++		t.Fatal(err)
++	}
++	entryA := res.entry
++
++	// Hold reviewMu while canceling turnCtx and calling HandlerDone(false).
++	reviewMu.Lock()
++	turnCancel()
++	doneA := make(chan struct{})
++	go func() {
++		c2.HandlerDone(false)
++		close(doneA)
++	}()
++	select {
++	case <-doneA:
++	case <-time.After(400 * time.Millisecond):
++		reviewMu.Unlock()
++		t.Fatalf("HandlerDone blocked on contended reviewMu past turn cancellation")
++	}
++	// While reviewMu is still held, runFinalizeWorker cannot decrement entryA.inFlight yet, so
++	// inFlight remains > 0 until accounting finishes.
++	if entryA.inFlight < 1 {
++		reviewMu.Unlock()
++		t.Fatalf("entryA.inFlight dropped to %d before background finalize accounting finished", entryA.inFlight)
++	}
++	reviewMu.Unlock()
++
++	// Wait for finalize worker + cancelFail drain.
++	drainDeadline := time.Now().Add(3 * time.Second)
++	for {
++		reviewMu.Lock()
++		drainCancelFailLocked()
++		busy := int(finalizeWorkers.Load()) + failurePersistWorkers + entryA.inFlight + pendingReviewTotal
++		reviewMu.Unlock()
++		cancelFailMu.Lock()
++		cfBusy := cancelFailRunning
++		cancelFailMu.Unlock()
++		if busy == 0 && !cfBusy {
++			break
++		}
++		if time.Now().After(drainDeadline) {
++			t.Fatalf("timed out draining Part A background accounting")
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if st, dig := SealReviewWithDigest(root, launchA, sessA); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest after non-blocking HandlerDone(false) = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++
++	// Part B: rollbackUnpersistedEntry under contended reviewMu when initialPersistSem is full.
++	launchB := "review-e3010101-2222-4333-8444-555555555502"
++	cleanRoot, _ := cleanPrivateRoot(root)
++	keyB := cleanRoot + "\x00" + launchB
++	entryB := &reviewEntry{
++		directory: filepath.Join(cleanRoot, launchB),
++		launch:    launchB,
++		started:   time.Now().UnixNano(),
++		inFlight:  1,
++		touched:   time.Now(),
++	}
++	reviewMu.Lock()
++	reviewLedger[keyB] = entryB
++	syncActiveCancelKeyLocked(keyB)
++	reviewMu.Unlock()
++
++	// Saturate initialPersistSem so finishReserveReviewEntryContext hits the sem-full rollback branch.
++	filled := 0
++	for {
++		select {
++		case initialPersistSem <- struct{}{}:
++			filled++
++		default:
++			goto semFilled
++		}
++	}
++semFilled:
++	defer func() {
++		for i := 0; i < filled; i++ {
++			<-initialPersistSem
++		}
++	}()
++
++	ctxB, cancelB := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancelB()
++	reviewMu.Lock()
++	doneB := make(chan error, 1)
++	go func() {
++		_, ferr := finishReserveReviewEntryContext(ctxB, cleanRoot, keyB, entryB, 1, false, 0)
++		doneB <- ferr
++	}()
++	select {
++	case ferr := <-doneB:
++		if !errors.Is(ferr, ErrUnavailable) {
++			reviewMu.Unlock()
++			t.Fatalf("finishReserveReviewEntryContext sem-full = %v, want ErrUnavailable", ferr)
++		}
++	case <-time.After(400 * time.Millisecond):
++		reviewMu.Unlock()
++		t.Fatalf("rollbackUnpersistedEntry (sem-full) blocked on contended reviewMu")
++	}
++	reviewMu.Unlock()
++
++	// Drain barrier and confirm inFlight decremented once (1 -> 0) and unpersisted entryB evicted.
++	drainDeadlineB := time.Now().Add(2 * time.Second)
++	for {
++		reviewMu.Lock()
++		drainCancelFailLocked()
++		_, stillInLedger := reviewLedger[keyB]
++		gotIF := entryB.inFlight
++		reviewMu.Unlock()
++		cancelFailMu.Lock()
++		cfBusy := cancelFailRunning
++		cancelFailMu.Unlock()
++		if !stillInLedger && gotIF == 0 && !cfBusy {
++			break
++		}
++		if time.Now().After(drainDeadlineB) {
++			t.Fatalf("rollbackUnpersistedEntry did not drain cleanly: inLedger=%v inFlight=%d cfBusy=%v", stillInLedger, gotIF, cfBusy)
++		}
++		time.Sleep(5 * time.Millisecond)
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
