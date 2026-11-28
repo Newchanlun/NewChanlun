@@ -85,14 +85,13 @@ def fractalDirectBase (policy : InitIncludePolicy) : BaseInterface .directFracta
         (r, s)
       ⟨(alternateRanges (if a.kind = .bottom then .up else .down) runs).1⟩
 
-/-- 按相邻原始区间判向：两端同升或同降（至少一端严格）才定向；
-完全持平或两端向相反方向移动时暂不换向。单点区间上就是严格价格涨跌。
+/-- 相邻区间的两端都严格升高才向上，都严格降低才向下。
+持平与包含对（包括单端相等）不定向。单点区间上就是严格价格涨跌。
 [018:58] 由此，上一章作业三“盘整的高低点是如何造成的”就有了相应的答案：无论离开与返回的走势类型是何种级别的，在站最低级别上看，例如把1分钟图当成最低级别，那么最后连接离开与返回走势类型连接处的最低级别图，只能有两种可能：三根以上1分钟K线的来回重叠震荡后回头；
 [064:14] 别说1分钟图，分笔图也没问题，这就是本ID理论所构筑几何结构的力量。 -/
 def rangeStep (a b : Bar P) : Option Dir :=
-  if a = b then none
-  else if a.lo ≤ b.lo ∧ a.hi ≤ b.hi then some .up
-  else if b.lo ≤ a.lo ∧ b.hi ≤ a.hi then some .down
+  if a.strictUp b then some .up
+  else if a.strictDown b then some .down
   else none
 
 /-- 同方向持续时扩张实际凸包，反转时把前一个观测作为两段共有转折。
@@ -121,8 +120,10 @@ where
           walk x (join prev x) first (some d) (current :: doneRev) xs
         else walk x (join current x) (first.orElse fun _ => some d) (some d) doneRev xs
 
-/-- 先按同一开头策略消除包含，再按规范形涨跌切段，跨度仍指向原始 K 线。
-待 `needs-fable` 最终裁定 `U-3`。
+/-- 先按传入的开头策略规范化：包含对（含单端相等）合并吸收，不产生新方向。
+再按无包含序列的严格涨跌切段，跨度仍指向原始 K 线。
+[062:28] 当然，实际图形里，有些复杂的关系会出现，就是相邻两K线可以出现如图6这种包含关系，也就是一K线的高低点全在另一K线的范围里，这种情况下，可以这样处理，在向上时，把两K线的最高点当高点，而两K线低点中的较高者当成低点，这样就把两K线合并成一新的K线；反之，当向下时，把两K线的最低点当低点，而两K线高点中的较低者当成高点，这样就把两K线合并成一新的K线。经过这样的处理，所有K线图都可以处理成没有包含关系的图形。
+[017:40] 这里有一个递归的问题，就是这次级别不能无限下去，就像有些半吊子哲学胡诌什么，而“分”不是无限的，按照量子力学，物质之分是有极限的，同样，级别之次也不可能无限，在实际之中，对最后不能分解的级别，其缠中说禅走势中枢就不能用“至少三个连续次级别走势类型所重叠”定义，而定义为至少三个该级别单位K线重叠部分。
 [018:58] 由此，上一章作业三“盘整的高低点是如何造成的”就有了相应的答案：无论离开与返回的走势类型是何种级别的，在站最低级别上看，例如把1分钟图当成最低级别，那么最后连接离开与返回走势类型连接处的最低级别图，只能有两种可能：三根以上1分钟K线的来回重叠震荡后回头； -/
 def klineOverlapBase (policy : InitIncludePolicy) : BaseInterface .klineOverlap P where
   Input := List (Bar P)

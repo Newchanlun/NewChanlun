@@ -51,8 +51,9 @@ abbrev ValidPenPair (r : PenRule) (bars : List (MergedBar P)) (a b : LocalFracta
   ((bars.drop a.center).take (b.center - a.center + 1)).all (fun k =>
     min a.extreme b.extreme ≤ k.range.lo && k.range.hi ≤ max a.extreme b.extreme) = true
 
-/-- 检验取舍：两头不能再接一笔；相邻端点间不能再插入一对合法转折；
-同性质的更优极值若能同时接上左右邻，就不能保留劣者。等值不排斥任一解。
+/-- 链端及其能接通另一侧邻点的等值替身（同性质、同极值）都不能再接一笔。
+相邻端点间不能再插入一对合法转折；若更优的同性极值能接通两邻，就不能保留劣者。
+等值本身不排斥任一解，不按先后择优。
 [062:26] 两个相邻的顶和底之间构成一笔，所谓笔，就是顶和底之间的其他波动，都可以忽略不算，但注意，一定是相邻的顶和底，隔了几个就不是了。而所谓的线段，就是至少由三笔组成。
 [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
 def penChoicesSaturated (r : PenRule) (bars : List (MergedBar P)) (allPivots : List (LocalFractal P))
@@ -61,8 +62,12 @@ def penChoicesSaturated (r : PenRule) (bars : List (MergedBar P)) (allPivots : L
   | a :: rest =>
     let edge := fun x y => decide (ValidPenPair r bars x y)
     let next := rest.head?
-    let canExtend := (prior.isNone && allPivots.any (edge · a)) ||
-      (next.isNone && allPivots.any (edge a ·))
+    let twin := fun (x : LocalFractal P) => x.kind = a.kind && x.extreme = a.extreme
+    let canExtend :=
+      (prior.isNone && allPivots.any (fun x =>
+        twin x && next.all (edge x ·) && allPivots.any (edge · x))) ||
+      (next.isNone && allPivots.any (fun x =>
+        twin x && prior.all (edge · x) && allPivots.any (edge x ·)))
     let dominated := allPivots.any fun x =>
       x.kind = a.kind && (if a.kind = .top then a.extreme < x.extreme else x.extreme < a.extreme) &&
       prior.all (edge · x) && next.all (edge x ·)
@@ -71,14 +76,26 @@ def penChoicesSaturated (r : PenRule) (bars : List (MergedBar P)) (allPivots : L
       interior.any fun x => edge a x && interior.any (fun y => edge x y && edge y b)
     !canExtend && !dominated && !subdivides && penChoicesSaturated r bars allPivots (some a) rest
 
-/-- 在原始候选中按序选出的端点，每对均满足当前参数下的极值和间距约束，
-且取舍已经饱和。此关系不调用解析器，不以某个确定性平局选择代替合法性。
+/-- 候选图中没有一支笔的两端各自严格优于链内全部同性端点：顶更高、底更低。
+链内没有某一性质的端点时，该侧比较为空真。
+[077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。
+[062:26] 两个相邻的顶和底之间构成一笔，所谓笔，就是顶和底之间的其他波动，都可以忽略不算，但注意，一定是相邻的顶和底，隔了几个就不是了。而所谓的线段，就是至少由三笔组成。 -/
+def penChainUndominated (r : PenRule) (bars : List (MergedBar P))
+    (allPivots xs : List (LocalFractal P)) : Bool :=
+  let edge := fun x y => decide (ValidPenPair r bars x y)
+  let beats := fun (x : LocalFractal P) => xs.all fun c =>
+    c.kind ≠ x.kind || (if c.kind = .top then c.extreme < x.extreme else x.extreme < c.extreme)
+  !(allPivots.any fun u => allPivots.any fun v => edge u v && beats u && beats v)
+
+/-- 在原始候选中按序选端点，每对满足当前规则下的极值和间距约束；
+取舍饱和，且没有一支笔从两端同时严格压过该链。合法性独立于解析器和破平策略。
 [069:16] 打“X”的就是该分型不符合笔所要求分型的规范。这里，只要是两条：一、顶和底之间没有至少一K线；二、不满足顶必须接着底、或底必须接着顶。
 [077:38] 有了上面这基础工作，那这个图就可以看成只有这些分型，分型之间的K线都可以暂时不用管。下面的工作，就是确定笔了。笔，必须是一顶一底，而且顶和底之间至少有一个K线不属于顶分型与底分型。当然，还有一个最显然的，就是在同一笔中，顶分型中最高那K线的区间至少要有一部分高于底分型中最低那K线的区间，如果这条都不满足，也就是顶都在低的范围内或顶比底还低，这显然是不可接受的。 -/
 abbrev ValidPenDecomp (r : PenRule) (bars : List (MergedBar P)) (xs : List (LocalFractal P)) : Prop :=
   xs.Sublist (scanLocalFractals bars) ∧ xs.IsChain (ValidPenPair r bars) ∧
   (xs.isEmpty = true → (scanLocalFractals bars).isEmpty = true) ∧
-  penChoicesSaturated r bars (scanLocalFractals bars) none xs = true
+  penChoicesSaturated r bars (scanLocalFractals bars) none xs = true ∧
+  penChainUndominated r bars (scanLocalFractals bars) xs = true
 
 /-- 一笔连接两个保留分型，终点保存的前驱就是起点。
 [065:40] 所以，根据上面的分析，对第二种情况进行相应处理（类似对分型中包含关系的处理），就可以严格地说，先顶后底，构成向下一笔；先底后顶，构成向上一笔。而所有的图形，都可以唯一地分解为上下交替的笔的连接。 -/
@@ -106,7 +123,10 @@ def Pen.source (p : Pen P) : Span :=
   let b := p.stop.pivot.extremeAt
   ⟨min a b, max a b, (Nat.min_le_left _ _).trans (Nat.le_max_left _ _)⟩
 
-/-- 等值候选只有在能接上同一组邻点时才按先后破平。
+/-- 等值候选先保留（077:54）；只有严格更优才反证已有端点（077:42），因此默认取早。
+收尾时，等值候选若能接通同一组邻点才按先后替换；替换可能打开新的链端延伸边，
+所以两种策略的笔数可以不同（#2321 裁定 F4：取早一笔，取晚两笔）。
+[077:42] 如果前面的底高于后面的底，那么前面的划分显然是错误的，因为按这种划分，该笔是没有完成的，一个底不经过一个顶后就有一个更低的底，这是最典型的笔没完成的情况。
 [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
 inductive PenTiePolicy where
   | preferEarlier | preferLater
@@ -158,7 +178,7 @@ where
       compatible.head?.map fun (m, prefixRev) => (x, m :: prefixRev)
 
   /-- 从待反证的同性帧开始。只有严格胜过该层极值才重试其紧邻前驱；
-  等值或更强的历史帧以及孤立异向帧均阻止回溯。
+  等值或更强的历史帧均阻止回溯。栈底异性帧不被连带弹出，以保持栈底极性不变。
   [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
   rewindPivots (edge : LocalFractal P → LocalFractal P → Bool)
       (x : LocalFractal P) : List (PenPivotCluster P) → Option (List (PenPivotCluster P))
@@ -249,8 +269,11 @@ def connectPivots (a : RetainedFractal P) : List (LocalFractal P) → List (Pen 
       ⟨a, next, rfl⟩ :: connectPivots next bs
     else []
 
-/-- 从无包含历史在线取笔，保首极值并在反证时逐级退栈；单个局部极值不构成笔。
-待 `needs-fable` 最终裁定 `U-1`。
+/-- 从无包含历史由左至右取笔，遇严格反证才逐级退栈，不按最多笔数重选。
+- INV-P1：在线栈底始终与历史第一个局部分型同性质。
+- INV-P2：在线栈底只被同性质且严格更优的分型替换。
+- INV-P3：收尾后的端点链保有首极性的全局最优极值：首底留历史最低底，首顶留历史最高顶，
+  等值端点亦可。输出链不足两个端点时，返回空笔表。
 [069:20] 例如，第一个红箭头和第二个绿箭头之间显然不能构成一笔，也就是说，这两个，只能取一个：如果取第一个红箭头，那么第二个绿箭头就不是笔中分型，那么第二个红箭头，显然是一个底分型，因此，就形成两个底分型连续的划分，显然，这时候，第一个就不算了，这和前面说取第一个红箭头对着的底分型矛盾。所以，这里，只能取第二个绿箭头，这时候，第一个绿箭头对应的顶分型，自然就不算笔中的顶了。
 [065:40] 所以，根据上面的分析，对第二种情况进行相应处理（类似对分型中包含关系的处理），就可以严格地说，先顶后底，构成向下一笔；先底后顶，构成向上一笔。而所有的图形，都可以唯一地分解为上下交替的笔的连接。 -/
 def parsePens (r : PenRule) (bars : List (MergedBar P))
@@ -282,8 +305,11 @@ def PenOnlineState.code (s : PenOnlineState) : Int × Nat :=
     | .forming => 0
     | .extending => 1))
 
-/-- 末步顺向且没有未被突破的反向局部分型才算延伸。尚无保留分型
-时不指定笔方向。待 `needs-fable` 最终裁定 `U-2`。
+/-- 输入须满足 `IsInclusionFree`。没有保留分型时返回 `none`。
+从尾端分型取下一笔方向；若其极值被后续 K 线严格突破，方向回到前一笔。
+沿所取方向，末根须严格越过尾端分型中心之后各先前 K 线的同向极值才算延伸，
+否则为分型构造中；等值不算突破，只有一根后续 K 线时为延伸。
+[077:42] 如果前面的底高于后面的底，那么前面的划分显然是错误的，因为按这种划分，该笔是没有完成的，一个底不经过一个顶后就有一个更低的底，这是最典型的笔没完成的情况。
 [091:28] 缠中说禅笔定理：任何的当下，在任何时间周期的K线图中，走势必然落在一确定的具有明确方向的笔当中（向上笔或向下笔），而在笔当中的位置，必然只有两种情况：一、在分型构造中。二、分型构造确认后延伸为笔的过程中。
 [091:30] 根据这个定理，对于任何的当下走势，在任何一个时间周期里，我们都可以用两个变量构成的数组精确地定义当下的走势。第一个变量，只有两个取值，不妨用1代表向上的笔，-1代表向下的笔；第二个变量也只有两个取值，0代表分型构造中，1代表分型确认延伸为笔的过程中。 -/
 def penOnlineState (r : PenRule) (bars : List (MergedBar P))
@@ -291,15 +317,16 @@ def penOnlineState (r : PenRule) (bars : List (MergedBar P))
   match (penPivots r bars tie).getLast? with
   | none => none
   | some f =>
-    let d := if f.kind = .bottom then Dir.up else Dir.down
-    let uncleared := (scanLocalFractals bars).any fun x =>
-      f.first < x.first && x.kind ≠ f.kind &&
-        !(bars.drop (x.center + 1)).any (fun b =>
-          if d = .up then x.extreme < b.range.hi else b.range.lo < x.extreme)
-    let continues := match bars.reverse with
-      | b :: a :: _ => if d = .up then decide (a.range.strictUp b.range)
-                                   else decide (a.range.strictDown b.range)
-      | _ => false
-    some ⟨d, if !uncleared && continues then .extending else .forming⟩
+    let ahead := if f.kind = .bottom then Dir.up else Dir.down
+    let back := ahead.flip
+    let after := bars.drop (f.center + 1)
+    let beyond := fun (d : Dir) (p : P) (b : MergedBar P) =>
+      if d = .up then decide (p < b.range.hi) else decide (b.range.lo < p)
+    let tip := fun (d : Dir) (b : MergedBar P) => if d = .up then b.range.hi else b.range.lo
+    let d := if after.any (beyond back f.extreme) then back else ahead
+    match after.reverse with
+    | [] => some ⟨d, .extending⟩
+    | last :: earlierRev =>
+      some ⟨d, if earlierRev.all (fun b => beyond d (tip d b) last) then .extending else .forming⟩
 
 end Chan.Defs.Base
