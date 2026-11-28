@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..abed436 100644
+index e69de29..4b2b580 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,404 @@
 +package middleware
 +
 +import (
@@ -310,9 +310,32 @@ index e69de29..abed436 100644
 +				c.AbortWithStatus(http.StatusServiceUnavailable)
 +				return
 +			}
++			deadline := collector.Deadline()
++			rc := http.NewResponseController(c.Writer)
++			if err := rc.SetReadDeadline(deadline); err != nil {
++				collector.Reject()
++				collector.HandlerDone(false)
++				c.Header("Connection", "close")
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
++			if err := rc.SetWriteDeadline(deadline); err != nil {
++				_ = rc.SetReadDeadline(time.Time{})
++				collector.Reject()
++				collector.HandlerDone(false)
++				c.Header("Connection", "close")
++				c.AbortWithStatus(http.StatusServiceUnavailable)
++				return
++			}
 +			var cancel context.CancelFunc
-+			ctx, cancel = context.WithDeadline(ctx, collector.Deadline())
++			ctx, cancel = context.WithDeadline(ctx, deadline)
 +			defer cancel()
++			defer func() {
++				if !time.Now().After(deadline) {
++					_ = rc.SetReadDeadline(time.Time{})
++					_ = rc.SetWriteDeadline(time.Time{})
++				}
++			}()
 +		}
 +		c.Request = c.Request.WithContext(ctx)
 +		finished := false
@@ -386,10 +409,10 @@ index e69de29..abed436 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..282c68c
+index 0000000..605b9a4
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,1239 @@
+@@ -0,0 +1,1314 @@
 +package middleware
 +
 +import (
@@ -1629,6 +1652,81 @@ index 0000000..282c68c
 +	b.pos += n
 +	return n, nil
 +}
++
++func TestPreflightReceiptMiddlewareLegacyEnforcesConnReadAndWriteDeadlines(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R96): legacy preflight- requests MUST enforce ResponseController
++	// SetReadDeadline/SetWriteDeadline matching collector.Deadline() so a stalled request body
++	// cannot outlive the 50s preflight deadline, and unsupported ResponseWriters fail closed.
++	gin.SetMode(gin.TestMode)
++	root := filepath.Join(t.TempDir(), "receipts-legacy-conn-deadline")
++	t.Setenv("CLIPROXY_PREFLIGHT_RECEIPTS", root)
++
++	// 1. Unsupported ResponseWriter (plain httptest.NewRecorder) MUST fail closed with 503 + Connection: close.
++	var handlerRan atomic.Bool
++	engine := gin.New()
++	engine.Use(PreflightReceipt())
++	engine.POST("/v1/responses", func(c *gin.Context) {
++		handlerRan.Store(true)
++		c.Status(http.StatusOK)
++	})
++	recUnsupported := httptest.NewRecorder()
++	reqUnsupported := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
++	reqUnsupported.Header.Set("Session-Id", "preflight-e9610001-2222-4333-8444-555555550001")
++	engine.ServeHTTP(recUnsupported, reqUnsupported)
++	if recUnsupported.Code != http.StatusServiceUnavailable || !strings.EqualFold(recUnsupported.Header().Get("Connection"), "close") || handlerRan.Load() {
++		t.Fatalf("unsupported ResponseWriter legacy preflight = code:%d conn:%q handlerRan:%v, want (503, close, false)",
++			recUnsupported.Code, recUnsupported.Header().Get("Connection"), handlerRan.Load())
++	}
++
++	// 2. Real TCP server with stalled request body: SetReadDeadline(collector.Deadline()) MUST
++	//    interrupt blocked Body.Read promptly at deadline rather than hanging past it.
++	bodyErrCh := make(chan error, 1)
++	tcpEngine := gin.New()
++	tcpEngine.Use(PreflightReceipt())
++	tcpEngine.POST("/v1/responses", func(c *gin.Context) {
++		_, rerr := io.ReadAll(c.Request.Body)
++		bodyErrCh <- rerr
++		c.Status(http.StatusRequestTimeout)
++	})
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		ctx, cancel := context.WithTimeout(r.Context(), 220*time.Millisecond)
++		defer cancel()
++		tcpEngine.ServeHTTP(w, r.WithContext(ctx))
++	}))
++	defer srv.Close()
++
++	conn, err := net.DialTimeout("tcp", srv.Listener.Addr().String(), 2*time.Second)
++	if err != nil {
++		t.Fatalf("dial legacy tcp server: %v", err)
++	}
++	defer conn.Close()
++	rawReq := "POST /v1/responses HTTP/1.1\r\n" +
++		"Host: " + srv.Listener.Addr().String() + "\r\n" +
++		"Session-Id: preflight-e9610001-2222-4333-8444-555555550002\r\n" +
++		"Content-Length: 1024\r\n" +
++		"\r\n" +
++		"partial"
++	t0 := time.Now()
++	if _, err := io.WriteString(conn, rawReq); err != nil {
++		t.Fatalf("write partial legacy request: %v", err)
++	}
++	select {
++	case rerr := <-bodyErrCh:
++		elapsed := time.Since(t0)
++		if rerr == nil {
++			t.Fatalf("expected stalled legacy Body.Read to fail with read deadline error, got nil")
++		}
++		var netErr net.Error
++		if !errors.As(rerr, &netErr) || !netErr.Timeout() {
++			t.Fatalf("expected net timeout error from legacy SetReadDeadline, got %v", rerr)
++		}
++		if elapsed > 2*time.Second {
++			t.Fatalf("stalled legacy Body.Read took %v (>2s)", elapsed)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatalf("stalled legacy Body.Read was NOT interrupted by connection read deadline")
++	}
++}
 diff --git a/internal/api/middleware/seal_hook_disabled.go b/internal/api/middleware/seal_hook_disabled.go
 new file mode 100644
 index 0000000..d910f83
@@ -1801,7 +1899,7 @@ index 0000000..9cdebe2
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..9d72e20 100644
+index e69de29..6aab24f 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
 @@ -0,0 +1,1734 @@
@@ -1924,7 +2022,7 @@ index e69de29..9d72e20 100644
 +	req.Header.Set("Authorization", "Bearer test-key")
 +	req.Header.Set("Content-Type", "application/json")
 +	req.Header.Set("Session-Id", session)
-+	recorder := httptest.NewRecorder()
++	recorder := newDeadlineRecorder()
 +	server.engine.ServeHTTP(recorder, req)
 +	if recorder.Code != 200 {
 +		t.Fatalf("HTTP %d: %s", recorder.Code, recorder.Body.String())
@@ -2034,7 +2132,7 @@ index e69de29..9d72e20 100644
 +	req.Header.Set("Authorization", "Bearer test-key")
 +	req.Header.Set("Content-Type", "application/json")
 +	req.Header.Set("Session-Id", session)
-+	recorder := httptest.NewRecorder()
++	recorder := newDeadlineRecorder()
 +	if mode != "recorder" {
 +		proxy := httptest.NewServer(server.engine)
 +		defer proxy.Close()
@@ -2147,7 +2245,7 @@ index e69de29..9d72e20 100644
 +		req.Header.Set("Authorization", "Bearer test-key")
 +		req.Header.Set("Content-Type", "application/json")
 +		req.Header.Set("Session-Id", current)
-+		recorder := httptest.NewRecorder()
++		recorder := newDeadlineRecorder()
 +		server.engine.ServeHTTP(recorder, req)
 +		if current == "ordinary-session" && recorder.Code != 200 {
 +			t.Fatal(recorder.Code)
@@ -8275,10 +8373,10 @@ index 0000000..e3a233e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..2a7cf69
+index 0000000..15c7085
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,478 @@
 +package auth
 +
 +import (
@@ -8520,7 +8618,7 @@ index 0000000..2a7cf69
 +	return []string{"h2", "http/1.1"}
 +}
 +
-+func newFreshStandardTransport(fixedSOCKS proxy.ContextDialer) *http.Transport {
++func newFreshStandardTransport(fixedSOCKS proxy.ContextDialer, h2Disabled bool) *http.Transport {
 +	// Constructed directly without cloning http.DefaultTransport so an external
 +	// RegisterProtocol("https", ...) or TLSClientConfig mutation on DefaultTransport
 +	// can never affect formal review or preflight TLS verification.
@@ -8572,13 +8670,15 @@ index 0000000..2a7cf69
 +		if err != nil {
 +			return nil, err
 +		}
-+		godebug := os.Getenv("GODEBUG")
-+		h2Disabled := http2ClientDisabledForEnv(godebug)
++		nextProtos := []string{"h2", "http/1.1"}
++		if h2Disabled {
++			nextProtos = []string{"http/1.1"}
++		}
 +		tlsConn := tls.Client(rawConn, &tls.Config{
 +			ServerName: host,
 +			RootCAs:    controlledTransportRootCAs(),
 +			MinVersion: tls.VersionTLS12,
-+			NextProtos: controlledTLSNextProtos(godebug),
++			NextProtos: nextProtos,
 +		})
 +		hsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 +		defer cancel()
@@ -8609,7 +8709,7 @@ index 0000000..2a7cf69
 +		},
 +		DialContext:           dialPlainHTTP,
 +		DialTLSContext:        dialTLS,
-+		ForceAttemptHTTP2:     !http2ClientDisabledForEnv(os.Getenv("GODEBUG")),
++		ForceAttemptHTTP2:     !h2Disabled,
 +		DisableKeepAlives:     true,
 +		DisableCompression:    true,
 +		MaxIdleConns:          100,
@@ -8624,7 +8724,12 @@ index 0000000..2a7cf69
 +// Unsupported schemes such as https:// proxy fail closed.
 +func ControlledTransportForProxy(raw string) (http.RoundTripper, error) {
 +	trimmed := strings.TrimSpace(raw)
-+	cacheKey := sha256.Sum256([]byte(trimmed))
++	h2Disabled := http2ClientDisabledForEnv(os.Getenv("GODEBUG"))
++	cacheInput := "h2=1\x00" + trimmed
++	if h2Disabled {
++		cacheInput = "h2=0\x00" + trimmed
++	}
++	cacheKey := sha256.Sum256([]byte(cacheInput))
 +	nowNS := time.Now().UnixNano()
 +	controlledTransportMu.RLock()
 +	if existing := controlledTransportByProxy[cacheKey]; existing != nil {
@@ -8681,7 +8786,7 @@ index 0000000..2a7cf69
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
 +
-+	tr := newFreshStandardTransport(fixedSOCKS)
++	tr := newFreshStandardTransport(fixedSOCKS, h2Disabled)
 +	wrapped := &controlledPreflightTransport{tr: tr, resolveProxy: resolveProxy, sealed: true}
 +	wrapped.lastUsedNS.Store(nowNS)
 +	var evicted []*controlledPreflightTransport
@@ -8752,10 +8857,10 @@ index 0000000..2a7cf69
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport_tls_test.go b/sdk/cliproxy/auth/preflight_transport_tls_test.go
 new file mode 100644
-index 0000000..8e6959c
+index 0000000..8995368
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport_tls_test.go
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,282 @@
 +//go:build preflight_test_roots
 +
 +package auth
@@ -8967,11 +9072,13 @@ index 0000000..8e6959c
 +		}
 +	}
 +
-+	// 3. Astra P2 #2 (PR #2280 R95): With GODEBUG=http2client=0, dialTLS MUST advertise only
-+	//    http/1.1 ALPN even when the upstream TLS server prefers h2, avoiding ALPN mismatch.
++	// 3. Astra P2 #2 (PR #2280 R95) + Astra P2 #4 (PR #2280 R96): With GODEBUG=http2client=0,
++	//    ControlledTransportForProxy MUST cache and bind ForceAttemptHTTP2 + dialTLS ALPN together
++	//    so an http/1.1-only transport never negotiates h2 even if GODEBUG later changes in-process,
++	//    while toggling GODEBUG back returns a distinct h2-capable cached transport.
 +	h2Srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		w.WriteHeader(http.StatusOK)
-+		_, _ = io.WriteString(w, "ok-h1")
++		_, _ = io.WriteString(w, "ok-proto")
 +	}))
 +	h2Srv.EnableHTTP2 = true
 +	h2Srv.TLS = &tls.Config{
@@ -8982,14 +9089,21 @@ index 0000000..8e6959c
 +	defer h2Srv.Close()
 +
 +	t.Setenv("GODEBUG", "http2client=0")
++	h1OnlyRT, err := ControlledTransportForProxy("direct")
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(direct, http2client=0): %v", err)
++	}
++	if h1OnlyRT == directRT {
++		t.Fatalf("expected distinct cached transport when GODEBUG=http2client=0 vs default")
++	}
 +	h1OnlyReq, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, h2Srv.URL+"/v1/responses", nil)
-+	h1OnlyResp, errH1Only := directRT.RoundTrip(h1OnlyReq)
++	h1OnlyResp, errH1Only := h1OnlyRT.RoundTrip(h1OnlyReq)
 +	if errH1Only != nil {
 +		t.Fatalf("GODEBUG=http2client=0 RoundTrip against h2-capable server failed: %v", errH1Only)
 +	}
 +	h1Body, _ := io.ReadAll(h1OnlyResp.Body)
 +	_ = h1OnlyResp.Body.Close()
-+	if h1OnlyResp.StatusCode != http.StatusOK || h1OnlyResp.ProtoMajor != 1 || string(h1Body) != "ok-h1" || h1OnlyResp.TLS == nil || h1OnlyResp.TLS.NegotiatedProtocol != "http/1.1" {
++	if h1OnlyResp.StatusCode != http.StatusOK || h1OnlyResp.ProtoMajor != 1 || string(h1Body) != "ok-proto" || h1OnlyResp.TLS == nil || h1OnlyResp.TLS.NegotiatedProtocol != "http/1.1" {
 +		t.Fatalf("GODEBUG=http2client=0 response = status:%d proto:%d.%d alpn:%q body:%q",
 +			h1OnlyResp.StatusCode, h1OnlyResp.ProtoMajor, h1OnlyResp.ProtoMinor,
 +			func() string {
@@ -8998,6 +9112,35 @@ index 0000000..8e6959c
 +				}
 +				return h1OnlyResp.TLS.NegotiatedProtocol
 +			}(), string(h1Body))
++	}
++
++	// Even after GODEBUG is cleared, the existing h1OnlyRT MUST stay http/1.1-only (ALPN pinned to ForceAttemptHTTP2).
++	t.Setenv("GODEBUG", "")
++	h1StillReq, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, h2Srv.URL+"/v1/responses", nil)
++	h1StillResp, errH1Still := h1OnlyRT.RoundTrip(h1StillReq)
++	if errH1Still != nil {
++		t.Fatalf("pinned h1OnlyRT failed after GODEBUG cleared: %v", errH1Still)
++	}
++	_, _ = io.Copy(io.Discard, h1StillResp.Body)
++	_ = h1StillResp.Body.Close()
++	if h1StillResp.ProtoMajor != 1 || h1StillResp.TLS == nil || h1StillResp.TLS.NegotiatedProtocol != "http/1.1" {
++		t.Fatalf("pinned h1OnlyRT unexpectedly negotiated non-HTTP/1.1 after GODEBUG cleared: proto=%d.%d tls=%+v", h1StillResp.ProtoMajor, h1StillResp.ProtoMinor, h1StillResp.TLS)
++	}
++
++	// Meanwhile a fresh lookup with GODEBUG="" returns the h2-capable transport and negotiates h2 cleanly.
++	h2CapableRT, err := ControlledTransportForProxy("direct")
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(direct, h2 enabled): %v", err)
++	}
++	h2Req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, h2Srv.URL+"/v1/responses", nil)
++	h2Resp, errH2 := h2CapableRT.RoundTrip(h2Req)
++	if errH2 != nil {
++		t.Fatalf("h2-capable transport RoundTrip failed: %v", errH2)
++	}
++	_, _ = io.Copy(io.Discard, h2Resp.Body)
++	_ = h2Resp.Body.Close()
++	if h2Resp.ProtoMajor != 2 || h2Resp.TLS == nil || h2Resp.TLS.NegotiatedProtocol != "h2" {
++		t.Fatalf("h2-capable transport response = proto:%d.%d tls=%+v, want h2", h2Resp.ProtoMajor, h2Resp.ProtoMinor, h2Resp.TLS)
 +	}
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
@@ -9114,10 +9257,10 @@ index 0000000..89341b4
 +}
 diff --git a/sdk/preflightreceipt/http1_framing.go b/sdk/preflightreceipt/http1_framing.go
 new file mode 100644
-index 0000000..659bdd9
+index 0000000..bd66061
 --- /dev/null
 +++ b/sdk/preflightreceipt/http1_framing.go
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,349 @@
 +package preflightreceipt
 +
 +import (
@@ -9179,13 +9322,10 @@ index 0000000..659bdd9
 +		return 0, false
 +	}
 +	rest := statusLine[len("HTTP/1.1 "):]
-+	if len(rest) < 3 {
++	if len(rest) < 4 || rest[3] != ' ' {
 +		return 0, false
 +	}
 +	if rest[0] < '1' || rest[0] > '5' || rest[1] < '0' || rest[1] > '9' || rest[2] < '0' || rest[2] > '9' {
-+		return 0, false
-+	}
-+	if len(rest) > 3 && rest[3] != ' ' {
 +		return 0, false
 +	}
 +	if len(rest) > 4 && !isValidHTTP1HeaderValueBytes(rest[4:]) {
@@ -9471,10 +9611,10 @@ index 0000000..659bdd9
 +	return 0, c.failClosed()
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..7e36131 100644
+index e69de29..ec4ecef 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,15189 @@
+@@ -0,0 +1,15197 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -10318,6 +10458,7 @@ index e69de29..7e36131 100644
 +	existingReviewProbeSem     = make(chan struct{}, maxPendingReviewInFlight)
 +	initialPersistSem          = make(chan struct{}, maxPendingReviewInFlight)
 +	preflightDiskSem           = make(chan struct{}, maxPendingReviewInFlight)
++	onBeforeLegacyLinkFn       func()
 +	diskTaintCheckFn           = checkDiskTaintTarget
 +	diskTaintRootHealthyFn     = checkDiskTaintRootHealthy
 +)
@@ -24656,6 +24797,13 @@ index e69de29..7e36131 100644
 +		_ = stagingRoot.Remove(tmp)
 +		return
 +	}
++	if fn := onBeforeLegacyLinkFn; fn != nil {
++		fn()
++	}
++	if (!job.deadline.IsZero() && time.Now().After(job.deadline)) || (job.turnCtx != nil && errors.Is(job.turnCtx.Err(), context.DeadlineExceeded)) {
++		_ = stagingRoot.Remove(tmp)
++		return
++	}
 +	linkErr := linkatPinned(stagingDirFD, tmp, subDirFD, "receipt.json")
 +	_ = stagingRoot.Remove(tmp)
 +	if linkErr != nil {
@@ -24665,10 +24813,10 @@ index e69de29..7e36131 100644
 +	_ = syncPinnedDir(subRoot, job.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..de884ca 100644
+index e69de29..194ef4f 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,18920 @@
+@@ -0,0 +1,19013 @@
 +package preflightreceipt
 +
 +import (
@@ -43125,6 +43273,7 @@ index e69de29..de884ca 100644
 +		{"non_chunked_te", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"},
 +		{"1xx_with_cl", "HTTP/1.1 103 Early Hints\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
 +		{"http10_with_te", "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"},
++		{"missing_space_after_status_code", "HTTP/1.1 200\r\nContent-Length: 2\r\n\r\nok"},
 +	}
 +	for _, tc := range badRawCases {
 +		resp, err := sendRawHTTP(tc.raw)
@@ -43143,6 +43292,7 @@ index e69de29..de884ca 100644
 +		{"chunked_only", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello"},
 +		{"cl_only", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", "hello"},
 +		{"100_then_cl", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", "ok"},
++		{"empty_reason_with_sp", "HTTP/1.1 200 \r\nContent-Length: 2\r\n\r\nok", "ok"},
 +	}
 +	for _, tc := range goodRawCases {
 +		resp, err := sendRawHTTP(tc.raw)
@@ -43587,6 +43737,97 @@ index e69de29..de884ca 100644
 +	waitPreflightSemDrain()
 +	if _, serr := os.Stat(filepath.Join(rootPub, sessPub, "receipt.json")); !os.IsNotExist(serr) {
 +		t.Fatalf("stalled legacy publish unexpectedly created post-deadline receipt.json: stat err=%v", serr)
++	}
++
++	// 4c. Astra P1 #1 (PR #2280 R96): Even if storage stalls AFTER Lstat + verifyMarkerInSubdir
++	//     and crosses the deadline right before linkatPinned, publishLegacyReceiptToDisk MUST
++	//     re-check deadline after marker verification, skip linkatPinned, and clean up staging tmp.
++	rootLate := filepath.Join(baseDir, "r96-legacy-post-marker-deadline")
++	sessLate := "preflight-e9060606-2222-4333-8444-555555550006"
++	lateCtx, cancelLate := context.WithTimeout(context.Background(), 350*time.Millisecond)
++	defer cancelLate()
++	ctxL, colL, err := Begin(lateCtx, rootLate, sessLate)
++	if err != nil {
++		t.Fatalf("Begin legacy post-marker deadline: %v", err)
++	}
++	ctxL, execL, err := colL.Start(ctxL, "claude", "claude-opus-5-5")
++	if err != nil {
++		t.Fatalf("Start legacy post-marker deadline: %v", err)
++	}
++	clientL := httptransport.Decorate(ctxL, &http.Client{
++		Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode:    http.StatusOK,
++				ProtoMajor:    1,
++				ProtoMinor:    1,
++				ContentLength: 2,
++				Body:          io.NopCloser(strings.NewReader("ok")),
++				TLS:           verifiedTLSState("api.anthropic.com"),
++			}, nil
++		}),
++	})
++	reqL, _ := http.NewRequestWithContext(ctxL, http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(`{}`))
++	respL, err := clientL.Do(reqL)
++	if err != nil {
++		t.Fatalf("legacy post-marker Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, respL.Body)
++	_ = respL.Body.Close()
++	execL.End()
++	colL.Complete(true)
++
++	enteredBeforeLink := make(chan struct{})
++	releaseBeforeLink := make(chan struct{})
++	doneBeforeLink := make(chan struct{})
++	origBeforeLink := onBeforeLegacyLinkFn
++	onBeforeLegacyLinkFn = func() {
++		close(enteredBeforeLink)
++		<-releaseBeforeLink
++		close(doneBeforeLink)
++	}
++	doneHandlerLate := make(chan struct{})
++	tLate := time.Now()
++	go func() {
++		colL.HandlerDone(true)
++		close(doneHandlerLate)
++	}()
++	select {
++	case <-enteredBeforeLink:
++	case <-time.After(2 * time.Second):
++		close(releaseBeforeLink)
++		<-doneBeforeLink
++		onBeforeLegacyLinkFn = origBeforeLink
++		t.Fatalf("publishLegacyReceiptToDisk never reached post-marker pre-link check")
++	}
++	// Wait until HandlerDone exits at lateCtx deadline, then release post-marker hook after deadline has passed.
++	select {
++	case <-doneHandlerLate:
++	case <-time.After(2 * time.Second):
++		close(releaseBeforeLink)
++		<-doneBeforeLink
++		onBeforeLegacyLinkFn = origBeforeLink
++		t.Fatalf("HandlerDone did not return at deadline when stalled after marker verification")
++	}
++	if time.Since(tLate) > 2*time.Second {
++		close(releaseBeforeLink)
++		<-doneBeforeLink
++		onBeforeLegacyLinkFn = origBeforeLink
++		t.Fatalf("HandlerDone exceeded deadline: %v", time.Since(tLate))
++	}
++	time.Sleep(40 * time.Millisecond)
++	close(releaseBeforeLink)
++	<-doneBeforeLink
++	waitPreflightSemDrain()
++	onBeforeLegacyLinkFn = origBeforeLink
++	if _, serr := os.Stat(filepath.Join(rootLate, sessLate, "receipt.json")); !os.IsNotExist(serr) {
++		t.Fatalf("post-marker deadline stall unexpectedly linked receipt.json: stat err=%v", serr)
++	}
++	if stagingEntries, rerr := os.ReadDir(filepath.Join(rootLate, ".staging")); rerr == nil {
++		for _, ent := range stagingEntries {
++			if strings.HasPrefix(ent.Name(), "pending-") {
++				t.Fatalf("post-marker deadline abort left staging temp file behind: %s", ent.Name())
++			}
++		}
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
