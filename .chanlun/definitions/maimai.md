@@ -245,7 +245,7 @@
 | # | 侧 | 位置 | 处置 |
 |---|---|---|---|
 | T-1 | 对拍/Rust | `rust/tests/theta_v0_classifier_parity.rs:528,:629`（[#811](https://github.com/xy7365527-lang/NewChanlun/issues/811) 两条红）；`bsp.rs`/`signal.rs` 的 `below_last_center` 填充链 | **按 B-1 对齐 Rust 侧背驰语义**（统一含 Extreme 方向），断言转绿。**已落地 = [#903](https://github.com/xy7365527-lang/NewChanlun/issues/903)**（below_last_center 对齐统一背驰判据，两条红断言转绿） |
-| T-2 | Lean | `formal/Origin/BspClassification.lean:109–110,152–170`（`IsType2`、构成式及桥定理）；`formal/Origin/SellClosedLoop.lean:367–372`（递归义务） | **按 B-2① 补次级别端点归属与小转大定位**；不得让旧 `afterTypeOne` 普遍挡住二类点。真下钻与 fixture 一并对齐 [#2114 实施交接](qushi.md#2114-受影响代码清单)。 |
+| T-2 | Lean | `formal/Origin/BspClassification.lean:109–110,152–170`（`IsType2`、构成式及桥定理）；`formal/Origin/SellClosedLoop.lean:367–372`（递归义务） | **按 B-2① 补次级别端点归属与小转大定位**；不得让旧 `afterTypeOne` 普遍挡住二类点；移除 `formal/Origin/BspClassification.lean:109` 的 `IsType2` 旧合取 `brokeCenter = false`（定义体见 :110），同步改 `formal/Origin/BuySellPredicate.lean:123–124` 的可判定实例；不得以再次穿越末枢独立否决常规二类点。**Rust／Lean 结构发布对拍**：末枢 `[100,110]`、本级正式一买 90、首涨至 115、首次回拉至 88，且 88 处次级别正式一买已证齐；同输入两侧均须在 88 发布常规二买，归属锚均为前置一买的完整身份。B 域的策略拒绝另行独立验收，不得反作 S 的结构发布门。真下钻与 fixture 一并对齐 [#2114 实施交接](qushi.md#2114-受影响代码清单)。 |
 | T-3 | Rust | `rust/src/theta_v0/classifier/bsp.rs:91–92`（`is_third`）；发布端见 [#2114 实施交接](qushi.md#2114-受影响代码清单) | [#905](https://github.com/Newchanlun/NewChanlun/issues/905) 的「第一次」显式化保留；旧右界配对由 B-3 的共用段角色判据替代。 |
 | T-4 | Rust | `rust/src/theta_v0/classifier/rmove_compose.rs:160`（`retrace_no_break`）＋ `:80-82`（`no_new_low` 硬闸） | **按 B-2② 拆闸**，实施归 [#884](https://github.com/xy7365527-lang/NewChanlun/issues/884)（教义面已落地）。**已落地 = #884**（2026-08-17）：`retrace_no_break` 硬闸拆除；回拉归属和端点按 B-2①，不继承旧后继取段；旧重合标注生产链为 `SecondTypeStructure.retrace_breaks_extreme` → `BspPoint.retrace_breaks_type1: Option<bool>`；新值域见[本级极值标注](#二类点的本级极值标注)，仍不作准入；Lean `RMoveCompose.SecondTypeStructure` 同步拆 `RetraceNoBreak` 合取 + 新增 `RetraceBreaksExtreme` 标注谓词与 `witness_secondTypeStructure_brokeExtreme` 见证；旧引擎 `buysellpoint.rs` 同闸处置路由归 T-6/673-fix（见下） |
 | T-5 | 三侧追认 | `rmove_compose.rs:144-170`、`descend.rs:176-191`、`bsp.rs:78-80`；Lean `BspClassification.lean:94-95,:111-121`；`buysellpoint.rs:186-209` | 与裁定同形，注释口径对齐（带 #816 票号）。**已落地 = #884**（2026-08-17）：三处 Rust 与 `BspClassification.IsType2` 注释已带 #816 票号对齐；`buysellpoint.rs` 的 `make_type2_point` `geom` 合取（现 `:272-276`，清单行号已漂）加 #816 B-2② 注释并明记处置路由归 T-6/673-fix（旧引擎逐位等价 Python 侧，T-6 未落地前两侧同拍不改判据） |
@@ -257,15 +257,15 @@
 ## 当前实现
 
 ### 代码现状
-- **买卖点模块**：✅ **已实现**（`src/newchan/a_buysellpoint_v1.py`，336行，79个测试全GREEN）
+- **历史买卖点模块（冻结对照）**：`src/newchan/a_buysellpoint_v1.py`（原实现 336 行、79 个测试通过）；正式发布以 S 为准。
   - `BuySellPoint` 数据类：`kind`（type1/type2/type3）、`side`（buy/sell）、`level_id`、`seg_idx`
   - 第一类买卖点：正式趋势语境、破枢与背驰须按第 1 条和 B-1 取证
   - 第二类买卖点：旧实现仅从一类后找次级别回拉／反抽；现行两路定位见 B-2。
   - 第三类买卖点：中枢离开段 + 回试段 + ZG/ZD比较
   - 审计：`src/newchan/audit/bsp_checker.py`
 - **相关已实现模块**：
-  - `src/newchan/a_divergence.py` — 背驰判断（第一类买卖点的触发条件）
-  - `src/newchan/a_divergence_v1.py` — 背驰 v1（含区间套集成）
+  - `src/newchan/a_divergence.py` — 历史冻结背驰对照，不是正式一类点的触发条件。
+  - `src/newchan/a_divergence_v1.py:71` — 历史冻结背驰对照（含旧区间套集成）；有 MACD 取面积，缺数据或映射则取振幅 × 持续 bar 数。两路均不是正式 `ForceL`，不参与准入。
   - `src/newchan/a_move_v1.py` — 走势类型实例（`Move`数据类）
   - `src/newchan/a_zhongshu_v1.py` — 中枢（`Center`/`Zhongshu`数据类）
 
@@ -375,9 +375,9 @@
    - 第一类买卖点需要中枢的最后一个中枢判定
    - 第三类买卖点需要中枢的ZG/ZD边缘
    - 中枢延伸/新生/扩张决定第三类买卖点后的走势
-3. **背驰（`.chanlun/definitions/beichi.md` v1.1 已结算，代码实现于 `src/newchan/a_divergence_v1.py`）** — 核心依赖
-   - 正式趋势背驰是标准一类点的前件；具体发布见第 1 条和 B-1。
-   - 背驰的力度判断（MACD面积 / 价格振幅）
+3. **S 发布的正式 `ForceL` 背驰见证（`.chanlun/definitions/beichi.md`）** — 标准一、二、三类点如需背驰证据，均只取该见证。
+   - 标准一类点以本级正式趋势背驰为前件；常规与小转大二类点按 B-2 取首次回拉终点的次级别正式一类点见证；三类点仍按 B-3 独立成点，不新增背驰硬门。
+   - 冻结 Python 的 MACD 面积与振幅 × 持续 bar 数只是历史对照读数，不得替代、补充或否决正式背驰见证；旧导出按 `qushi.md:321` 隔离。
 
 ### 间接依赖
 4. **线段（`.chanlun/definitions/xianduan.md`）** — 次级别走势的来源
@@ -405,10 +405,10 @@
 ## 影响声明
 
 ### 影响的模块
-1. **买卖点模块** — ✅ 已实现（`src/newchan/a_buysellpoint_v1.py`）
-2. **`src/newchan/a_divergence.py`** — 背驰判断（第一类买卖点的触发条件）
-   - 当前已实现 `Divergence` 数据类和检测函数
-   - 买卖点模块需复用其输出
+1. **旧买卖点模块** — `src/newchan/a_buysellpoint_v1.py`（冻结历史对照）。
+2. **旧背驰模块** — `src/newchan/a_divergence.py` 与上列 Python v1 实现（冻结历史对照）。
+   - 保留旧 `Divergence` 数据类与检测函数用于隔离复现。
+   - 正式买卖点判据所需背驰证据只读 S 发布的正式 `ForceL` 背驰见证，不复用旧背驰模块输出。
 3. **`src/newchan/a_move_v1.py`** — 走势类型实例
    - 旧组位置标签 `settled` 只描述旧实现；正式一类点按 #2114 与 B-1 取证。
 4. **`src/newchan/a_zhongshu_v1.py`** — 中枢
