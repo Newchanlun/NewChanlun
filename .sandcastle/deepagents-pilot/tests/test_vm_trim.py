@@ -2,6 +2,7 @@
 import fcntl
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -89,7 +90,7 @@ def test_not_colima_or_missing_root_skips(tmp_path):
 
 def test_run_command_kills_whole_group_on_timeout():
     # sh 起的孙进程握着 stdout；只杀直接子进程时 communicate 会一直等到孙进程结束。
-    result = vm_trim.run_command(["sh", "-c", "sleep 30 & sleep 30"], 0.5)
+    result = vm_trim.run_command(["sh", "-c", "sleep 30 & sleep 30"], 0.1)
     assert result.returncode == 124
     assert vm_trim.run_command(["/nonexistent-binary-1986"], 1).returncode == 127
 
@@ -118,20 +119,39 @@ def test_trim_subprocess_context_and_environment_contract(tmp_path, monkeypatch,
     trace = tmp_path / "calls.jsonl"
     binary = tmp_path / "bin"
     binary.mkdir()
-    script = f'''#!{sys.executable}
-import json, os, sys
-from pathlib import Path
-assert not any(k in os.environ for k in {forbidden!r})
-assert os.environ.get("DOCKER_CONTEXT") == {context!r}
-with open({str(trace)!r}, "a") as f:
-    f.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]]) + "\\n")
-if Path(sys.argv[0]).name == "docker":
-    if os.environ.get("DOCKER_CONTEXT") == "missing-context":
-        sys.exit(7)
-    print(os.environ.get("DOCKER_CONTEXT", "orbstack"))
-else:
-    print("/var/lib/docker: 1 GiB trimmed")
-'''
+    forbidden_checks = "\n".join(
+        f'if [ "${{{k}+x}}" = "x" ]; then echo "forbidden env {k}" >&2; exit 91; fi'
+        for k in forbidden
+    )
+    if context is None:
+        ctx_check = 'if [ "${DOCKER_CONTEXT+x}" = "x" ]; then echo "unexpected DOCKER_CONTEXT" >&2; exit 92; fi'
+    else:
+        ctx_check = (
+            'if [ "${DOCKER_CONTEXT+x}" != "x" ] || [ "$DOCKER_CONTEXT" != '
+            + shlex.quote(context)
+            + ' ]; then echo "wrong DOCKER_CONTEXT" >&2; exit 92; fi'
+        )
+    script = f"""#!/bin/sh
+set -eu
+{forbidden_checks}
+{ctx_check}
+name="${{0##*/}}"
+line="["
+sep=""
+for arg in "$name" "$@"; do
+  line="$line$sep\\"$arg\\""
+  sep=", "
+done
+printf '%s]\\n' "$line" >> {shlex.quote(str(trace))}
+if [ "$name" = "docker" ]; then
+  if [ "${{DOCKER_CONTEXT:-}}" = "missing-context" ]; then
+    exit 7
+  fi
+  printf '%s\\n' "${{DOCKER_CONTEXT:-orbstack}}"
+else
+  printf '%s\\n' "/var/lib/docker: 1 GiB trimmed"
+fi
+"""
     for name in ("docker", "colima"):
         path = binary / name
         path.write_text(script)
