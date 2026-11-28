@@ -40,6 +40,8 @@ pub fn open_durable_db(
 #[cfg(test)]
 mod domain_event_tests;
 #[cfg(test)]
+mod explicit_evidence_path;
+#[cfg(test)]
 mod quantity_calibration_tests;
 #[cfg(test)]
 mod tb03c_allocation_tests;

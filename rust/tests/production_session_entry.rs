@@ -60,13 +60,21 @@ fn write_json(path: &Path, value: &Value) -> PathBuf {
 
 struct Space(tempfile::TempDir);
 impl Space {
+    /// 启动器先校验 --socket 的 100 字节路径上限（含 s.sock/e.sock/b.sock 文件名），
+    /// 深层 worktree 下的 CARGO_TARGET_TMPDIR 可能超限；改用 `std::env::temp_dir()`（默认 /tmp，
+    /// 调用方可通过短路径 TMPDIR 改写到其它盘）。
     fn new() -> Self {
-        Self(
-            tempfile::Builder::new()
-                .prefix("pse")
-                .tempdir_in("/tmp")
-                .unwrap(),
-        )
+        let base = std::env::temp_dir();
+        let dir = tempfile::Builder::new()
+            .prefix("pse")
+            .tempdir_in(&base)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "无法在临时目录 {} 创建 production_session_entry 现场（受 Linux Unix socket sun_path 108 字节上限约束，默认使用 std::env::temp_dir()；若当前目录已满或不可写，请设置短路径 TMPDIR）：{err}",
+                    base.display()
+                )
+            });
+        Self(dir)
     }
     fn path(&self, name: &str) -> PathBuf {
         self.0.path().canonicalize().unwrap().join(name)
