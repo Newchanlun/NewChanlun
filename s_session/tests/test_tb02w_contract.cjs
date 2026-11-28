@@ -3,7 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const {Worker} = require('node:worker_threads');
 const vm = require('node:vm');
 const API = require('../browser/tb01c-client.js');
 const seed = require('./fixtures/tb02c/contract-seed.json');
@@ -140,6 +142,28 @@ function axisSet(objects = []) {
     return [cid,{impl_status:'not_implemented',proof_status:'not_proved',run_status:e.object_ids.length ? 'run' : 'not_run',evidence:e}];
   }));
 }
+const DECLARED_CATALOG = require('../catalog/signed-catalog.json');
+const wireCatalog = v => typeof v === 'number' ? String(v) : Array.isArray(v) ? v.map(wireCatalog) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k,x]) => [k,wireCatalog(x)])) : v;
+const DECLARED_BASE_ITEMS = DECLARED_CATALOG.items.map(i => ({id:i.id,...wireCatalog(Object.fromEntries(['kind','title','domain','branches'].map(k => [k,i[k] ?? (k === 'branches' ? [] : '')])))}));
+const CLIENT_PATH = path.resolve(__dirname, '../browser/tb01c-client.js');
+const VALIDATE_WORKER_SRC = `
+const {workerData, parentPort} = require('node:worker_threads');
+const API = require(workerData.clientPath);
+(async () => {
+  for (const {state, expectErr} of workerData.chunk) {
+    if (expectErr === null) {
+      await API.Q3.validateState(state, 's-session/2');
+    } else {
+      let err = null;
+      try { await API.Q3.validateState(state, 's-session/2'); } catch (e) { err = e; }
+      if (!err || err.message !== expectErr) {
+        throw new Error('Expected rejection ' + JSON.stringify(expectErr) + ', got ' + (err ? JSON.stringify(err.message) : 'resolved'));
+      }
+    }
+  }
+  parentPort.postMessage('ok');
+})().catch(e => { parentPort.postMessage({error: e.stack || e.message}); });
+`;
 function fullState(snapshot, rule) {
   const scope = {structure:'CompleteCut',economic:'not_started'}, axes = axisSet(snapshot.objects);
   const common = {session_id:'contract-only',generation:'1',structure_cut:'cut-1',catalog_revision:API.TB02_CATALOG.catalog_revision,
@@ -148,11 +172,9 @@ function fullState(snapshot, rule) {
   const evidence = {...profile,structure_cut:'cut-1',scope,batch_id:'batch',axes};
   for (const k of ['classified_objects','windows_total','merged_bars','effective_source_positions','withdrawals','replaces','insufficient_knowledge','domain_not_satisfied']) evidence[k]='0';
   common.catalog_evidence = evidence;
-  const declared = require('../catalog/signed-catalog.json');
-  const wire = v => typeof v === 'number' ? String(v) : Array.isArray(v) ? v.map(wire) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k,x]) => [k,wire(x)])) : v;
-  const items = declared.items.map(i => {
-    const axis = axes[i.id];
-    return {id:i.id,...wire(Object.fromEntries(['kind','title','domain','branches'].map(k => [k,i[k] ?? (k === 'branches' ? [] : '')]))),
+  const items = DECLARED_BASE_ITEMS.map(base => {
+    const axis = axes[base.id];
+    return {...base,
       implementation_status:axis?.impl_status ?? 'not_implemented',proof_status:'not_proved',run_status:axis?.run_status ?? 'not_run',evidence:axis?.evidence ?? {}};
   });
   const counts = {implemented:'0',not_implemented:String(items.length),run:String(items.filter(i => i.run_status === 'run').length),not_run:String(items.filter(i => i.run_status === 'not_run').length)};
@@ -172,17 +194,34 @@ async function cut(firstPayload, secondPayload, segmentPayload, rule = RULE_V3) 
 }
 
 test('同cut引用：KILLED_CASE_TWO 绑 KILLED、PENDING 绑 PENDING，v3 段不收 v2 序列，规则绑定 schema', async () => {
-  const run = async (snapshot, rule = RULE_V3) => API.Q3.validateState(fullState(snapshot, rule), 's-session/2');
-  for (const [result, terminal] of [['CASE_TWO', 'CONFIRMED'], ['KILLED_CASE_TWO', 'KILLED'], ['PENDING_CASE_TWO', 'OPEN'], ['PENDING_BUDGET', 'BUDGET']])
-    await run(await cut(first(TERMINALS[terminal][1]), second(terminal), segment(result)));
-  await run(await cut(first('CONFIRMED', false), second('CONFIRMED', false), segment('CASE_TWO', false), RULE_V2), RULE_V2);
-  await assert.rejects(run(await cut(first('PENDING'), second('OPEN'), segment('KILLED_CASE_TWO'))), {message: '段结果未绑定SECOND终态'});
-  await assert.rejects(run(await cut(first('KILLED'), second('KILLED'), segment('PENDING_CASE_TWO'))), {message: '段结果未绑定SECOND终态'});
   const unknown = mutated(segment('KILLED_CASE_TWO'), d => Object.assign(d.fact_vector, {new_segment_formed: null, segment_broken: null, scan_complete: false}));
-  await assert.rejects(run(await cut(first('KILLED'), second('KILLED'), unknown)), {message: '段事实可知性未绑定SECOND扫描证据'});
-  // v3 段配 v2 序列：引用闭合先于逐对象 rule→schema 绑定执行，拒因落在引用闭合；v3 对象挂 v2 规则则落在 schema 绑定。
-  await assert.rejects(run(await cut(first('CONFIRMED', false), second('CONFIRMED', false), segment('CASE_TWO'))), {message: '段引用缺同cut序列对象'});
-  await assert.rejects(run(await cut(first('KILLED'), second('KILLED'), segment('KILLED_CASE_TWO'), RULE_V2), RULE_V2), {message: '段合同与cut规则版本不符'});
+  const cases = await Promise.all([
+    ...[['CASE_TWO', 'CONFIRMED'], ['KILLED_CASE_TWO', 'KILLED'], ['PENDING_CASE_TWO', 'OPEN'], ['PENDING_BUDGET', 'BUDGET']].map(
+      async ([result, terminal]) => ({state: fullState(await cut(first(TERMINALS[terminal][1]), second(terminal), segment(result)), RULE_V3), expectErr: null})
+    ),
+    (async () => ({state: fullState(await cut(first('CONFIRMED', false), second('CONFIRMED', false), segment('CASE_TWO', false), RULE_V2), RULE_V2), expectErr: null}))(),
+    (async () => ({state: fullState(await cut(first('PENDING'), second('OPEN'), segment('KILLED_CASE_TWO')), RULE_V3), expectErr: '段结果未绑定SECOND终态'}))(),
+    (async () => ({state: fullState(await cut(first('KILLED'), second('KILLED'), segment('PENDING_CASE_TWO')), RULE_V3), expectErr: '段结果未绑定SECOND终态'}))(),
+    (async () => ({state: fullState(await cut(first('KILLED'), second('KILLED'), unknown), RULE_V3), expectErr: '段事实可知性未绑定SECOND扫描证据'}))(),
+    // v3 段配 v2 序列：引用闭合先于逐对象 rule→schema 绑定执行，拒因落在引用闭合；v3 对象挂 v2 规则则落在 schema 绑定。
+    (async () => ({state: fullState(await cut(first('CONFIRMED', false), second('CONFIRMED', false), segment('CASE_TWO')), RULE_V3), expectErr: '段引用缺同cut序列对象'}))(),
+    (async () => ({state: fullState(await cut(first('KILLED'), second('KILLED'), segment('KILLED_CASE_TWO'), RULE_V2), RULE_V2), expectErr: '段合同与cut规则版本不符'}))(),
+  ]);
+  const lanes = Math.max(1, Math.min(4, os.availableParallelism ? os.availableParallelism() : 4));
+  const chunks = Array.from({length: lanes}, (_, i) => cases.filter((_, idx) => idx % lanes === i));
+  const runLocal = async chunk => {
+    for (const {state, expectErr} of chunk) {
+      if (expectErr === null) await API.Q3.validateState(state, 's-session/2');
+      else await assert.rejects(API.Q3.validateState(state, 's-session/2'), {message: expectErr});
+    }
+  };
+  const runWorker = chunk => new Promise((resolve, reject) => {
+    const w = new Worker(VALIDATE_WORKER_SRC, {eval: true, workerData: {clientPath: CLIENT_PATH, chunk}});
+    w.once('message', msg => { if (msg === 'ok') resolve(); else reject(new Error(msg.error)); });
+    w.once('error', reject);
+    w.once('exit', code => { if (code !== 0) reject(new Error('worker exit ' + code)); });
+  });
+  await Promise.all([runLocal(chunks[0]), ...chunks.slice(1).filter(c => c.length > 0).map(runWorker)]);
 });
 
 test('v3 逻辑slot不被页面当成见证整数', () => {
