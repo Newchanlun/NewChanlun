@@ -5,6 +5,7 @@
 pub const KIND_LEAF: i64 = 0;
 pub const KIND_SEQ: i64 = 1;
 
+#[inline]
 pub fn node_id(kind: i64, payload: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -13,6 +14,7 @@ pub fn node_id(kind: i64, payload: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
+#[inline]
 pub fn verify_node_row(id: &[u8; 32], kind: i64, payload: &[u8], len: i64) -> Result<u64, String> {
     if kind != KIND_LEAF && kind != KIND_SEQ {
         return Err(format!(
@@ -39,12 +41,22 @@ pub fn verify_node_row(id: &[u8; 32], kind: i64, payload: &[u8], len: i64) -> Re
     Ok(declared)
 }
 
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+
+#[inline]
 pub fn hex(id: &[u8; 32]) -> String {
     hex_bytes(id)
 }
 
+#[inline]
 pub fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX_LOWER[(b >> 4) as usize]);
+        out.push(HEX_LOWER[(b & 0x0f) as usize]);
+    }
+    // SAFETY: HEX_LOWER contains only ASCII hex digits.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 /// 经实际原行验证构造的 opaque 凭据；不持有 payload，也不分配长期集合。
@@ -57,6 +69,7 @@ pub struct CheckedLegacyEvidenceRow {
 }
 
 impl CheckedLegacyEvidenceRow {
+    #[inline]
     pub fn verify(id: &[u8; 32], kind: i64, payload: &[u8], len: i64) -> Result<Self, String> {
         let declared = verify_node_row(id, kind, payload, len)?;
         Ok(Self {
@@ -67,15 +80,19 @@ impl CheckedLegacyEvidenceRow {
         })
     }
 
+    #[inline]
     pub fn id(&self) -> &[u8; 32] {
         &self.id
     }
+    #[inline]
     pub fn kind(&self) -> i64 {
         self.kind
     }
+    #[inline]
     pub fn payload_len(&self) -> usize {
         self.payload_len
     }
+    #[inline]
     pub fn declared_length(&self) -> u64 {
         self.declared
     }
