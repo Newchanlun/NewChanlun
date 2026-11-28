@@ -5711,6 +5711,7 @@ fn r14_source_keeper_seal_and_next_request_share_explicit_parent() {
 #[cfg(all(test, feature = "s_incremental"))]
 pub(super) mod construction_tests {
     use super::*;
+    use std::cell::RefCell;
 
     include!("audit_owner/b2_source_fault_tests.rs");
     #[cfg(unix)]
@@ -6144,18 +6145,79 @@ pub(super) mod construction_tests {
         begun.token
     }
 
+    type S4AfterPin = Box<dyn FnOnce(&Transaction<'_>)>;
+    thread_local! {
+        static S4_AFTER_PIN: RefCell<Option<(u64, S4AfterPin)>> = const { RefCell::new(None) };
+    }
+
+    struct S4AfterPinGuard;
+
+    impl S4AfterPinGuard {
+        fn arm(owner: &AuditConnection, hook: impl FnOnce(&Transaction<'_>) + 'static) -> Self {
+            S4_AFTER_PIN.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                assert!(slot.is_none(), "S4 快照同步点不能嵌套");
+                *slot = Some((owner.life, Box::new(hook)));
+            });
+            Self
+        }
+    }
+
+    impl Drop for S4AfterPinGuard {
+        fn drop(&mut self) {
+            S4_AFTER_PIN.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    fn run_s4_after_pin(owner: &AuditConnection, tx: &Transaction<'_>) {
+        let hook = S4_AFTER_PIN.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|(life, _)| *life == owner.life) {
+                slot.take().map(|(_, hook)| hook)
+            } else {
+                None
+            }
+        });
+        if let Some(hook) = hook {
+            hook(tx);
+        }
+    }
+
     /// 同一只读快照上先做 complete 全量对拍、再做 b2 独立来源审计对拍；两者的冷 `state::audit`
     /// 在同一事务里必然相同，只算一次（#1890：S4 每代省约 8%）。两套对拍的内容不变。
     pub(in crate::v3) fn assert_complete_and_b2_counts(
         owner: &AuditConnection,
     ) -> source_audit::Counts {
         let active = owner.begin(TransactionBehavior::Deferred).unwrap();
+        // begin 已读 main.meta 固定 WAL 快照；在正常冷读前让夹具的第二连接提交。
+        run_s4_after_pin(owner, active.tx());
+        let before = active.tx().total_changes();
         let audited = state::audit(active.tx()).unwrap();
-        owner.assert_complete_matches_audited(active.tx(), &audited);
-        let actual = b2_assert_counts_match_audited(owner, active.tx(), &audited);
+        let actual = assert_shared_cold_at_cut(owner, active.tx(), &audited);
+        assert_eq!(
+            active.tx().total_changes(),
+            before,
+            "S4 共用冷审计期间发生写入"
+        );
         drop(audited);
         active.read_end().unwrap();
         actual
+    }
+
+    fn assert_shared_cold_at_cut(
+        owner: &AuditConnection,
+        tx: &Transaction<'_>,
+        cold: &state::AuditedState,
+    ) -> source_audit::Counts {
+        assert_eq!(
+            cold.cuts.last().unwrap().metadata.generation,
+            meta_i64(tx, "generation").unwrap(),
+            "冷审计发布代次与 S4 事务切面不符"
+        );
+        owner.assert_complete_matches_audited(tx, cold);
+        b2_assert_counts_match_audited(owner, tx, cold)
     }
 
     fn b2_assert_counts_match_audited(
@@ -6191,6 +6253,61 @@ pub(super) mod construction_tests {
         drop(reader);
         drop(source);
         actual
+    }
+
+    fn seed_s4_shared_cold_owner(f: &prepared::tests::Fixture) -> AuditConnection {
+        let owner = AuditConnection::open(&f.db_path()).unwrap();
+        let mut runtime = prepared::Runtime::with_mode(s_allocation::Mode::CapturedNative);
+        let mut c = context();
+        let envelope = b2_envelope(1);
+        let token = b2_accept_begin(&owner, &envelope, &mut c);
+        let (receipt, ended) = owner
+            .publish(&mut runtime, &token, &envelope, &mut c)
+            .unwrap();
+        assert_eq!(receipt.generation, 1);
+        owner.continue_with(ended).unwrap();
+        owner
+    }
+
+    #[test]
+    fn s4_shared_cold_accepts_pinned_cut_after_commit() {
+        let f = std::rc::Rc::new(std::cell::RefCell::new(prepared::tests::Fixture::new()));
+        let owner = seed_s4_shared_cold_owner(&f.borrow());
+        assert_eq!(meta_i64(&owner.connection, "generation").unwrap(), 1);
+
+        let writer = std::rc::Rc::clone(&f);
+        let _guard = S4AfterPinGuard::arm(&owner, move |pinned| {
+            let mut writer = writer.borrow_mut();
+            let (next, token) = writer.accept_begin(2, ("next", 20, 8, 16, 6, 12), 1);
+            assert_eq!(writer.publish(&next, &token).unwrap().generation, 2);
+            assert_eq!(meta_i64(&writer.conn, "generation").unwrap(), 2);
+            assert_eq!(
+                meta_i64(pinned, "generation").unwrap(),
+                1,
+                "第二连接提交后，S4 固定的切面仍须是第 1 代"
+            );
+        });
+
+        let counts = assert_complete_and_b2_counts(&owner);
+        assert_eq!(counts.effective, 1, "旧切面只有一根生效 K 线");
+        assert!(owner.connection.is_autocommit());
+        assert_eq!(meta_i64(&owner.connection, "generation").unwrap(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "冷审计发布代次与 S4 事务切面不符")]
+    fn s4_shared_cold_rejects_later_commit_at_pinned_cut() {
+        let mut f = prepared::tests::Fixture::new();
+        let owner = seed_s4_shared_cold_owner(&f);
+        let old = owner.begin(TransactionBehavior::Deferred).unwrap();
+        let (next, token) = f.accept_begin(2, ("next", 20, 8, 16, 6, 12), 1);
+        assert_eq!(f.publish(&next, &token).unwrap().generation, 2);
+        let later = f.conn.transaction().unwrap();
+        assert_eq!(meta_i64(old.tx(), "generation").unwrap(), 1);
+        assert_eq!(meta_i64(&later, "generation").unwrap(), 2);
+        let cold = state::audit(&later).unwrap();
+        assert_shared_cold_at_cut(&owner, old.tx(), &cold);
+        old.read_end().unwrap();
     }
 
     #[test]
