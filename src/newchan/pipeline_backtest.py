@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, Literal
 
 from newchan.backtest import BacktestResult, Trade
@@ -33,10 +34,19 @@ from newchan.pipeline import (
     scan_configuration,
 )
 from newchan.topology.config_space import Configuration, polarity_index
+from newchan.topology.fiber_bundle import FiberBundleConfigSpace, default_fiber_bundle
 from newchan.topology.fiber_pipeline_adapter import (
     FiberSignalFilter,
     create_fiber_context,
 )
+
+
+@lru_cache(maxsize=1)
+def _cached_default_fiber_bundle() -> FiberBundleConfigSpace:
+    return default_fiber_bundle()
+
+
+_DEFAULT_FIBER_FILTER = FiberSignalFilter()
 from newchan.trading.layer_state import LayerState, LayerType
 
 
@@ -249,8 +259,8 @@ def _build_resonance_signals(
     product_signals = _build_signals_for_polarity(product_pol, bsp)
 
     # 纤维丛版：FiberTradingContext polarity
-    ff = fiber_filter if fiber_filter is not None else FiberSignalFilter()
-    fiber_ctx = create_fiber_context(ctx)
+    ff = fiber_filter if fiber_filter is not None else _DEFAULT_FIBER_FILTER
+    fiber_ctx = create_fiber_context(ctx, _cached_default_fiber_bundle())
     if ff.should_override_polarity(fiber_ctx):
         fiber_pol = fiber_ctx.fiber_polarity
     else:
