@@ -3,8 +3,15 @@ from dataclasses import replace
 import pytest
 from conftest import DESIGN_TASK
 
+from pilot1742 import run as pilot_run
 from pilot1742.domain import Terminal, WorkerKey
 from pilot1742.run import SKILLS_ROOT
+
+
+@pytest.fixture(autouse=True)
+def _fast_poll(monkeypatch):
+    real_sleep = pilot_run.time.sleep
+    monkeypatch.setattr(pilot_run.time, "sleep", lambda s: real_sleep(min(s, 0.01)))
 
 SERVICE = "你由另一个代理作为工具调用，只向主控交回结果，不直接与用户对话。"
 CLOUD_SKILLS = "/opt/newchanlun/pstack/installed/skills/"
