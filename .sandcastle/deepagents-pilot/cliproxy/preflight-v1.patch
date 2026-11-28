@@ -9348,15 +9348,17 @@ index 0000000..89341b4
 +}
 diff --git a/sdk/preflightreceipt/http1_framing.go b/sdk/preflightreceipt/http1_framing.go
 new file mode 100644
-index 0000000..3831c0f
+index 0000000..3c253b3
 --- /dev/null
 +++ b/sdk/preflightreceipt/http1_framing.go
-@@ -0,0 +1,705 @@
+@@ -0,0 +1,762 @@
 +package preflightreceipt
 +
 +import (
 +	"bytes"
 +	"crypto/tls"
++	"errors"
++	"io"
 +	"net"
 +	"strconv"
 +	"strings"
@@ -9424,9 +9426,29 @@ index 0000000..3831c0f
 +	return i, false
 +}
 +
++func equalFoldASCII(a, b string) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for i := 0; i < len(a); i++ {
++		ca, cb := a[i], b[i]
++		if ca >= 'A' && ca <= 'Z' {
++			ca += 'a' - 'A'
++		}
++		if cb >= 'A' && cb <= 'Z' {
++			cb += 'a' - 'A'
++		}
++		if ca != cb {
++			return false
++		}
++	}
++	return true
++}
++
 +// isValidEventStreamContentType validates RFC 9110 Content-Type for formal SSE responses:
-+// exactly one Content-Type header whose media type is text/event-stream and whose optional
-+// parameters strictly conform to RFC 9110 token=(token|quoted-string).
++// exactly one Content-Type header whose ASCII media type is text/event-stream and whose optional
++// parameters strictly conform to RFC 9110 §5.6.6 / §8.3.1 (allowing empty parameter segments
++// separated by ';' to match Python's _is_event_stream_content_type).
 +func isValidEventStreamContentType(vals []string) bool {
 +	if len(vals) != 1 {
 +		return false
@@ -9440,7 +9462,7 @@ index 0000000..3831c0f
 +		params = raw[semi+1:]
 +		hasSemi = true
 +	}
-+	if !strings.EqualFold(strings.Trim(mediaType, " \t"), "text/event-stream") {
++	if !equalFoldASCII(strings.Trim(mediaType, " \t"), "text/event-stream") {
 +		return false
 +	}
 +	if !hasSemi {
@@ -9448,9 +9470,17 @@ index 0000000..3831c0f
 +	}
 +	i := 0
 +	n := len(params)
-+	for {
++	for i < n {
 +		for i < n && (params[i] == ' ' || params[i] == '\t') {
 +			i++
++		}
++		if i == n {
++			return true
++		}
++		if params[i] == ';' {
++			// RFC 9110 §5.6.6 permits empty parameter elements (e.g. "text/event-stream;" or "; ;").
++			i++
++			continue
 +		}
 +		nameStart := i
 +		for i < n && isRFC9110TokenChar(params[i]) {
@@ -9489,6 +9519,7 @@ index 0000000..3831c0f
 +		}
 +		i++
 +	}
++	return true
 +}
 +
 +// isValidChunkExt validates RFC 9112 §7.1.1 chunk-ext after the first ';' in linear time.
@@ -9718,18 +9749,19 @@ index 0000000..3831c0f
 +// before forwarding bytes to net/http; non-chunked bodies stream straight through without extra buffering.
 +type strictHTTP1FramingConn struct {
 +	net.Conn
-+	rawBuf       []byte
-+	scanPos      int
-+	ready        []byte
-+	pendingErr   error
-+	infoCount    int
-+	done         bool
-+	chunked      bool
-+	chunkState   chunkBodyState
-+	chunkRem     uint64
-+	trailerBytes int
-+	trailerCount int
-+	failed       error
++	rawBuf        []byte
++	scanPos       int
++	ready         []byte
++	pendingErr    error
++	infoCount     int
++	done          bool
++	chunked       bool
++	chunkState    chunkBodyState
++	chunkRem      uint64
++	heldFinalCRLF bool
++	trailerBytes  int
++	trailerCount  int
++	failed        error
 +}
 +
 +type strictHTTP1FramingTLSConn struct {
@@ -9964,7 +9996,10 @@ index 0000000..3831c0f
 +			}
 +			line := c.rawBuf[:lf-1]
 +			if len(line) == 0 {
-+				c.ready = append(c.ready, '\r', '\n')
++				// Hold the final trailer-terminating CRLF until the single-response connection
++				// reaches clean io.EOF so smuggled trailing bytes arriving in a later TCP segment
++				// are always caught before net/http can observe response EOF.
++				c.heldFinalCRLF = true
 +				c.rawBuf = append(c.rawBuf[:0], c.rawBuf[lf+1:]...)
 +				c.chunkState = chunkStateDone
 +				continue
@@ -10028,8 +10063,14 @@ index 0000000..3831c0f
 +							}
 +							return 0, c.failClosed()
 +						}
-+						if c.chunked && c.chunkState != chunkStateDone {
-+							return 0, c.failClosed()
++						if c.chunked {
++							if c.chunkState != chunkStateDone || !errors.Is(err, io.EOF) {
++								return 0, c.failClosed()
++							}
++							if c.heldFinalCRLF {
++								c.ready = append(c.ready, '\r', '\n')
++								c.heldFinalCRLF = false
++							}
 +						}
 +						c.pendingErr = err
 +					}
@@ -10050,8 +10091,24 @@ index 0000000..3831c0f
 +				// EOF or read error after partial headers / 1xx before a valid final header block closed.
 +				return 0, c.failClosed()
 +			}
-+			if c.chunked && c.chunkState != chunkStateDone {
-+				return 0, c.failClosed()
++			if c.chunked {
++				if c.chunkState != chunkStateDone || !errors.Is(err, io.EOF) {
++					return 0, c.failClosed()
++				}
++				if c.heldFinalCRLF {
++					c.ready = append(c.ready, '\r', '\n')
++					c.heldFinalCRLF = false
++				}
++				if len(c.ready) > 0 {
++					c.pendingErr = io.EOF
++					copied := copy(p, c.ready)
++					c.ready = c.ready[copied:]
++					if len(c.ready) == 0 {
++						c.ready = nil
++					}
++					return copied, nil
++				}
++				return 0, io.EOF
 +			}
 +			return 0, err
 +		}
@@ -25283,10 +25340,10 @@ index e69de29..697ba21 100644
 +	_ = syncPinnedDir(subRoot, job.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..de2d2fb 100644
+index e69de29..97965e5 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,19251 @@
+@@ -0,0 +1,19396 @@
 +package preflightreceipt
 +
 +import (
@@ -44418,6 +44475,7 @@ index e69de29..de2d2fb 100644
 +		{"dup_ct_same", []string{"text/event-stream", "text/event-stream"}},
 +		{"bad_param", []string{"text/event-stream; badparam"}},
 +		{"unclosed_quote", []string{`text/event-stream; charset="utf-8`}},
++		{"unicode_fold_long_s", []string{"text/event-\u017ftream"}},
 +	} {
 +		rootCT := filepath.Join(t.TempDir(), "r97-ct-"+tc.name)
 +		launchCT := "review-e9700002-2222-4333-8444-555555550002"
@@ -44465,6 +44523,20 @@ index e69de29..de2d2fb 100644
 +		if st := SealReview(rootCT, launchCT, sessCT); st != SealRejected {
 +			t.Fatalf("case %s SealReview = %v, want SealRejected", tc.name, st)
 +		}
++	}
++	// 2b. Sol P2 #2 + Astra P2 #3 (PR #2280 R98): RFC 9110 §5.6.6 empty parameter segments
++	//     (matching Python's _is_event_stream_content_type) MUST seal cleanly as SealOK.
++	for _, ctVal := range []string{
++		"text/event-stream;",
++		"text/event-stream; ; charset=utf-8;",
++		`TEXT/EVENT-STREAM ; charset="utf-8";`,
++	} {
++		if !isValidEventStreamContentType([]string{ctVal}) {
++			t.Fatalf("isValidEventStreamContentType(%q) = false, want true", ctVal)
++		}
++	}
++	if isValidEventStreamContentType([]string{"text/event-\u017ftream"}) {
++		t.Fatalf("isValidEventStreamContentType accepted Unicode long-s fold")
 +	}
 +
 +	// 3. Astra P2 #3 (PR #2280 R97): strictHTTP1FramingConn MUST strictly validate RFC 9112 §7.1.1
@@ -44536,6 +44608,136 @@ index e69de29..de2d2fb 100644
 +		if err != nil || body != tc.want {
 +			t.Fatalf("chunked good case %s = (%q, %v), want (%q, nil)", tc.name, body, err, tc.want)
 +		}
++	}
++
++	// 4. Astra P1 #1 (PR #2280 R98): Trailing bytes after chunked 0\r\n\r\n MUST fail closed
++	//    with ErrHTTP1FramingViolation even when they arrive in a SEPARATE later TCP segment
++	//    (independent of Read boundaries), while a clean delayed FIN succeeds.
++	sendSegmentedChunked := func(seg1, seg2 string) (string, error) {
++		ln, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer ln.Close()
++		go func() {
++			conn, aerr := ln.Accept()
++			if aerr != nil {
++				return
++			}
++			defer conn.Close()
++			buf := make([]byte, 2048)
++			_, _ = conn.Read(buf)
++			_, _ = io.WriteString(conn, seg1)
++			time.Sleep(40 * time.Millisecond)
++			if seg2 != "" {
++				_, _ = io.WriteString(conn, seg2)
++			}
++		}()
++		dialer := &net.Dialer{Timeout: 5 * time.Second}
++		tr := &http.Transport{
++			DisableKeepAlives: true,
++			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++				c, derr := dialer.DialContext(ctx, network, addr)
++				if derr != nil {
++					return nil, derr
++				}
++				return NewStrictHTTP1FramingConn(c), nil
++			},
++		}
++		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+ln.Addr().String()+"/v1/responses", nil)
++		resp, err := tr.RoundTrip(req)
++		if err != nil {
++			return "", err
++		}
++		defer resp.Body.Close()
++		b, rerr := io.ReadAll(resp.Body)
++		return string(b), rerr
++	}
++	segHead := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
++	if body, err := sendSegmentedChunked(segHead, "SMUGGLED"); err == nil {
++		t.Fatalf("segmented trailing bytes after 0\\r\\n\\r\\n unexpectedly succeeded: body=%q", body)
++	}
++	if body, err := sendSegmentedChunked(segHead, ""); err != nil || body != "hello" {
++		t.Fatalf("segmented clean FIN after 0\\r\\n\\r\\n = (%q, %v), want (\"hello\", nil)", body, err)
++	}
++	// End-to-end formal review taint proof for segmented trailing bytes after chunked 0\r\n\r\n.
++	runSegmentedFormal := func(name, seg2 string) SealStatus {
++		t.Helper()
++		sseChunk := fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(cleanSSE), cleanSSE)
++		seg1 := "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" + sseChunk
++		ln, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer ln.Close()
++		go func() {
++			conn, aerr := ln.Accept()
++			if aerr != nil {
++				return
++			}
++			defer conn.Close()
++			buf := make([]byte, 2048)
++			_, _ = conn.Read(buf)
++			_, _ = io.WriteString(conn, seg1)
++			time.Sleep(40 * time.Millisecond)
++			if seg2 != "" {
++				_, _ = io.WriteString(conn, seg2)
++			}
++		}()
++		dialer := &net.Dialer{Timeout: 5 * time.Second}
++		tr := &http.Transport{
++			DisableKeepAlives: true,
++			DialTLSContext: func(dctx context.Context, _, _ string) (net.Conn, error) {
++				c, derr := dialer.DialContext(dctx, "tcp", ln.Addr().String())
++				if derr != nil {
++					return nil, derr
++				}
++				return NewStrictHTTP1FramingConn(c), nil
++			},
++		}
++		rootSeg := filepath.Join(t.TempDir(), "r98-seg-"+name)
++		launchSeg := "review-e9800001-2222-4333-8444-555555550001"
++		sessSeg := "11111111-2222-4333-8444-555555559801"
++		ctxSeg, colSeg, err := BeginReview(context.Background(), rootSeg, launchSeg, sessSeg, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s BeginReview: %v", name, err)
++		}
++		ctxSeg, exSeg, err := colSeg.Start(ctxSeg, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s Start: %v", name, err)
++		}
++		clSeg := httptransport.Decorate(ctxSeg, &http.Client{
++			Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				resp, rerr := tr.RoundTrip(req)
++				if rerr == nil && resp != nil {
++					resp.TLS = verifiedTLSState("chatgpt.com")
++				}
++				return resp, rerr
++			}),
++		})
++		reqSeg, _ := http.NewRequestWithContext(ctxSeg, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		respSeg, doErr := clSeg.Do(reqSeg)
++		if doErr != nil {
++			exSeg.End()
++			colSeg.Complete(false)
++			colSeg.HandlerDone(false)
++			return SealReview(rootSeg, launchSeg, sessSeg)
++		}
++		rawSeg, readErr := io.ReadAll(respSeg.Body)
++		_ = respSeg.Body.Close()
++		if len(rawSeg) > 0 {
++			observeStrictSSEForTest(colSeg, rawSeg)
++		}
++		exSeg.End()
++		colSeg.Complete(readErr == nil)
++		colSeg.HandlerDone(readErr == nil)
++		return SealReview(rootSeg, launchSeg, sessSeg)
++	}
++	if st := runSegmentedFormal("smuggle", "SMUGGLED"); st != SealRejected {
++		t.Fatalf("formal review with segmented trailing bytes after chunked 0\\r\\n\\r\\n = %v, want SealRejected", st)
++	}
++	if st := runSegmentedFormal("clean_fin", ""); st != SealOK {
++		t.Fatalf("formal review with segmented clean FIN after chunked 0\\r\\n\\r\\n = %v, want SealOK", st)
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go

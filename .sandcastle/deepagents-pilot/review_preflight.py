@@ -682,6 +682,9 @@ class _StrictHTTPResponse:
                             raise http.client.IncompleteRead(b"")
                         if not _TRAILER_FIELD_RE.fullmatch(tline[:-2]):
                             raise http.client.HTTPException("invalid chunk trailer")
+                        trailer_name = tline[:-2].split(b":", 1)[0].lower()
+                        if trailer_name in (b"content-length", b"transfer-encoding"):
+                            raise http.client.HTTPException("forbidden framing trailer")
                     self.close()
                     return
                 chunk_rem = chunk_size

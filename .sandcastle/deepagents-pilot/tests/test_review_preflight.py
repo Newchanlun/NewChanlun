@@ -2820,11 +2820,13 @@ def test_round_trip_requires_event_stream_content_type():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 SSE Content-Type 回归
-        # 1. 合法的 text/event-stream（含大小写与 RFC 9110 参数）须通过。
+        # 1. 合法的 text/event-stream（含大小写与 RFC 9110 参数，包括允许忽略的空参数段）须通过。
         for good_headers in (
             [("Content-Type", "text/event-stream")],
             [("Content-Type", "TEXT/EVENT-STREAM; charset=utf-8")],
             [("Content-Type", 'text/event-stream ; charset="utf-8" ; version=1')],
+            [("Content-Type", "text/event-stream;")],
+            [("Content-Type", "text/event-stream; ; charset=utf-8;")],
         ):
             current["headers"] = good_headers
             res = preflight._round_trip_http(url, KEY, OPUS, "preflight-ct-ok", preflight.Deadline(3))
@@ -2908,3 +2910,56 @@ def test_item_schema_key_case_aliases_match_go_producer():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_round_trip_rejects_forbidden_chunked_framing_trailers():
+    """Sol P2 #1 + Astra P2 #2 (R98): chunked trailer 中禁止出现 Content-Length 或 Transfer-Encoding
+    （不区分 ASCII 大小写），即便此前已收到合法 SSE 终态事件也必须失败关闭。"""
+    import socket
+
+    sse_payload = b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    chunk = f"{len(sse_payload):x}\r\n".encode("ascii") + sse_payload + b"\r\n0\r\n"
+
+    for trailer_line, want_ok in (
+        (b"X-Trace: ok\r\n\r\n", True),
+        (b"Content-Length: 5\r\n\r\n", False),
+        (b"cOnTeNt-LeNgTh: 5\r\n\r\n", False),
+        (b"Transfer-Encoding: chunked\r\n\r\n", False),
+        (b"tRaNsFeR-eNcOdInG: chunked\r\n\r\n", False),
+    ):
+        raw_response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/event-stream\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"Connection: close\r\n\r\n"
+            + chunk
+            + trailer_line
+        )
+        srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv_sock.bind(("127.0.0.1", 0))
+        srv_sock.listen(1)
+        port = srv_sock.getsockname()[1]
+
+        def _serve(sock=srv_sock, payload=raw_response):
+            try:
+                conn, _ = sock.accept()
+                with conn:
+                    conn.settimeout(2.0)
+                    buf = b""
+                    while b"\r\n\r\n" not in buf:
+                        part = conn.recv(4096)
+                        if not part:
+                            break
+                        buf += part
+                    conn.sendall(payload)
+            finally:
+                sock.close()
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        try:
+            url = f"http://127.0.0.1:{port}"  # DevSkim: ignore DS162092 chunked trailer 回归
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-trailer-check", preflight.Deadline(3))
+            assert res["ok"] is want_ok, (trailer_line, res)
+        finally:
+            t.join(timeout=3)
