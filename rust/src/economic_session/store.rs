@@ -576,10 +576,11 @@ pub(crate) fn metered_row(
     )?;
     raw.map(|s| strict_json(s.as_bytes())).transpose()
 }
-fn metered_rows(
+fn metered_rows_cached(
     c: &Connection,
     table: &str,
     budget: &mut ReadBudget<'_>,
+    raw_cache: &mut std::collections::HashMap<String, Value>,
 ) -> Result<Vec<Value>, String> {
     if !TABLES.contains(&table) {
         return Err("InvalidDomain：未知表".into());
@@ -592,7 +593,9 @@ fn metered_rows(
     let mut values = Vec::new();
     while let Some(row) = budget.next(&mut cursor)? {
         let raw: String = row.get(0).map_err(err)?;
-        values.push(strict_json(raw.as_bytes())?);
+        let parsed = strict_json(raw.as_bytes())?;
+        raw_cache.entry(raw).or_insert_with(|| parsed.clone());
+        values.push(parsed);
     }
     Ok(values)
 }
@@ -767,7 +770,7 @@ pub(crate) fn append(
     image: &Value,
 ) -> Result<Value, String> {
     let raw = readable_image(image)?;
-    let h = root(config, seq, prev, ns, image);
+    let h = root_with_image_hash(config, seq, prev, ns, &sha256_hex(raw.as_bytes()));
     c.execute(
         "INSERT INTO commits(seq,prev_root,root,commit_ns,image)VALUES(?,?,?,?,?)",
         params![seq, prev, h, ns, raw],
@@ -849,9 +852,10 @@ pub(crate) fn domain_tables(revision: &str) -> Vec<String> {
     want.sort();
     want
 }
-fn sorted(mut a: Vec<Value>) -> Vec<String> {
-    a.sort_by_key(canonical_json);
-    a.iter().map(canonical_json).collect()
+fn sorted(a: Vec<Value>) -> Vec<String> {
+    let mut out: Vec<String> = a.iter().map(canonical_json).collect();
+    out.sort();
+    out
 }
 /// 全域审计：表集合、meta、全历史根、来源原件、每步重放、当前物化表与永久回执关系。
 pub(crate) fn audit(c: &Connection, config: &Config) -> Result<(), String> {
@@ -1093,6 +1097,7 @@ pub(super) fn audit_with_budget(
     let mut previous_image = super::finance::empty(config)?;
     let mut last_ns = -1;
     let mut seen = 0i64;
+    let mut commit_images: Vec<(String, Value)> = Vec::new();
     while let Some(r) = budget.next(&mut rs)? {
         let (seq, prev, h, ns, raw): (i64, String, String, String, String) = (
             r.get(0).map_err(err)?,
@@ -1220,6 +1225,7 @@ pub(super) fn audit_with_budget(
             }
         }
         previous = h;
+        commit_images.push((raw, image.clone()));
         previous_image = image;
         last_ns = n;
         seen += 1;
@@ -1229,13 +1235,14 @@ pub(super) fn audit_with_budget(
     if seen == 0 {
         return Err("StorageUnavailable：域损坏：无创世提交".into());
     }
+    let mut raw_cache: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for (table, key) in [
         ("facts", "recorded"),
         ("pending", "pending"),
         ("applications", "applied"),
         ("unmatched", "unmatched"),
     ] {
-        if sorted(metered_rows(c, table, budget)?)
+        if sorted(metered_rows_cached(c, table, budget, &mut raw_cache)?)
             != sorted(
                 previous_image[key]
                     .as_array()
@@ -1249,10 +1256,20 @@ pub(super) fn audit_with_budget(
     if metered_row(c, "book", "book", budget)?.unwrap_or(Value::Null) != previous_image["book"] {
         return Err("StorageUnavailable：域损坏：book物化不等于完整图像".into());
     }
-    let receipt_rows = metered_rows(c, "receipts", budget)?;
+    let receipt_rows = metered_rows_cached(c, "receipts", budget, &mut raw_cache)?;
     if receipt_rows.len() != (seen - 1) as usize {
         return Err("StorageUnavailable：域损坏：永久回执数不等于业务提交数".into());
     }
+    let parse_commit_image = |seq: i64, raw: &str| -> Result<Value, String> {
+        if let Ok(idx) = usize::try_from(seq) {
+            if let Some((cached_raw, cached_val)) = commit_images.get(idx) {
+                if cached_raw == raw {
+                    return Ok(cached_val.clone());
+                }
+            }
+        }
+        strict_json(raw.as_bytes())
+    };
     for r in receipt_rows {
         if r["kind"] == super::domain_event::WITHDRAW_RECEIPT {
             if !withdrawal {
@@ -1265,7 +1282,7 @@ pub(super) fn audit_with_budget(
                 [seq],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            let image = strict_json(raw.as_bytes())?;
+            let image = parse_commit_image(seq, &raw)?;
             let entry = image["history"]
                 .as_array()
                 .and_then(|a| a.last())
@@ -1306,7 +1323,7 @@ pub(super) fn audit_with_budget(
                 [seq],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            let image = strict_json(raw.as_bytes())?;
+            let image = parse_commit_image(seq, &raw)?;
             let event = image["history"]
                 .as_array()
                 .and_then(|a| a.last())
@@ -1320,20 +1337,35 @@ pub(super) fn audit_with_budget(
             }
             continue;
         }
-        let f = metered_row(c, "facts", required(&r, "fact_key")?, budget)?
-            .ok_or("StorageUnavailable：域损坏：回执缺原件")?;
+        let f_raw: Option<String> = budget.optional(
+            c,
+            "SELECT json FROM facts WHERE k=?",
+            [required(&r, "fact_key")?],
+            |row| row.get(0),
+        )?;
+        let f = match f_raw {
+            Some(s) => match raw_cache.get(&s) {
+                Some(v) => v.clone(),
+                None => strict_json(s.as_bytes())?,
+            },
+            None => return Err("StorageUnavailable：域损坏：回执缺原件".into()),
+        };
         let a = if config.domain == "E" {
             None
         } else {
-            Some(
-                metered_row(
-                    c,
-                    "applications",
-                    super::tb03c_allocation::application_id(&f)?,
-                    budget,
-                )?
-                .ok_or("StorageUnavailable：域损坏：原件缺应用")?,
-            )
+            let a_raw: Option<String> = budget.optional(
+                c,
+                "SELECT json FROM applications WHERE k=?",
+                [super::tb03c_allocation::application_id(&f)?],
+                |row| row.get(0),
+            )?;
+            Some(match a_raw {
+                Some(s) => match raw_cache.get(&s) {
+                    Some(v) => v.clone(),
+                    None => strict_json(s.as_bytes())?,
+                },
+                None => return Err("StorageUnavailable：域损坏：原件缺应用".into()),
+            })
         };
         // #1374 owner-review：序号从事实/应用取得，不能信回执自选一个存在的历史cut。
         let seq = positive(
@@ -1353,7 +1385,7 @@ pub(super) fn audit_with_budget(
             [seq],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let image = strict_json(raw.as_bytes())?;
+        let image = parse_commit_image(seq, &raw)?;
         if image["recorded"].as_array().and_then(|a| a.last()) != Some(&f) {
             return Err("StorageUnavailable：域损坏：回执指向的实际提交不含对应原事实".into());
         }
@@ -1397,7 +1429,14 @@ pub(super) fn audit_with_budget(
         let mut rs = q.query([]).map_err(err)?;
         while let Some(r) = budget.next(&mut rs)? {
             let (k, s): (String, String) = (r.get(0).map_err(err)?, r.get(1).map_err(err)?);
-            let v = strict_json(s.as_bytes())?;
+            let parsed_fallback;
+            let v: &Value = match raw_cache.get(&s) {
+                Some(cached) => cached,
+                None => {
+                    parsed_fallback = strict_json(s.as_bytes())?;
+                    &parsed_fallback
+                }
+            };
             let expected_key = if table == "receipts"
                 && v["kind"] == super::domain_event::WITHDRAW_RECEIPT
             {
@@ -1406,15 +1445,15 @@ pub(super) fn audit_with_budget(
                 }
                 super::domain_event::withdrawal_receipt_key(&v["target"])
             } else if table == "receipts" && v["kind"] == "Resolved" {
-                super::tb03c_e::receipt_key(required(&v, "evidence_id")?)
+                super::tb03c_e::receipt_key(required(v, "evidence_id")?)
             } else if table == "receipts" && v["kind"] == super::sr_expansion::RECEIPT {
-                super::sr_expansion::receipt_key(required(&v, "evaluation_id")?)
+                super::sr_expansion::receipt_key(required(v, "evaluation_id")?)
             } else if table == "receipts" && v.get("receipt_key").is_some() {
-                required(&v, "receipt_key")?.to_owned()
+                required(v, "receipt_key")?.to_owned()
             } else if table == "receipts" && v["kind"] == "VoiceBound" {
-                super::voice::receipt_key(required(&v, "binding_id")?)
+                super::voice::receipt_key(required(v, "binding_id")?)
             } else {
-                required(&v, field)?.to_owned()
+                required(v, field)?.to_owned()
             };
             if expected_key != k {
                 return Err(format!(
