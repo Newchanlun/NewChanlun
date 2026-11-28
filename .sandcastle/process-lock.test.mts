@@ -1,11 +1,11 @@
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync as chmod2, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync as sym2, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquireLock, psStart, type LockEnv } from "./process-lock.mts";
+import { acquireLock, psStart, psStart as ps2, type LockEnv, type PsResult } from "./process-lock.mts";
 import { runManagedMerge, type MergeCheck, type MergeManifest, type MergeOptions } from "./managed-merge.mts";
 
 const loader = import.meta.resolve("tsx");
@@ -21,6 +21,18 @@ function deadPid(): number {
   return pid;
 }
 async function waitDead(pid: number) { for (let i = 0; i < 100 && psStart(pid); i++) await new Promise((r) => setTimeout(r, 30)); }
+function spawnTsx(script: string): Promise<{ pid: number; status: number | null; signal: NodeJS.Signals | null; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (status, signal) => resolve({ pid: child.pid ?? 0, status, signal, stderr }));
+  });
+}
+
+describe("process-lock", { concurrency: 4 }, () => {
 
 test("持有者已死（pid 不存在）：原子归档旧锁并接管，旧锁留作证据", async () => {
   const d = dir(); const lock = join(d, "c.json.lock");
@@ -84,7 +96,7 @@ test("两个并发重入争同一把残留锁：只有一个成功，另一个�
 try { const h = acquireLock(${JSON.stringify(lock)}, "/c"); console.log("WON"); setTimeout(() => { h.release(); }, 1500); } catch (e) { console.log("LOST " + (e instanceof Error ? e.message.slice(0, 80) : e)); }`);
   for (let round = 0; round < 3; round++) {
     write(lock, { pid, start: "Mon Jan  1 00:00:00 2024", host: hostname(), token: "old" + round, cwd: "/x" });
-    const run = () => new Promise<string>((res) => { let out = ""; const c = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "pipe", "inherit"] }); c.stdout.on("data", (b) => (out += b)); c.on("exit", () => res(out)); });
+    const run = () => new Promise<string>((res) => { let out = ""; const c = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "pipe", "inherit"] }); c.stdout.on("data", (b) => (out += b)); c.on("close", () => res(out)); });
     const results = await Promise.all([run(), run(), run()]);
     assert.equal(results.filter((r) => r.startsWith("WON")).length, 1, JSON.stringify(results));
     assert.equal(results.filter((r) => r.startsWith("LOST")).length, 2, JSON.stringify(results));
@@ -113,12 +125,12 @@ const f = ${JSON.stringify({ cwd: f.cwd, checkpoint: f.checkpoint, manifest: f.m
 await runManagedMerge({ cwd: f.cwd, checkpoint: f.checkpoint, manifest: f.manifest, checkId: "v1",
   verify: async (head) => { ${killAt === "verify" ? 'process.kill(process.pid, "SIGKILL"); await new Promise(() => {});' : ""} return { head, checkId: "v1", status: "passed", evidence: "ok" }; },
   resolveConflict: async () => { ${killAt === "conflict" ? beforeKill + 'process.kill(process.pid, "SIGKILL"); await new Promise(() => {});' : "throw new Error('x')"} } });`);
-  return spawnSync(process.execPath, ["--import", loader, script], { encoding: "utf8" });
+  return spawnTsx(script);
 }
 for (const [name, conflict, killAt] of [["宿主归并路径（无冲突）", false, "verify"], ["冲突工蜂路径（Docker 门禁回调内被 SIGKILL）", true, "conflict"]] as const) {
   test(`${name}：SIGKILL 残留锁后同清单自动恢复收敛到 done，不重复提交`, async () => {
     const f = fixture(conflict);
-    const r = childRun(f, killAt); assert.equal(r.signal, "SIGKILL");
+    const r = await childRun(f, killAt); assert.equal(r.signal, "SIGKILL");
     assert.ok(existsSync(`${f.checkpoint}.lock`), "残留锁"); const holderPid = JSON.parse(readFileSync(`${f.checkpoint}.lock`, "utf8")).pid;
     await waitDead(holderPid);
     const verified: string[] = []; let conflictCalls = 0;
@@ -155,29 +167,6 @@ test("runManagedMerge：持有者存活 / 锁损坏 / 主机不同时拒绝，�
 });
 
 // —— TZ 回归、psStart 退出码映射、确定性交错 ——
-import { psStart as ps2, type PsResult } from "./process-lock.mts";
-
-test("启动时间与 TZ 无关：同一 pid 在不同 TZ 下取到同一字符串；持有者在一个 TZ 下存活，取锁方在另一个 TZ 下必须拒绝", async () => {
-  const savedTz = process.env.TZ;
-  try {
-    const seen = new Set<string>();
-    for (const tz of ["UTC", "Asia/Shanghai", "America/Los_Angeles", "Pacific/Auckland"]) { process.env.TZ = tz; seen.add(psStart(process.pid)!); }
-    assert.equal(seen.size, 1, JSON.stringify([...seen]));
-  } finally { if (savedTz === undefined) delete process.env.TZ; else process.env.TZ = savedTz; }
-  const d = dir(); const lock = join(d, "c.lock"); const script = join(d, "hold.mts");
-  writeFileSync(script, `import { acquireLock } from ${JSON.stringify(here + "process-lock.mts")}; acquireLock(${JSON.stringify(lock)}, "/c"); console.log("LOCKED"); setInterval(() => {}, 1000);`);
-  const child = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, TZ: "America/New_York" } });
-  await new Promise<void>((res, rej) => { child.stdout.on("data", (b) => String(b).includes("LOCKED") && res()); child.on("exit", () => rej(new Error("子进程提前退出"))); });
-  try {
-    const saved = process.env.TZ;
-    for (const tz of ["Asia/Shanghai", "UTC", undefined]) {
-      if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
-      assert.throws(() => acquireLock(lock, "/y", env()), /仍在运行/, `取锁方 TZ=${tz}`);
-    }
-    if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
-    assert.deepEqual(stale(d), [], "活锁没有被接管");
-  } finally { child.kill("SIGKILL"); }
-});
 
 test("psStart 退出码映射：只有 status=1 且 stdout/stderr 皆空表示已死；其余一律无法判定并抛错", () => {
   const r = (x: Partial<PsResult>): (() => PsResult) => () => ({ status: 0, stdout: "", stderr: "", ...x });
@@ -257,9 +246,14 @@ test("接管前清理（beforeTakeover）抛错：锁、现场、守卫都不动
 });
 
 test("runManagedMerge：仅 phase=conflict 且持有者已死时才回收孤儿容器；失败拒绝并保留锁与现场；宿主路由（未提供回收）直接通过", async () => {
-  const f = fixture(true);
-  const killed = childRun(f, "conflict"); assert.equal(killed.signal, "SIGKILL");
-  const holderPid = JSON.parse(readFileSync(`${f.checkpoint}.lock`, "utf8")).pid; await waitDead(holderPid);
+  const f = fixture(true); const g = fixture(true); const h = fixture(false);
+  const [killed, k2, k3] = await Promise.all([childRun(f, "conflict"), childRun(g, "conflict"), childRun(h, "verify")]);
+  assert.equal(killed.signal, "SIGKILL"); assert.equal(k2.signal, "SIGKILL"); assert.equal(k3.signal, "SIGKILL");
+  await Promise.all([
+    waitDead(JSON.parse(readFileSync(`${f.checkpoint}.lock`, "utf8")).pid),
+    waitDead(JSON.parse(readFileSync(`${g.checkpoint}.lock`, "utf8")).pid),
+    waitDead(JSON.parse(readFileSync(`${h.checkpoint}.lock`, "utf8")).pid),
+  ]);
   const lockBefore = readFileSync(`${f.checkpoint}.lock`, "utf8"); const headBefore = f.git("rev-parse", "HEAD");
   const resolver = (cwd: string) => async () => { writeFileSync(join(cwd, "a.txt"), "both\n"); return report(["a.txt"]); };
   const base: MergeOptions = { cwd: f.cwd, checkpoint: f.checkpoint, manifest: f.manifest, checkId: "v1",
@@ -271,12 +265,8 @@ test("runManagedMerge：仅 phase=conflict 且持有者已死时才回收孤儿�
   const done = await runManagedMerge({ ...base, reclaimOrphans: () => { reclaimed++; } });
   assert.equal(done.phase, "done"); assert.equal(reclaimed, 1);
   // 未提供回收（宿主路由）：同样的残留锁直接接管
-  const g = fixture(true); const k2 = childRun(g, "conflict"); assert.equal(k2.signal, "SIGKILL");
-  await waitDead(JSON.parse(readFileSync(`${g.checkpoint}.lock`, "utf8")).pid);
   const done2 = await runManagedMerge({ ...base, cwd: g.cwd, checkpoint: g.checkpoint, manifest: g.manifest, resolveConflict: resolver(g.cwd) }); assert.equal(done2.phase, "done");
   // 非冲突阶段被杀：即使提供了回收，也不调用
-  const h = fixture(false); const k3 = childRun(h, "verify"); assert.equal(k3.signal, "SIGKILL");
-  await waitDead(JSON.parse(readFileSync(`${h.checkpoint}.lock`, "utf8")).pid);
   let n = 0;
   const done3 = await runManagedMerge({ ...base, cwd: h.cwd, checkpoint: h.checkpoint, manifest: h.manifest, reclaimOrphans: () => { n++; } }); assert.equal(done3.phase, "done"); assert.equal(n, 0);
 });
@@ -313,13 +303,12 @@ test("交错 4（M2）：B 在守卫内（now() 调用点）时，第二个接�
 });
 
 // —— N-1：孤儿在回收前写了冻结文件 ——
-import { chmodSync as chmod2, symlinkSync as sym2 } from "node:fs";
 const resolver = (cwd: string) => async () => { writeFileSync(join(cwd, "a.txt"), "both\n"); return report(["a.txt"]); };
 const optsOf = (f: ReturnType<typeof fixture>, extra: Partial<MergeOptions> = {}): MergeOptions => ({
   cwd: f.cwd, checkpoint: f.checkpoint, manifest: f.manifest, checkId: "v1",
   verify: async (head) => ({ head, checkId: "v1", status: "passed", evidence: "ok" }), resolveConflict: resolver(f.cwd), ...extra });
 async function killedWithOrphanWrite(beforeKill: string) {
-  const f = fixture(true); const k = childRun(f, "conflict", beforeKill); assert.equal(k.signal, "SIGKILL");
+  const f = fixture(true); const k = await childRun(f, "conflict", beforeKill); assert.equal(k.signal, "SIGKILL");
   await waitDead(JSON.parse(readFileSync(`${f.checkpoint}.lock`, "utf8")).pid);
   return f;
 }
@@ -339,11 +328,11 @@ test("N-1：孤儿写了 allowed 冻结文件后被回收——自动归档、�
 });
 
 test("N-1：孤儿把 allowed 文件删掉/换成符号链接也能按检查点还原", async () => {
-  for (const code of [`fs.rmSync(f.cwd + "/a.txt");`, `fs.rmSync(f.cwd + "/a.txt"); fs.symlinkSync("/etc/hosts", f.cwd + "/a.txt");`]) {
+  await Promise.all([`fs.rmSync(f.cwd + "/a.txt");`, `fs.rmSync(f.cwd + "/a.txt"); fs.symlinkSync("/etc/hosts", f.cwd + "/a.txt");`].map(async (code) => {
     const f = await killedWithOrphanWrite(code);
     const done = await runManagedMerge(optsOf(f, { reclaimOrphans: () => undefined })); assert.equal(done.phase, "done");
     assert.equal(orphanArchives(f).length, 1);
-  }
+  }));
 });
 
 test("N-1：孤儿还动了 allowed 之外的文件 / 未跟踪文件 / index / HEAD / MERGE_HEAD——FAIL-loud，现场不动（连 allowed 也不还原）", async () => {
@@ -354,22 +343,22 @@ test("N-1：孤儿还动了 allowed 之外的文件 / 未跟踪文件 / index / 
     ["MERGE_HEAD 被动", `cp.execFileSync("git", ["merge", "--abort"], { cwd: f.cwd });`],
     ["HEAD 被动", `cp.execFileSync("git", ["update-ref", "HEAD", "sandcastle/issue-1"], { cwd: f.cwd });`],
   ];
-  for (const [name, code] of cases) {
+  await Promise.all(cases.map(async ([name, code]) => {
     const f = fixture(true);
     const pre = `fs.writeFileSync(f.cwd + "/a.txt", "ORPHAN\\n"); ${code}`;
-    const k = childRun(f, "conflict", pre); assert.equal(k.signal, "SIGKILL", `${name}: ${k.stderr.slice(0, 300)}`);
+    const k = await childRun(f, "conflict", pre); assert.equal(k.signal, "SIGKILL", `${name}: ${k.stderr.slice(0, 300)}`);
     await waitDead(JSON.parse(readFileSync(`${f.checkpoint}.lock`, "utf8")).pid);
     let calls = 0;
     await assert.rejects(runManagedMerge(optsOf(f, { reclaimOrphans: () => undefined, resolveConflict: async () => { calls++; return report(["a.txt"]); } })), /现场与检查点不一致/, name);
     assert.equal(calls, 0, name);
     assert.equal(orphanArchives(f).length, 0, `${name}：不归档、不还原`);
     if (name !== "MERGE_HEAD 被动" && name !== "HEAD 被动" && name !== "暂存 allowed 文件（index 变）") assert.equal(readFileSync(join(f.cwd, "a.txt"), "utf8"), "ORPHAN\n", `${name}：allowed 文件也没被还原`);
-  }
+  }));
 });
 
 test("N-1：没有发生锁接管 / 未提供回收（宿主路由）时，snapshot 不一致保持原来的 FAIL-loud", async () => {
   // 无接管：先把残留锁人工移走，再手改 allowed 文件
-  const f = fixture(true); const k = childRun(f, "conflict"); assert.equal(k.signal, "SIGKILL");
+  const f = fixture(true); const k = await childRun(f, "conflict"); assert.equal(k.signal, "SIGKILL");
   await waitDead(JSON.parse(readFileSync(`${f.checkpoint}.lock`, "utf8")).pid);
   rmSync(`${f.checkpoint}.lock`); writeFileSync(join(f.cwd, "a.txt"), "HAND EDIT\n");
   await assert.rejects(runManagedMerge(optsOf(f, { reclaimOrphans: () => undefined })), /现场与检查点不一致/);
@@ -556,7 +545,7 @@ const f = ${JSON.stringify({ cwd: f.cwd, checkpoint: f.checkpoint, manifest: f.m
 const kill = () => process.kill(process.pid, "SIGKILL");
 await runManagedMerge({ cwd: f.cwd, checkpoint: f.checkpoint, manifest: f.manifest, checkId: "v1",
   verify: async (head) => ({ head, checkId: "v1", status: "passed", evidence: "ok" }), resolveConflict: async () => { throw new Error("x"); }, ${extra} });`);
-  return spawnSync(process.execPath, ["--import", loader, script], { encoding: "utf8" });
+  return spawnTsx(script);
 }
 const ORPHAN_WRITE = `fs.writeFileSync(f.cwd + "/a.txt", "ORPHAN WROTE THIS\\n");`;
 for (const [name, orphanCode, hook] of [
@@ -566,7 +555,7 @@ for (const [name, orphanCode, hook] of [
 ] as const) {
   test(`G-1（a）：${name}——宿主重入自动搬走残留守卫并收敛到 done，不重复提交`, async () => {
     const f = await killedWithOrphanWrite(orphanCode); const lock = `${f.checkpoint}.lock`;
-    const k = childReenter(f, hook); assert.equal(k.signal, "SIGKILL", k.stderr.slice(0, 300));
+    const k = await childReenter(f, hook); assert.equal(k.signal, "SIGKILL", k.stderr.slice(0, 300));
     const guard = guardOf(lock); assert.ok(existsSync(guard), "守卫残留");
     await waitDead(JSON.parse(readFileSync(guard, "utf8")).pid); await waitDead(k.pid);
     assert.ok(existsSync(lock), "锁路径始终存在");
@@ -596,13 +585,36 @@ test("R-7：还原写回的字节相同但映像与检查点不相等时，FAIL-
 
 test("P3-a（真实进程）：g2 内、搬走旧守卫之后被杀——g2 残留，宿主重入收敛到 done，死 g2 被归档为 .g2.stale-*，结束时守卫与 g2 都不残留", async () => {
   const f = await killedWithOrphanWrite(ORPHAN_WRITE); const lock = `${f.checkpoint}.lock`; const guard = guardOf(lock);
-  const k2 = childReenter(f, "reclaim"); assert.equal(k2.signal, "SIGKILL", k2.stderr.slice(0, 300)); await waitDead(k2.pid!);
+  const k2 = await childReenter(f, "reclaim"); assert.equal(k2.signal, "SIGKILL", k2.stderr.slice(0, 300)); await waitDead(k2.pid);
   assert.ok(existsSync(guard), "第二个重入在守卫内被杀，守卫残留");
-  const k3 = childReenter(f, "guardRename"); assert.equal(k3.signal, "SIGKILL", k3.stderr.slice(0, 300)); await waitDead(k3.pid!);
+  const k3 = await childReenter(f, "guardRename"); assert.equal(k3.signal, "SIGKILL", k3.stderr.slice(0, 300)); await waitDead(k3.pid);
   assert.ok(existsSync(`${guard}.g2`), "g2 残留"); assert.ok(!existsSync(guard), "旧守卫已被搬走");
   const done = await runManagedMerge(optsOf(f, { reclaimOrphans: () => undefined }));
   assert.equal(done.phase, "done");
   assert.ok(!existsSync(guard) && !existsSync(`${guard}.g2`) && !existsSync(lock));
   assert.equal(readdirSync(f.evidence).filter((n) => n.includes(".g2.stale-")).length, 1, "死 g2 已归档"); assert.equal(guardStale(f.evidence).length, 1, "旧守卫已归档");
   assert.equal(orphanArchives(f).length, 1); assert.equal(f.git("rev-list", "--parents", "--merges", `${f.base}..HEAD`).split("\n").filter(Boolean).length, 2);
+});
+});
+
+test("启动时间与 TZ 无关：同一 pid 在不同 TZ 下取到同一字符串；持有者在一个 TZ 下存活，取锁方在另一个 TZ 下必须拒绝", async () => {
+  const savedTz = process.env.TZ;
+  try {
+    const seen = new Set<string>();
+    for (const tz of ["UTC", "Asia/Shanghai", "America/Los_Angeles", "Pacific/Auckland"]) { process.env.TZ = tz; seen.add(psStart(process.pid)!); }
+    assert.equal(seen.size, 1, JSON.stringify([...seen]));
+  } finally { if (savedTz === undefined) delete process.env.TZ; else process.env.TZ = savedTz; }
+  const d = dir(); const lock = join(d, "c.lock"); const script = join(d, "hold.mts");
+  writeFileSync(script, `import { acquireLock } from ${JSON.stringify(here + "process-lock.mts")}; acquireLock(${JSON.stringify(lock)}, "/c"); console.log("LOCKED"); setInterval(() => {}, 1000);`);
+  const child = spawn(process.execPath, ["--import", loader, script], { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, TZ: "America/New_York" } });
+  await new Promise<void>((res, rej) => { child.stdout.on("data", (b) => String(b).includes("LOCKED") && res()); child.on("exit", () => rej(new Error("子进程提前退出"))); });
+  try {
+    const saved = process.env.TZ;
+    for (const tz of ["Asia/Shanghai", "UTC", undefined]) {
+      if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz;
+      assert.throws(() => acquireLock(lock, "/y", env()), /仍在运行/, `取锁方 TZ=${tz}`);
+    }
+    if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
+    assert.deepEqual(stale(d), [], "活锁没有被接管");
+  } finally { child.kill("SIGKILL"); }
 });
