@@ -46,7 +46,7 @@ OID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
 ENTRY = re.compile(rb"([0-7]{1,6}) ([^\0/]+)\0")
 ENV = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C", "GIT_NO_REPLACE_OBJECTS": "1",
        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_GRAFT_FILE": os.devnull,
-       "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+       "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"}
 
 
 class Fault(Exception):

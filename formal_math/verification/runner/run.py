@@ -22,6 +22,7 @@ import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import selectors  # noqa: E402
 import signal  # noqa: E402
 import stat  # noqa: E402
 import subprocess  # noqa: E402
@@ -48,10 +49,11 @@ TREE_ENTRY = re.compile(rb"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}|[0-9a-f]{
 PRECHECK_RED = re.compile(rb"PRECHECK RED ([A-Z_]+) (\S+) (.+)")
 GIT_ENV = {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C", "GIT_NO_REPLACE_OBJECTS": "1",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_GRAFT_FILE": os.devnull,
-           "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+           "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"}
 TIMEOUT = {"git": 600, "precheck": 600, "auditor": 3600, "headers": 600, "shape": 3600, "build": 4 * 3600,
            "env": 3600}
 LIMIT = 400
+BUILD_LOG_LIMIT = 64 * 1024 * 1024
 
 
 # 一次运行的全局状态：当前步骤、标准输出是否写失败过、结果行是否已写过、正在运行的子进程。
@@ -65,6 +67,7 @@ class Fault(Exception):
 class Run:
     """一次运行的输入与中间产物；字段在各步里依次填上。"""
     certificate = None  # 第 5 步写出的派生凭证路径；第 7 步要求它就是第 5 步写的那一份
+    prechecked_role = None  # 只有第 1 步的绿行能确认角色
 
 
 # ---- 输出：一切写进标准输出、标准错误的片段都经 safe() ----
@@ -120,10 +123,51 @@ def kill_group(p):
         pass
 
 
+def stream_build_log(p, timeout, code, prog, tag):
+    """分块读合并管道；长行只保留开头，原始字节仍全部计入上限。"""
+    deadline = time.monotonic() + timeout
+    total, line = 0, bytearray()
+    # safe() 最多展示 LIMIT 个字符，UTF-8 每字符最多 4 个字节。
+    line_cap = 4 * (LIMIT + 1)
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise Fault(code, prog, "超时（%d 秒）" % timeout)
+        return left
+
+    with p.stdout as pipe, selectors.DefaultSelector() as sel:
+        fd = pipe.fileno()
+        sel.register(fd, selectors.EVENT_READ)
+        while True:
+            if not sel.select(remaining()):
+                raise Fault(code, prog, "超时（%d 秒）" % timeout)
+            chunk = os.read(fd, max(1, min(64 * 1024, BUILD_LOG_LIMIT - total)))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > BUILD_LOG_LIMIT:
+                raise Fault("BUILD_OUTPUT_LIMIT", prog, "构建合并输出超过 %d 字节" % BUILD_LOG_LIMIT)
+            parts = chunk.split(b"\n")
+            for part in parts[:-1]:
+                line.extend(part[:line_cap - len(line)])
+                log(tag, bytes(line))
+                line.clear()
+            line.extend(parts[-1][:line_cap - len(line)])
+        if line:
+            log(tag, bytes(line))
+    try:
+        p.wait(timeout=remaining())
+    except subprocess.TimeoutExpired:
+        raise Fault(code, prog, "超时（%d 秒）" % timeout) from None
+
+
 def call(argv, timeout, code, tag, merge=False, **kw):
     """起子进程（独立进程组），标准错误（merge 时连同标准输出）捕获后经 log() 写出；子进程从不继承本进程的
     标准输出与标准错误。超时则杀掉整个进程组；超时、起不来都是 Fault。"""
     data = kw.pop("input", None)
+    if merge and data is not None:
+        raise ValueError("合并构建日志的子进程不接受标准输入")
     kw["stdin"] = subprocess.PIPE if data is not None else subprocess.DEVNULL
     kw["stderr"] = subprocess.STDOUT if merge else subprocess.PIPE
     if merge or kw.get("stdout") is None:
@@ -134,16 +178,24 @@ def call(argv, timeout, code, tag, merge=False, **kw):
         raise Fault(code, argv[0], "%s: %s" % (type(e).__name__, e.strerror or e))
     STATE["child"] = p
     try:
+        if merge:
+            try:
+                stream_build_log(p, timeout, code, argv[0], tag)
+            finally:
+                if p.returncode is None:
+                    kill_group(p)
+                    p.wait()
+            return subprocess.CompletedProcess(argv, p.returncode)
         out, err = p.communicate(data, timeout=timeout)
     except subprocess.TimeoutExpired:
         kill_group(p)
         out, err = p.communicate()
-        log(tag, out if merge else err)
+        log(tag, err)
         raise Fault(code, argv[0], "超时（%d 秒）" % timeout)
     finally:
         STATE["child"] = None
-    log(tag, out if merge else err)
-    return subprocess.CompletedProcess(argv, p.returncode, None if merge else out, err)
+    log(tag, err)
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
 
 # ---- git 对象 ----
@@ -320,7 +372,9 @@ def step_precheck(ctx):
         raise Fault("PRECHECK_OUTPUT", b"stdout", "预检输出没有以换行结尾")
     lines = lines[:-1]
     if p.returncode == 0 and len(lines) == 1 and lines[0].startswith(b"PRECHECK GREEN OK " + ctx.head + b" role="):
-        return [], lines[0][len(b"PRECHECK GREEN OK ") + len(ctx.head) + 1:]
+        note = lines[0][len(b"PRECHECK GREEN OK ") + len(ctx.head) + 1:]
+        ctx.prechecked_role = note.removeprefix(b"role=")
+        return [], note
     reds = [PRECHECK_RED.fullmatch(line) for line in lines]
     if p.returncode == 1 and reds and all(reds):
         return [(m[1].decode(), unescape(m[2]), m[3].decode("utf-8", "surrogateescape")) for m in reds], ""
@@ -335,16 +389,24 @@ def step_fetch(ctx):
         if mode != b"100644" or kind != b"blob" or not all(SEGMENT.fullmatch(s) for s in rel.split(b"/")):
             raise Fault("TRUSTED_TREE", GATE + b"/" + rel, "受信提交的门禁目录里有非常规条目")
         trusted_files.append((rel.decode("ascii"), oid))
-    configs, base_tree = [], tree(ctx, ctx.base, b"formal_math")
-    for name in CONFIGS:
-        entry = [e for e in base_tree if e[0] == name]
-        if len(entry) != 1 or entry[0][1] != b"100644" or entry[0][2] != b"blob":
-            raise Fault("BASE_CONFIG", b"formal_math/" + name, "基线缺这个构建配置文件或不是普通文件")
-        configs.append((name.decode("ascii"), entry[0][3]))
     if object_at(ctx, ctx.head, b"formal_math") is None:
         raise Fault("NO_PACKAGE", ctx.head, "被审提交没有 formal_math/")
+    base_tree = tree(ctx, ctx.base, b"formal_math")
+    head_tree = base_tree if ctx.base == ctx.head else tree(ctx, ctx.head, b"formal_math")
+    base_configs = [e for e in base_tree if e[0] in CONFIGS]
+    head_configs = [e for e in head_tree if e[0] in CONFIGS]
+    use_head = ctx.approved and ctx.prechecked_role == b"infra" and head_configs != base_configs
+    config_entries = head_configs if use_head else base_configs
+    source = "已批准的 infra 候选提交" if use_head else "基线"
+    configs = []
+    for name in CONFIGS:
+        entry = [e for e in config_entries if e[0] == name]
+        if len(entry) != 1 or entry[0][1] != b"100644" or entry[0][2] != b"blob":
+            raise Fault("HEAD_CONFIG" if use_head else "BASE_CONFIG", b"formal_math/" + name,
+                        source + "缺这个构建配置文件或文件不是普通文件")
+        configs.append((name.decode("ascii"), entry[0][3]))
     reds, content = [], []
-    for rel, mode, kind, oid in tree(ctx, ctx.head, b"formal_math"):
+    for rel, mode, kind, oid in head_tree:
         parts = rel.split(b"/")
         if not (parts[0] in CONTENT_ROOTS and len(parts) > 1 or rel.endswith(b".lean") and len(parts) == 1):
             continue
@@ -366,7 +428,7 @@ def step_fetch(ctx):
             reds.append(("CONTENT_ENCODING", "formal_math/" + rel, "内容文件不是合法的 UTF-8"))
     if reds:
         return reds, ""
-    # 第 7 步的搜索路径在这里从基线清单的 git 对象定下来，之后不再读被审工作区里的任何文件。
+    # 第 7 步的搜索路径从本次配置的清单对象定下来，不读构建后的工作区来决定输入。
     manifest = strict_json(data[dict(configs)["lake-manifest.json"]], "INPUT", "formal_math/lake-manifest.json")
     try:
         names = [p["name"] for p in manifest["packages"]]
@@ -376,7 +438,7 @@ def step_fetch(ctx):
         raise Fault("INPUT", "formal_math/lake-manifest.json", "包名不合文法")
     missing = [n for n in names if not os.path.isdir(os.path.join(ctx.packages, n))]
     if missing:
-        raise Fault("PACKAGES", os.path.join(ctx.packages, missing[0]), "依赖目录缺基线清单里的包")
+        raise Fault("PACKAGES", os.path.join(ctx.packages, missing[0]), "依赖目录缺构建清单里的包")
     ctx.package_names = names
     ctx.trusted_dir, ctx.audited = os.path.join(ctx.workdir, "trusted"), os.path.join(ctx.workdir, "audited")
     mkdir(ctx.trusted_dir, 0o700)
@@ -386,7 +448,7 @@ def step_fetch(ctx):
     ctx.content = sorted(rel for rel, _ in content)
     ctx.modules = [rel[:-5].replace("/", ".") for rel in ctx.content]
     ctx.lock = object_at(ctx, ctx.head, b"formal_math/statement-lock.json")
-    return [], "受信 %d 个文件，内容 %d 个模块，配置取自基线" % (len(trusted_files), len(content))
+    return [], "受信 %d 个文件，内容 %d 个模块，配置取自%s" % (len(trusted_files), len(content), source)
 
 
 # ---- 第 3 步：构建审计程序（受信目录，来源与配置都取自受信提交） ----

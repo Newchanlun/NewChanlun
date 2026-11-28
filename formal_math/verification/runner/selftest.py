@@ -14,6 +14,7 @@ import os
 import signal
 import stat
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import tempfile
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERIFICATION = os.path.dirname(HERE)
@@ -66,6 +68,9 @@ def probe(ctx, step, binds, env, cwd):
         f.write(json.dumps({"step": step, "lines": p.stdout.decode(errors="replace").splitlines()}) + "\n")
 
 def patched(ctx, cmd, binds, env, cwd, *a, **k):
+    if mode == "build-output-limit" and cmd[:2] == ["lake", "build"]:
+        cmd = ["/bin/sh", "-c", "printf 'short line\\n' >&2; head -c 1048576 /dev/zero; sleep 8"]
+        return orig(ctx, cmd, binds, env, cwd, *a, **k)
     if mode == "probe" and (cmd[:2] == ["lake", "build"] or cmd[0] == getattr(ctx, "auditor", None) and
                             cmd[1] in ("env", "shape")):
         probe(ctx, "build" if cmd[0] == "lake" else cmd[1], binds, env, cwd)
@@ -101,6 +106,8 @@ def patched(ctx, cmd, binds, env, cwd, *a, **k):
 run.sandbox = patched
 if mode == "timeout":
     run.TIMEOUT["build"] = 30
+if mode == "build-output-limit":
+    run.BUILD_LOG_LIMIT = 8192
 if mode == "late-signal":
     # 结果行写出之后、主路径返回之前给自己发 SIGTERM：处理函数里的 finish() 不得再写第二行结果行。
     import signal
@@ -247,7 +254,7 @@ def template(extra=None, gate=True, placeholders=True, lite=False, roots=ROOTS):
 
 
 class Suite:
-    def __init__(self, tmp, packages, warm=True):
+    def __init__(self, tmp, packages):
         self.tmp, self.packages = tmp, packages
         self.fake_packages = os.path.join(tmp, "fake-packages")
         os.makedirs(self.fake_packages)
@@ -259,7 +266,7 @@ class Suite:
         self.lite_files = template(lite=True)
         self.lite_base = self.repo.commit(self.lite_files)
         self.counter = 0
-        self.warm = self.warm_auditor() if warm else None
+        self.warm = None
 
     def warm_auditor(self):
         """语料用例共用的审计程序预编译产物；骨架用例每次都在受信目录里从头构建。"""
@@ -388,7 +395,7 @@ SHAPE_RED = [
     (T + "AttrLocalMacro.lean", (), "@[local macro Lean.Parser.Term.app] def fmMac : Nat := 1", {"SHAPE_ATTRIBUTE"}),
     # 派生目标类白名单（行内与 deriving instance）
     (T + "DerivingInline.lean", (), "inductive FmD where\n  | a\nderiving Lean.ToJson", {"SHAPE_DERIVING"}),
-    (T + "DerivingInstance.lean", (), "inductive FmD2 where\n  | a\nderiving instance Lean.ToExpr for FmD2",
+    (T + "DerivingInstance.lean", (), "inductive FmDer2 where\n  | a\nderiving instance Lean.ToExpr for FmDer2",
      {"SHAPE_DERIVING"}),
     # #guard_msgs 的限制
     (F + "GuardSpec.lean", (), "/-- info: Nat : Type -/\n#guard_msgs (drop warning) in\n#check Nat", {"SHAPE_GUARD_MSGS"}),
@@ -931,6 +938,37 @@ def skeleton(s):
         return check("S33 派生凭证非空但不是第 5 步写出的那一份（指向受信目录里另一个存在的文件）：第 7 步 NO_CERTIFICATE 退 2",
                      good, r)
 
+    @case("S34a")
+    def _():
+        head = s.lite({"formal_math/lakefile.toml": b"name = [\n"})
+        r = s.run("S34a-bad-infra-config", head, branch="infra/selftest", lite=True,
+                  extra=["--trusted-change-approved"])
+        good = r["rc"] == 1 and r["reds"] == {"BUILD_WFAIL"} and last_step(r) == "build" and \
+            "配置取自已批准的 infra 候选提交" in r["out"]
+        return check("S34a 已批准 infra 的无效 TOML 用候选配置实跑，第 6 步判红", good, r)
+
+    @case("S34b")
+    def _():
+        config = s.lite_files["formal_math/lakefile.toml"] + b"\n# S34b candidate\n"
+        head = s.lite({"formal_math/lakefile.toml": config})
+        r = s.run("S34b-good-infra-config", head, branch="infra/selftest", lite=True, keep=True,
+                  extra=["--trusted-change-approved"])
+        try:
+            good = r["rc"] == 0 and [x[2] for x in r["steps"]] == ["GREEN"] * 7 and \
+                "配置取自已批准的 infra 候选提交" in r["out"] and \
+                read(os.path.join(r["work"], "audited", "lakefile.toml")) == config
+            return check("S34b 已批准 infra 的合法配置逐字取自候选提交，七步全绿", good, r)
+        finally:
+            rmtree(r["work"])
+
+    @case("S35")
+    def _():
+        r = s.run("S35-build-output-limit", lite_green, lite=True, mode="build-output-limit")
+        took = re.search(r"^FM STEP 6 build FAULT ([\d.]+)s", r["out"], re.M)
+        good = r["rc"] == 2 and r["faults"] == ["BUILD_OUTPUT_LIMIT"] and took and float(took[1]) < 8 and \
+            "FM LOG build short line\n" in r["err"] and "FM RESULT FAULT build BUILD_OUTPUT_LIMIT\n" in r["out"]
+        return check("S35 构建输出超过测试上限，立即中止进程组，BUILD_OUTPUT_LIMIT 退 2", good, r)
+
     oracle_src = read(os.path.join(VERIFICATION, "must_green", "known-not-covered", "linarith-oracle-eval", "formal_math",
                                    "Chan", "Thm", "LinarithOracle.lean"))
     oracle_head = s.repo.commit({**s.base_files, "formal_math/Chan/Thm/LinarithOracle.lean": oracle_src}, s.base)
@@ -971,7 +1009,7 @@ def skeleton(s):
         return check("S30 umask 077 下取料写出的目录仍是 0755、文件 0644", good, r, "模式=%s" % modes)
 
     # ---- 被审内容与调用方输入进输出的各个入口（B-1、B-2） ----
-    inject = "x\nFM STEP 4 headers GREEN 0.1s\nFM RESULT GREEN 七步全绿\u202e "
+    inject = "x\nFM STEP 4 headers GREEN 0.1s\nFM RESULT GREEN 七步全绿\u202e\u2028"
 
     @case("E1")
     def _():
@@ -982,7 +1020,7 @@ def skeleton(s):
 
     @case("E2")
     def _():
-        name = "a\nFM RESULT GREEN \u202e"
+        name = "a\nFM RESULT GREEN\u2028\u202e"
         head = s.lite({"formal_math/Chan/Thm/Names.lean": (
             M + "axiom «%s» : False\ntheorem «t\nFM STEP 7 env GREEN» : False := «%s»\n"
                 "unsafe def «u\tFM RESULT GREEN» : Nat := 1\n" % (name, name)).encode()})
@@ -1102,10 +1140,8 @@ def skeleton(s):
     @case("H2")
     def _():
         r = s.run("H2-scope-green", scope_green, keep=True)
-        counts = elab_consistency(s, r["work"], os.path.join(r["work"], "trusted", "verification", "auditor",
-                                                              ".lake", "build", "bin", "fm_audit"))
-        rmtree(r["work"])
-        good = r["rc"] == 0 and counts["mismatch"] == [] and counts["files"] >= 1
+        counts = count_if_green(s, r)
+        good = counts is not None and counts["mismatch"] == [] and counts["files"] >= 1
         ok1 = check("H2a 作用域跟踪的阴性对照（namespace/section/end 嵌套、open … in、mutual … end、public section、"
                     "文件末尾未闭合的节）：七步全绿，只解析与真实精化的命令数一致", good, r, str(counts))
         r2 = s.run("H2-scope-red", scope_red)
@@ -1306,10 +1342,26 @@ def unit(s):
     return cases
 
 
-def elab_consistency(s, work, auditor):
+def count_if_green(s, res):
+    try:
+        if res["rc"] == 0:
+            return elab_consistency(s, res["work"])
+    finally:
+        rmtree(res["work"])
+
+
+def elab_consistency(s, work):
     """对一次保留了工作目录的全绿运行：用审计程序重跑形状门拿每个文件只解析的命令数，再用真实前端（自测脚本
     ElabCount.lean，被审产物在搜索路径上）精化同一批文件数命令。返回 {files, mismatch}。"""
     audited = os.path.join(work, "audited")
+    pkg = os.path.join(work, "trusted", "verification", "auditor")
+    auditor = os.path.join(pkg, ".lake", "build", "bin", "fm_audit")
+    prefix = os.path.realpath(subprocess.run(["lean", "--print-prefix"], cwd=pkg, check=True,
+                                             capture_output=True, text=True).stdout.strip())
+    ctx = SimpleNamespace(workdir=work, prefix=prefix)
+    run_sandbox = runpy.run_path(RUN)["sandbox"]
+    binds = [("--ro-bind", audited, audited), ("--ro-bind", s.packages, s.packages),
+             ("--ro-bind", auditor, auditor)]
     mods = []
     for d, _, names in os.walk(audited):
         if ".lake" in d.split(os.sep):
@@ -1320,31 +1372,32 @@ def elab_consistency(s, work, auditor):
                 mods.append((rel[:-5].replace(os.sep, "."), os.path.join(audited, rel)))
     manifest = json.loads(read(os.path.join(audited, "lake-manifest.json")))
     libs = [os.path.join(s.packages, p["name"], ".lake", "build", "lib", "lean") for p in manifest["packages"]]
-    prefix = subprocess.run(["lean", "--print-prefix"], cwd=audited, capture_output=True, text=True).stdout.strip()
-    env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"), "LEAN_PATH": ":".join(libs),
-           "LEAN_SYSROOT": prefix}
+    env = {"LEAN_PATH": ":".join(libs), "LEAN_SYSROOT": prefix}
+
+    def rows(argv, tag, mounts):
+        p = run_sandbox(ctx, argv, mounts, env, audited, 3600, "ELAB_CONSISTENCY", tag)
+        p.check_returncode()
+        return [json.loads(line) for line in p.stdout.decode().split("\n") if line]
+
     args = [x for m, p in mods for x in (m, p)]
-    plan = subprocess.run([auditor, "shape-plan", *args], capture_output=True, env=env)
     groups = {}
-    for line in plan.stdout.decode().splitlines():
-        row = json.loads(line)
+    for row in rows([auditor, "shape-plan", *args], "shape-plan", binds):
         if row[0] == "plan":
             groups.setdefault(tuple(row[3]), []).append((row[2], row[1]))
     parsed = {}
     for libs_, items in groups.items():
-        out = subprocess.run([auditor, "shape", *libs_, "--", *(x for m, p in items for x in (m, p))],
-                             capture_output=True, env=env).stdout.decode()
-        for line in out.splitlines():
-            row = json.loads(line)
+        argv = [auditor, "shape", *libs_, "--", *(x for m, p in items for x in (m, p))]
+        for row in rows(argv, "shape", binds):
             if row[0] == "file":
                 parsed[row[1]] = row[3]
-    env["LEAN_PATH"] += ":" + os.path.join(audited, ".lake", "build", "lib", "lean")
+    env["LEAN_PATH"] = ":".join(libs + [os.path.join(audited, ".lake", "build", "lib", "lean")])
+    counter = os.path.join(HERE, "selftest-cases", "shape", "ElabCount.lean")
+    elab_binds = binds + [("--ro-bind", counter, "/tmp/ElabCount.lean")]
     # 一个进程只精化一个文件：同一进程里第二次带初始化器加载另一组导入时，作用域记号等扩展状态不可靠。
     elab = {}
     for m, p in mods:
-        out = subprocess.run(["lean", "--run", os.path.join(HERE, "selftest-cases", "shape", "ElabCount.lean"), m, p],
-                             capture_output=True, env=env, cwd=audited).stdout.decode()
-        elab.update({row[1]: row[2] for row in map(json.loads, out.splitlines()) if row[0] == "elab" and not row[3]})
+        out = rows(["lean", "--run", "/tmp/ElabCount.lean", m, p], "elab-count", elab_binds)
+        elab.update({row[1]: row[2] for row in out if row[0] == "elab" and not row[3]})
     mismatch = [(os.path.relpath(p, audited), parsed.get(p), elab.get(p)) for _, p in mods
                 if parsed.get(p) is None or parsed.get(p) != elab.get(p)]
     return {"files": len(mods), "commands": sum(parsed.values()), "mismatch": mismatch}
@@ -1410,10 +1463,7 @@ def corpus(s, discover, only):
         res, how = corpus_case(s, row["fixture"], keep=consistency, skip_shape=skip)
         how += "（跳过第 5 步）" if skip else ""
         step = last_step(res) if res["rc"] == 1 else "-"
-        counts = None
-        if consistency:
-            counts = elab_consistency(s, res["work"], os.path.join(s.warm, "build", "bin", "fm_audit"))
-            rmtree(res["work"])
+        counts = count_if_green(s, res) if consistency else None
         if discover:
             line = "%s\t?\t%s\t%s\t%s\t%s\n" % (row["fixture"], res["rc"], step,
                                                 ",".join(sorted(res["reds"])) or "-", how)
@@ -1556,6 +1606,11 @@ MUTANTS = [
     ("形状检查不核对每组文件行", RUNNER,
      [("if sorted(r[1] for r in done) != sorted(files) or any(f[2] not in files for f in findings):", "if False:")],
      "S5g"),
+    ("已批准的 infra 配置仍取基线", RUNNER, [("config_entries = head_configs if use_head else base_configs",
+                                          "config_entries = base_configs")], "S34a,S34b"),
+    ("合并构建日志不设总量上限", RUNNER,
+     [("max(1, min(64 * 1024, BUILD_LOG_LIMIT - total))", "64 * 1024"),
+      ("if total > BUILD_LOG_LIMIT:", "if False:")], "S35"),
 ]
 
 
@@ -1647,12 +1702,20 @@ def main(argv):
     try:
         with open(os.path.join(tmp, "driver.py"), "w") as f:
             f.write(DRIVER)
-        s = Suite(tmp, packages, warm=not skip_corpus)
-        cases = [] if discover or only else [fn for cid, fn in skeleton(s)
+        s = Suite(tmp, packages)
+        cases = [] if discover or only is not None else [fn for cid, fn in skeleton(s)
                                              if cases_filter is None or cid in cases_filter]
-        units = [] if discover or only else [fn for cid, fn in unit(s) if cases_filter is None or cid in cases_filter]
+        units = [] if discover or only is not None else [
+            fn for cid, fn in unit(s) if cases_filter is None or cid in cases_filter
+        ]
         if not skip_corpus and cases_filter is None:
-            cases += corpus(s, discover, only)
+            fixtures = corpus(s, discover, only)
+            if fixtures:
+                s.warm = s.warm_auditor()
+                cases += fixtures
+        if (only is not None or cases_filter is not None) and not cases and not units:
+            os.write(2, "筛选没有匹配任何自测用例；请检查 --only 或 --cases\n".encode())
+            return 2
         began = time.monotonic()
         def guarded(c):
             try:
