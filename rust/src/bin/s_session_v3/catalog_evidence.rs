@@ -28,6 +28,7 @@ use crate::content_store::{ReadSnapshot, SnapshotQuery};
     allow(unused_imports, reason = "#1488 再合 #1608：仅测试使用")
 )]
 use crate::{canonical_json, content_manifest, content_manifest::ManifestMetadata, tb02a};
+use newchan_rust::s_content::path::path_code;
 #[cfg(test)]
 use newchan_rust::s_content::path::{lookup_path, PathStep};
 use newchan_rust::s_content::{
@@ -55,6 +56,14 @@ pub(super) const AXIS_IDS: [&str; 13] = [
 const AXIS_FIELDS: [&str; 4] = ["impl_status", "proof_status", "run_status", "evidence"];
 const EVIDENCE_CORE_FIELDS: [&str; 3] = ["scope", "object_ids", "waiting_reasons"];
 const CC056_CHANGE_FIELDS: [&str; 3] = ["raw_revisions", "withdrawals", "replaces"];
+const CC056_EVIDENCE_FIELDS: [&str; 6] = [
+    "scope",
+    "object_ids",
+    "waiting_reasons",
+    "raw_revisions",
+    "withdrawals",
+    "replaces",
+];
 /// 一条完整目录证据的 exact 字段集合（OHLC；非 OHLC 无 `axes`，本模块不受理）。
 const EVIDENCE_FIELDS: [&str; 16] = [
     "tested_domain",
@@ -123,17 +132,153 @@ fn scalar_ref(
     }
     bj::render_json(s, child.view()).map_err(err)
 }
-fn text_ref<'r>(
+fn is_field_shape_error(error: &sc::CodecError) -> bool {
+    matches!(
+        error.code(),
+        path_code::PATH_FIELD_MISSING
+            | path_code::PATH_INDEX_RANGE
+            | sc::code::SEQUENCE_SHAPE
+            | sc::code::OBJECT_KEY_ORDER
+            | sc::code::DUPLICATE_KEY
+    )
+}
+
+fn parse_plain_json_string(bytes: &[u8]) -> Option<&str> {
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+    let inner = &bytes[1..bytes.len() - 1];
+    if inner.iter().any(|&b| b == b'"' || b == b'\\' || b < 0x20) {
+        return None;
+    }
+    std::str::from_utf8(inner).ok()
+}
+
+fn text_from_ref_view(
     s: &mut (impl CodecRead + ?Sized),
-    root: impl Into<sc::RefView<'r>>,
+    child: sc::RefView<'_>,
     key: &str,
 ) -> Result<TextValue, String> {
-    let value = scalar_ref(s, root.into(), key)?;
+    if !matches!(
+        child.kind(),
+        Kind::String | Kind::Number | Kind::Bool | Kind::Null
+    ) {
+        return Err(err(format!("{key} 不是标量")));
+    }
+    if child.kind() == Kind::String && s.allocation_budget().is_none() {
+        enum PlainBuf {
+            Plain(Vec<u8>),
+            Native(sc::capture_allocation::scratch::ScratchBytes),
+        }
+        impl PlainBuf {
+            fn bytes(&self) -> &[u8] {
+                match self {
+                    Self::Plain(v) => v,
+                    Self::Native(v) => v,
+                }
+            }
+            fn extend(&mut self, data: &[u8]) -> Result<(), sc::CodecError> {
+                match self {
+                    Self::Plain(v) => {
+                        v.extend_from_slice(data);
+                        Ok(())
+                    }
+                    Self::Native(v) => v.try_extend_bytes(data),
+                }
+            }
+        }
+        let mut bytes = if let Some(work) = s.codec_work() {
+            PlainBuf::Native(work.bytes())
+        } else {
+            PlainBuf::Plain(Vec::new())
+        };
+        struct Buf<'a> {
+            bytes: &'a mut PlainBuf,
+            error: Option<sc::CodecError>,
+        }
+        impl std::io::Write for Buf<'_> {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                match self.bytes.extend(data) {
+                    Ok(()) => Ok(data.len()),
+                    Err(e) => {
+                        self.error = Some(e);
+                        Err(std::io::ErrorKind::Other.into())
+                    }
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut buf = Buf {
+            bytes: &mut bytes,
+            error: None,
+        };
+        let res = s.render_ref(child, &mut buf);
+        if let Some(error) = buf.error {
+            return Err(err(error));
+        }
+        res.map_err(err)?;
+        if let Some(text) = parse_plain_json_string(bytes.bytes()) {
+            return s.native_text(text).map_err(err);
+        }
+    }
+    let value = bj::render_json(s, child).map_err(err)?;
     let text = value
         .view()
         .as_str()
         .ok_or_else(|| err(format!("{key} 不是文本")))?;
     s.native_text(text).map_err(err)
+}
+
+fn text_ref<'r>(
+    s: &mut (impl CodecRead + ?Sized),
+    root: impl Into<sc::RefView<'r>>,
+    key: &str,
+) -> Result<TextValue, String> {
+    let child = field_ref(s, root.into(), key)?;
+    text_from_ref_view(s, child.view(), key)
+}
+
+fn lookup_exact_fields<'a>(
+    s: &mut (impl CodecRead + ?Sized),
+    root: sc::RefView<'_>,
+    names: &[&'a str],
+) -> Result<super::audit_store::RefFields<'a>, String> {
+    match s.lookup_fields_ref(root, names) {
+        Ok(fields) => Ok(fields),
+        Err(error) if is_field_shape_error(&error) => {
+            for key in names {
+                field_ref(s, root, key)?;
+            }
+            Err(err(error))
+        }
+        Err(error) => Err(err(error)),
+    }
+}
+
+fn lookup_subset_fields<'a>(
+    s: &mut (impl CodecRead + ?Sized),
+    root: sc::RefView<'_>,
+    names: &[&'a str],
+) -> Result<super::audit_store::RefFields<'a>, String> {
+    match s.lookup_subset_ref(root, names) {
+        Ok(fields) => Ok(fields),
+        Err(error) if is_field_shape_error(&error) => {
+            for key in names {
+                field_ref(s, root, key)?;
+            }
+            Err(err(error))
+        }
+        Err(error) => Err(err(error)),
+    }
+}
+
+fn get_field<'a>(
+    fields: &'a super::audit_store::RefFields<'_>,
+    key: &str,
+) -> Result<sc::RefView<'a>, String> {
+    fields.get(key).ok_or_else(|| err(format!("缺字段 {key}")))
 }
 fn array_field_ref<'r>(
     s: &mut (impl CodecRead + ?Sized),
@@ -316,16 +461,21 @@ fn axes_entries<'r>(
             axes.extent()
         )));
     }
+    let axes_fields = lookup_exact_fields(s, axes, &AXIS_IDS)?;
     let mut out = bj::new_work(s.allocation_budget().as_ref());
     s.native_codec_room(&mut out, AXIS_IDS.len()).map_err(err)?;
     for id in AXIS_IDS {
-        let axis = field_ref(s, axes, id)?;
+        let axis = get_field(&axes_fields, id)?;
         if axis.kind() != Kind::Object || axis.extent() != Some(AXIS_FIELDS.len() as u64) {
             return Err(err(format!("{id} 轴不是四字段状态对象")));
         }
-        let impl_status = text_ref(s, &axis, "impl_status")?;
-        let proof_status = text_ref(s, &axis, "proof_status")?;
-        let run_status = text_ref(s, &axis, "run_status")?;
+        let axis_fields = lookup_exact_fields(s, axis, &AXIS_FIELDS)?;
+        let impl_status =
+            text_from_ref_view(s, get_field(&axis_fields, "impl_status")?, "impl_status")?;
+        let proof_status =
+            text_from_ref_view(s, get_field(&axis_fields, "proof_status")?, "proof_status")?;
+        let run_status =
+            text_from_ref_view(s, get_field(&axis_fields, "run_status")?, "run_status")?;
         if impl_status != "implemented"
             || proof_status != "not_proved"
             || !matches!(run_status.as_str(), "run" | "not_run" | "waiting")
@@ -334,33 +484,38 @@ fn axes_entries<'r>(
                 "{id} 轴状态越出声明域：{impl_status}/{proof_status}/{run_status}"
             )));
         }
-        let evidence = field_ref(s, axis.view(), "evidence")?;
+        let evidence = axis_fields
+            .get_admitted(s, "evidence")
+            .map_err(err)?
+            .ok_or_else(|| err("缺字段 evidence"))?;
+        drop(axis_fields);
         if evidence.kind() != Kind::Object {
             return Err(err(format!("{id} 轴 evidence 不是对象")));
         }
         // 必填字段全在 + extent 相符 ⟹ 字段集合恰为声明集合（不缺、不多）。
-        let expected = if id == "CC-056" {
-            EVIDENCE_CORE_FIELDS.len() + CC056_CHANGE_FIELDS.len()
+        let expected_fields: &[&str] = if id == "CC-056" {
+            &CC056_EVIDENCE_FIELDS
         } else {
-            EVIDENCE_CORE_FIELDS.len()
+            &EVIDENCE_CORE_FIELDS
         };
-        if evidence.extent() != Some(expected as u64) {
+        if evidence.extent() != Some(expected_fields.len() as u64) {
             return Err(err(format!(
-                "{id} 轴 evidence 字段数不符（extent={:?}，应为 {expected}）",
-                evidence.extent()
+                "{id} 轴 evidence 字段数不符（extent={:?}，应为 {}）",
+                evidence.extent(),
+                expected_fields.len()
             )));
         }
-        if text_ref(s, &evidence, "scope")? != "TB-02-A" {
+        let ev_fields = lookup_exact_fields(s, evidence.view(), expected_fields)?;
+        if text_from_ref_view(s, get_field(&ev_fields, "scope")?, "scope")? != "TB-02-A" {
             return Err(err(format!("{id} 轴 evidence.scope 不是 TB-02-A")));
         }
-        for key in EVIDENCE_CORE_FIELDS.iter().skip(1) {
-            array_field_ref(s, &evidence, key)?;
-        }
-        if id == "CC-056" {
-            for key in CC056_CHANGE_FIELDS {
-                array_field_ref(s, &evidence, key)?;
+        for key in expected_fields.iter().skip(1) {
+            let child = get_field(&ev_fields, key)?;
+            if child.kind() != Kind::Array {
+                return Err(err(format!("{key} 不是数组")));
             }
         }
+        drop(ev_fields);
         out.try_push(AxisState {
             id,
             impl_status,
@@ -590,35 +745,67 @@ fn verify_cut_in_store(
     store
         .verify_history_public_root(delta, sc::Mode::Public)
         .map_err(err)?;
-    let frontier = text_ref(store, delta, "index_frontier")?;
+    const DELTA_CHECK_FIELDS: [&str; 4] = [
+        "index_frontier",
+        "next_cut",
+        "catalog_run_status",
+        "catalog_evidence",
+    ];
+    let delta_fields = lookup_subset_fields(store, delta, &DELTA_CHECK_FIELDS)?;
+    let frontier = text_from_ref_view(
+        store,
+        get_field(&delta_fields, "index_frontier")?,
+        "index_frontier",
+    )?;
     if !real_batch_id(&frontier) {
         return Err(err(format!(
             "Delta index_frontier `{frontier}` 不是 batch3 类型化身份"
         )));
     }
-    if text_ref(store, delta, "next_cut")? != metadata.structure_cut {
+    if text_from_ref_view(store, get_field(&delta_fields, "next_cut")?, "next_cut")?
+        != metadata.structure_cut
+    {
         return Err(err("Delta next_cut 与冻结生成 cut 不同"));
     }
-    let run = text_ref(store, delta, "catalog_run_status")?;
+    let run = text_from_ref_view(
+        store,
+        get_field(&delta_fields, "catalog_run_status")?,
+        "catalog_run_status",
+    )?;
     if run != declared_run(counts) {
         return Err(err(format!(
             "Delta catalog_run_status=`{run}` 与真实分类结果不符"
         )));
     }
-    let evidence = field_ref(store, delta, "catalog_evidence")?;
+    let evidence = delta_fields
+        .get_admitted(store, "catalog_evidence")
+        .map_err(err)?
+        .ok_or_else(|| err("缺字段 catalog_evidence"))?;
+    drop(delta_fields);
     if evidence.kind() != Kind::Object || evidence.extent() != Some(EVIDENCE_FIELDS.len() as u64) {
         return Err(err(format!(
             "catalog_evidence 不是16字段对象（extent={:?}）",
             evidence.extent()
         )));
     }
-    if text_ref(store, &evidence, "tested_domain")? != OHLC_TESTED_DOMAIN {
+    let ev_fields = lookup_exact_fields(store, evidence.view(), &EVIDENCE_FIELDS)?;
+    if text_from_ref_view(
+        store,
+        get_field(&ev_fields, "tested_domain")?,
+        "tested_domain",
+    )? != OHLC_TESTED_DOMAIN
+    {
         return Err(err("目录证据 tested_domain 不是声明 OHLC 域"));
     }
-    if text_ref(store, &evidence, "batch_id")? != frontier {
+    if text_from_ref_view(store, get_field(&ev_fields, "batch_id")?, "batch_id")? != frontier {
         return Err(err("目录证据 batch_id 与 Delta index_frontier 不同"));
     }
-    if text_ref(store, &evidence, "structure_cut")? != metadata.structure_cut {
+    if text_from_ref_view(
+        store,
+        get_field(&ev_fields, "structure_cut")?,
+        "structure_cut",
+    )? != metadata.structure_cut
+    {
         return Err(err("目录证据 structure_cut 与冻结生成 cut 不同"));
     }
     for (key, want) in [
@@ -626,7 +813,7 @@ fn verify_cut_in_store(
         ("profile_hash", metadata.profile_hash),
         ("rule_revision", metadata.rule_revision),
     ] {
-        if text_ref(store, &evidence, key)? != want {
+        if text_from_ref_view(store, get_field(&ev_fields, key)?, key)? != want {
             return Err(err(format!("目录证据 {key} 与冻结元数据不同")));
         }
     }
@@ -644,7 +831,11 @@ fn verify_cut_in_store(
         ("insufficient_knowledge", counts.insufficient),
         ("domain_not_satisfied", counts.outside_domain),
     ] {
-        let got = parse_canonical_i64(&text_ref(store, &evidence, key)?, key).map_err(err)?;
+        let got = parse_canonical_i64(
+            &text_from_ref_view(store, get_field(&ev_fields, key)?, key)?,
+            key,
+        )
+        .map_err(err)?;
         let want = i64::try_from(want).map_err(|_| err(format!("{key} 实际计数超出 i64")))?;
         if got != want {
             return Err(err(format!(
@@ -653,22 +844,56 @@ fn verify_cut_in_store(
         }
     }
     let want_scope = metadata.scope.digest().map_err(err)?;
-    if field_ref(store, evidence.view(), "scope")?
-        .digest()
-        .map_err(err)?
-        != want_scope
-        || field_ref(store, generated_state, "scope")?
+    const STATE_CHECK_FIELDS: [&str; 3] = ["scope", "structure_cut", "catalog_axes"];
+    let state_fields = if generated_state.kind() == Kind::Object {
+        Some(lookup_subset_fields(
+            store,
+            generated_state,
+            &STATE_CHECK_FIELDS,
+        )?)
+    } else {
+        None
+    };
+    let state_scope_digest = match &state_fields {
+        Some(sf) => get_field(sf, "scope")?.digest().map_err(err)?,
+        None => field_ref(store, generated_state, "scope")?
             .digest()
-            .map_err(err)?
-            != want_scope
+            .map_err(err)?,
+    };
+    if get_field(&ev_fields, "scope")?.digest().map_err(err)? != want_scope
+        || state_scope_digest != want_scope
     {
         return Err(err("目录证据/生成态 scope 不是同一冻结根"));
     }
-    if text_ref(store, generated_state, "structure_cut")? != metadata.structure_cut {
+    let state_cut = match &state_fields {
+        Some(sf) => text_from_ref_view(store, get_field(sf, "structure_cut")?, "structure_cut")?,
+        None => text_ref(store, generated_state, "structure_cut")?,
+    };
+    if state_cut != metadata.structure_cut {
         return Err(err("生成态 structure_cut 与冻结生成 cut 不同"));
     }
-    let axes = field_ref(store, evidence.view(), "axes")?;
-    let state_axes = generated_axes_ref(store, generated_state)?;
+    let axes = ev_fields
+        .get_admitted(store, "axes")
+        .map_err(err)?
+        .ok_or_else(|| err("缺字段 axes"))?;
+    drop(ev_fields);
+    let state_axes = match &state_fields {
+        Some(sf) => {
+            let sa = sf
+                .get_admitted(store, "catalog_axes")
+                .map_err(err)?
+                .ok_or_else(|| err("缺字段 catalog_axes"))?;
+            if sa.kind() != Kind::Object || sa.extent() != Some(AXIS_IDS.len() as u64) {
+                return Err(err(format!(
+                    "生成态 catalog_axes 不是13轴对象（extent={:?}）",
+                    sa.extent()
+                )));
+            }
+            sa
+        }
+        None => generated_axes_ref(store, generated_state)?,
+    };
+    drop(state_fields);
     if axes.digest().map_err(err)? != state_axes.digest().map_err(err)? {
         return Err(err(
             "catalog_evidence.axes 不是同次最终生成态的 catalog_axes 值边",
@@ -731,6 +956,7 @@ fn verify_cut_in_store(
             .try_push(bj::WithdrawalWire::new(v).map_err(err)?)
             .map_err(err)?;
     }
+    let cc056_changes = lookup_subset_fields(store, cc056.evidence.view(), &CC056_CHANGE_FIELDS)?;
     for (key, want) in [
         (
             "raw_revisions",
@@ -739,7 +965,10 @@ fn verify_cut_in_store(
         ("withdrawals", withdrawals_view.view()),
         ("replaces", replaces),
     ] {
-        let got = array_field_ref(store, &cc056.evidence, key)?;
+        let got = get_field(&cc056_changes, key)?;
+        if got.kind() != Kind::Array {
+            return Err(err(format!("{key} 不是数组")));
+        }
         if got.digest().map_err(err)?
             != super::history::hash_json_in_store(store, want, deadline, budget)?
         {
@@ -766,19 +995,21 @@ pub(super) fn stage_current(
     axes: &ContentRef,
 ) -> Result<(), String> {
     let entries = axes_entries(store, axes)?;
+    let mut stmt = tx
+        .prepare_cached(
+            "UPDATE catalog SET impl_status=?1,proof_status=?2,run_status=?3,evidence_json=?4 WHERE catalog_id=?5",
+        )
+        .map_err(|e| err(format!("准备暂写 catalog 失败：{e}")))?;
     for entry in &entries {
         let reference = reference_text(store, &entry.evidence)?;
-        let changed = tx
-            .execute(
-                "UPDATE catalog SET impl_status=?1,proof_status=?2,run_status=?3,evidence_json=?4 WHERE catalog_id=?5",
-                params![
-                    entry.impl_status.as_str(),
-                    entry.proof_status.as_str(),
-                    entry.run_status.as_str(),
-                    reference.as_str(),
-                    entry.id
-                ],
-            )
+        let changed = stmt
+            .execute(params![
+                entry.impl_status.as_str(),
+                entry.proof_status.as_str(),
+                entry.run_status.as_str(),
+                reference.as_str(),
+                entry.id
+            ])
             .map_err(|e| err(format!("暂写 catalog[{}] 失败：{e}", entry.id)))?;
         if changed != 1 {
             return Err(err(format!(
