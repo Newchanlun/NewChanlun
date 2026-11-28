@@ -93,8 +93,21 @@ instance (s1 s2 s3 : Segment) : Decidable (DirAlternates s1 s2 s3) := by
 theorem dirAlternates_first_third_same (s1 s2 s3 : Segment) (h : DirAlternates s1 s2 s3) :
     s1.direction = s3.direction := by
   obtain ⟨h12, h23⟩ := h
-  cases hd1 : s1.direction <;> cases hd2 : s2.direction <;> cases hd3 : s3.direction <;>
-    simp_all <;> exact absurd hd2 (by simp_all)
+  cases hd1 : s1.direction with
+  | up =>
+    cases hd2 : s2.direction with
+    | up => exact absurd (hd1.trans hd2.symm) h12
+    | down =>
+      cases hd3 : s3.direction with
+      | up => rfl
+      | down => exact absurd (hd2.trans hd3.symm) h23
+  | down =>
+    cases hd2 : s2.direction with
+    | down => exact absurd (hd1.trans hd2.symm) h12
+    | up =>
+      cases hd3 : s3.direction with
+      | down => rfl
+      | up => exact absurd (hd2.trans hd3.symm) h23
 
 /-! ═══════════════════════════════════════════════════════════════════════
     § 2. 前两段核心 + 第三段贯穿前两段核心（派生谓词，637号 A→B 降级）
@@ -178,18 +191,34 @@ theorem centerConfirmed_iff_trueCenterCore (s1 s2 s3 : Segment) :
   ★交叉不等式 `d₃≤g₃` 由 `h3 : d3 ≤ g3` 永真补齐——这是 9 个 pairwise 不等式中第 9 个被段不变量
   吸收的那个（rust center.rs:25-32 同源 codex L0 核验）。
 -/
+private theorem tmax_le_iff (a b c : Tick) : tmax a b ≤ c ↔ a ≤ c ∧ b ≤ c := by
+  unfold tmax
+  split
+  · rename_i h
+    exact ⟨fun hac => ⟨hac, Int.le_trans h hac⟩, fun ⟨hac, _⟩ => hac⟩
+  · rename_i h
+    have hab : a ≤ b := Int.le_of_not_le h
+    exact ⟨fun hbc => ⟨Int.le_trans hab hbc, hbc⟩, fun ⟨_, hbc⟩ => hbc⟩
+
+private theorem le_tmin_iff (a b c : Tick) : a ≤ tmin b c ↔ a ≤ b ∧ a ≤ c := by
+  unfold tmin
+  split
+  · rename_i h
+    exact ⟨fun hab => ⟨hab, Int.le_trans hab h⟩, fun ⟨hab, _⟩ => hab⟩
+  · rename_i h
+    have hcb : c ≤ b := Int.le_of_not_le h
+    exact ⟨fun hac => ⟨Int.le_trans hac hcb, hac⟩, fun ⟨_, hac⟩ => hac⟩
+
 private theorem core_equiv_abstract (d1 g1 d2 g2 d3 g3 : Tick)
-    (h1 : d1 ≤ g1) (h2 : d2 ≤ g2) (h3 : d3 ≤ g3) :
+    (_h1 : d1 ≤ g1) (_h2 : d2 ≤ g2) (h3 : d3 ≤ g3) :
     (tmax (tmax d1 d2) d3 ≤ tmin (tmin g1 g2) g3) ↔
     ((tmax d1 d2 ≤ tmin g1 g2) ∧ (d3 ≤ tmin g1 g2 ∧ tmax d1 d2 ≤ g3)) := by
-  unfold tmax tmin
-  simp only [Tick] at *
+  simp only [tmax_le_iff, le_tmin_iff]
   constructor
-  · intro h
-    refine ⟨?_, ?_, ?_⟩ <;> (repeat' split) <;> (repeat' split at h) <;> omega
-  · intro ⟨ha, hb, hc⟩
-    (repeat' split) <;> (repeat' split at ha) <;> (repeat' split at hb) <;>
-      (repeat' split at hc) <;> omega
+  · intro ⟨⟨⟨⟨h11, h21⟩, h31⟩, ⟨⟨h12, h22⟩, h32⟩⟩, ⟨h13, h23⟩, _⟩
+    exact ⟨⟨⟨h11, h21⟩, ⟨h12, h22⟩⟩, ⟨h31, h32⟩, ⟨h13, h23⟩⟩
+  · intro ⟨⟨⟨h11, h21⟩, ⟨h12, h22⟩⟩, ⟨h31, h32⟩, ⟨h13, h23⟩⟩
+    exact ⟨⟨⟨⟨h11, h21⟩, h31⟩, ⟨⟨h12, h22⟩, h32⟩⟩, ⟨h13, h23⟩, h3⟩
 
 /--
   **★第三段贯穿吸收进全三段核心非空（L0 等价，637号 A→B 迁移核心恒等式）** ——
