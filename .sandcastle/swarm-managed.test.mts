@@ -1,6 +1,6 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { cpSync, mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -8,12 +8,22 @@ import { runManagedSwarmTicket, type SwarmTicketOptions } from "./swarm-managed.
 import { verifyManagedRust } from "./managed-commit.mts";
 import { hostGit, ReviewPromptTooLargeError } from "./review-context.mts";
 const report = (files: string[], status = "ready") => `<sandcastle-result>${JSON.stringify({ status, files, verification: [] })}</sandcastle-result>`;
+let templateDir: string | undefined;
+function getTemplateRepo(): string {
+  if (!templateDir) {
+    templateDir = mkdtempSync(join(tmpdir(), "nc-swarm-managed-tpl-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: templateDir, encoding: "utf8", stdio: "pipe" });
+    git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+    git("commit", "--allow-empty", "-m", "base"); git("checkout", "-b", "sandcastle/issue-1617");
+  }
+  return templateDir;
+}
+after(() => { if (templateDir) rmSync(templateDir, { recursive: true, force: true }); });
 function fixture(t: { after: (fn: () => void) => void }) {
   const cwd = mkdtempSync(join(tmpdir(), "nc-swarm-managed-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  cpSync(getTemplateRepo(), cwd, { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
-  git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
-  git("commit", "--allow-empty", "-m", "base"); git("checkout", "-b", "sandcastle/issue-1617");
   const logged: Record<string, unknown>[] = []; const notified: string[] = [];
   const opts: SwarmTicketOptions = {
     cwd, branch: "sandcastle/issue-1617", issue: 1617,
