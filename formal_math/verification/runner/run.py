@@ -18,6 +18,8 @@ if not sys.flags.isolated:
             pass
     posix._exit(2)
 
+import codecs  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
@@ -26,6 +28,7 @@ import selectors  # noqa: E402
 import signal  # noqa: E402
 import stat  # noqa: E402
 import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 import unicodedata  # noqa: E402
 
@@ -54,6 +57,10 @@ TIMEOUT = {"git": 600, "precheck": 600, "auditor": 3600, "headers": 600, "shape"
            "env": 3600}
 LIMIT = 400
 BUILD_LOG_LIMIT = 64 * 1024 * 1024
+MAX_BLOB_BYTES = 16 * 1024 * 1024
+MAX_FETCH_BYTES = 128 * 1024 * 1024
+BLOB_CHUNK_BYTES = 64 * 1024
+HEAD_TOOLCHAINS = (b"lean-toolchain", b"verification/auditor/lean-toolchain")
 
 
 # 一次运行的全局状态：当前步骤、标准输出是否写失败过、结果行是否已写过、正在运行的子进程。
@@ -200,8 +207,12 @@ def call(argv, timeout, code, tag, merge=False, **kw):
 
 # ---- git 对象 ----
 
+def git_argv(ctx, *args):
+    return [b"git", b"-C", ctx.repo, b"-c", b"advice.graftFileDeprecated=false", *args]
+
+
 def git(ctx, *args, data=None, ok=(0,)):
-    argv = [b"git", b"-C", ctx.repo, b"-c", b"advice.graftFileDeprecated=false", *args]
+    argv = git_argv(ctx, *args)
     kw = {"input": data} if data is not None else {}
     p = call(argv, TIMEOUT["git"], "GIT", "git", env=GIT_ENV, stdout=subprocess.PIPE, **kw)
     if p.returncode not in ok:
@@ -234,23 +245,101 @@ def tree(ctx, rev, path):
     return entries
 
 
-def blobs(ctx, oids):
-    """`cat-file --batch` 按对象名取原始字节，不做任何过滤或换行转换；对象类型逐个核对为 blob。"""
+def blob_sizes(ctx, oids):
+    """先只读对象元数据；总量按写出的文件计，同一个 blob 写两次也计两次。"""
     uniq = sorted(set(oids))
-    out = git(ctx, b"cat-file", b"--batch", data=b"".join(o + b"\n" for o in uniq))[1]
-    result, pos = {}, 0
-    for oid in uniq:
-        end = out.find(b"\n", pos)
-        head = out[pos:end].split(b" ")
-        if end < 0 or len(head) != 3 or head[0] != oid or head[1] != b"blob" or not head[2].isdigit():
-            raise Fault("GIT", oid, "cat-file 输出无法解读或对象不是 blob")
+    if not all(OID.fullmatch(oid) for oid in uniq):
+        raise Fault("GIT", b"cat-file", "对象名不合法")
+    out = git(ctx, b"cat-file", b"--batch-check=%(objectname) %(objecttype) %(objectsize)",
+              data=b"".join(o + b"\n" for o in uniq))[1].split(b"\n")
+    if len(out) != len(uniq) + 1 or out[-1]:
+        raise Fault("GIT", b"cat-file", "对象元数据行数不符或缺尾换行")
+    sizes = {}
+    for oid, line in zip(uniq, out):
+        head = line.split(b" ")
+        if len(head) != 3 or head[:2] != [oid, b"blob"] or not re.fullmatch(rb"[0-9]{1,20}", head[2]):
+            raise Fault("GIT", oid, "对象元数据无法解读或对象不是 blob")
         size = int(head[2])
-        result[oid], pos = out[end + 1:end + 1 + size], end + 2 + size
-        if out[pos - 1:pos] != b"\n":
-            raise Fault("GIT", oid, "cat-file 输出无法解读")
-    if pos != len(out):
-        raise Fault("GIT", b"cat-file", "输出多出字节")
-    return result
+        if size > MAX_BLOB_BYTES:
+            raise Fault("FETCH_LIMIT", oid, "单文件 %d 字节，超过 %d 字节上限" % (size, MAX_BLOB_BYTES))
+        sizes[oid] = size
+    total = sum(sizes[oid] for oid in oids)
+    if total > MAX_FETCH_BYTES:
+        raise Fault("FETCH_LIMIT", b"cat-file", "待取文件共 %d 字节，超过 %d 字节上限" % (total, MAX_FETCH_BYTES))
+    return sizes
+
+
+@contextmanager
+def blob_stream(ctx, oids, sizes):
+    """一个 batch 进程按请求顺序送原始内容；调用方逐对象、逐块消费，不把整批放进内存。"""
+    deadline = time.monotonic() + TIMEOUT["git"]
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise Fault("GIT", b"cat-file", "读取对象超时")
+        return left
+
+    # 请求经临时文件送入，避免同时向两个有界管道读写而互锁。
+    with tempfile.TemporaryFile(dir=ctx.workdir) as request:
+        for oid in oids:
+            request.write(oid + b"\n")
+        request.seek(0)
+        try:
+            p = subprocess.Popen(git_argv(ctx, b"cat-file", b"--batch"), env=GIT_ENV, stdin=request,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            raise Fault("GIT", b"cat-file", e.strerror) from e
+        STATE["child"] = p
+        try:
+            with p.stdout as pipe, selectors.DefaultSelector() as sel:
+                fd = pipe.fileno()
+                sel.register(fd, selectors.EVENT_READ)
+
+                def take(n):
+                    if not sel.select(remaining()):
+                        raise Fault("GIT", b"cat-file", "读取对象超时")
+                    return os.read(fd, n)
+
+                def expect(want, oid):
+                    # 头行和尾换行长度已知；不允许元数据与实际响应不符。
+                    while want:
+                        piece = take(len(want))
+                        if not piece or not want.startswith(piece):
+                            raise Fault("GIT", oid, "对象头或尾换行与预检不符")
+                        want = want[len(piece):]
+
+                def chunks(oid):
+                    left = sizes[oid]
+                    expect(b"%s blob %d\n" % (oid, left), oid)
+                    while left:
+                        data = take(min(left, BLOB_CHUNK_BYTES))
+                        if not data:
+                            raise Fault("GIT", oid, "对象内容提前结束")
+                        left -= len(data)
+                        yield data
+                    expect(b"\n", oid)
+
+                yield chunks
+                if take(1):
+                    raise Fault("GIT", b"cat-file", "输出多出字节")
+            if p.wait(timeout=remaining()):
+                raise Fault("GIT", b"cat-file", "git 退出 %d" % p.returncode)
+        except subprocess.TimeoutExpired:
+            raise Fault("GIT", b"cat-file", "读取对象超时") from None
+        finally:
+            if p.returncode is None:
+                kill_group(p)
+                p.wait()
+            STATE["child"] = None
+
+
+def blobs(ctx, oids):
+    """预检、工具链、声明锁等需在内存使用的少量对象，也先检查大小。"""
+    uniq = sorted(set(oids))
+    sizes = blob_sizes(ctx, uniq)
+    with blob_stream(ctx, uniq, sizes) as chunks:
+        return {oid: b"".join(chunks(oid)) for oid in uniq}
 
 
 # ---- JSON：严格 UTF-8、拒绝重复键、拒绝孤立代理项与非有限数 ----
@@ -296,7 +385,7 @@ def mkdir(path, mode):
 
 
 def write_files(root, files):
-    """逐个新建文件，模式固定 0644、目录 0755（不受 umask 影响）；已存在或遇到符号链接即失败。"""
+    """逐个写字节串或字节块流；文件 0644、目录 0755，已存在或遇到符号链接即失败。"""
     made = set()
     for rel, data in files:
         parts = rel.split("/")
@@ -309,9 +398,10 @@ def write_files(root, files):
         fd = os.open(os.path.join(root, *parts), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
         try:
             os.fchmod(fd, 0o644)
-            view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view):]
+            for chunk in (data,) if isinstance(data, bytes) else data:
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(fd, view):]
         finally:
             os.close(fd)
 
@@ -327,16 +417,32 @@ def inside(a, b):
 
 # ---- 沙箱 ----
 
+def sandbox_mounts(ctx, binds):
+    """空根只挂系统运行所需路径和当前步骤的输入；不从宿主机根目录继承任何东西。"""
+    mounts = [("--ro-bind", "/usr", "/usr")]
+    for path in ("/bin", "/lib", "/lib64", "/lib32", "/sbin"):
+        if os.path.islink(path):
+            mounts.append(("--symlink", os.readlink(path), path))
+        elif os.path.isdir(path):
+            mounts.append(("--ro-bind", path, path))
+    for path in ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+                 "/etc/alternatives", "/etc/passwd", "/etc/group"):
+        if os.path.exists(path):
+            mounts.append(("--ro-bind", path, path))
+    mounts += binds + [("--ro-bind", ctx.prefix, ctx.prefix)]
+    for kind, src, _ in mounts:
+        if kind != "--symlink":
+            real = os.path.realpath(src)
+            if any(inside(g, real) or inside(real, g) for g in ctx.repo_paths):
+                raise Fault("SANDBOX", src, "沙箱挂载与仓库检出或 git 目录重叠")
+    return [b"bwrap", b"--tmpfs", b"/tmp", b"--dir", b"/tmp/home", b"--dev", b"/dev", b"--proc", b"/proc",
+            *(os.fsencode(a) for mount in mounts for a in mount)]
+
+
 def sandbox(ctx, argv, binds, env, cwd, timeout, code, tag, merge=False):
-    """bwrap：根只读，/home 等换成空 tmpfs，整个工作目录先盖成空 tmpfs 再按需回绑；断网、清环境。
-    沙箱里的进程被信号终止时 bwrap 以 128+n 退出，这里统一归入无法判定。"""
+    """bwrap：最小挂载、断网、清环境；沙箱顶层进程被信号终止统一归入无法判定。"""
     fs = os.fsencode
-    args = [b"bwrap", b"--ro-bind", b"/", b"/"]
-    for hidden in ("/home", "/root", "/run", "/var", "/tmp", ctx.workdir):
-        args += [b"--tmpfs", fs(hidden)]
-    args += [b"--dir", b"/tmp/home", b"--dev", b"/dev", b"--proc", b"/proc"]
-    for kind, src, dst in binds + [("--ro-bind", ctx.prefix, ctx.prefix)]:
-        args += [fs(kind), fs(src), fs(dst)]
+    args = sandbox_mounts(ctx, binds)
     args.append(b"--clearenv")
     base = {"HOME": "/tmp/home", "TMPDIR": "/tmp", "LANG": "C.UTF-8",
             "PATH": os.path.join(ctx.prefix, "bin") + ":/usr/bin:/bin"}
@@ -395,7 +501,14 @@ def step_fetch(ctx):
     head_tree = base_tree if ctx.base == ctx.head else tree(ctx, ctx.head, b"formal_math")
     base_configs = [e for e in base_tree if e[0] in CONFIGS]
     head_configs = [e for e in head_tree if e[0] in CONFIGS]
-    use_head = ctx.approved and ctx.prechecked_role == b"infra" and head_configs != base_configs
+    approved_infra = ctx.approved and ctx.prechecked_role == b"infra"
+    use_head = approved_infra and head_configs != base_configs
+    if approved_infra:
+        pins = {rel: oid for rel, mode, kind, oid in head_tree
+                if rel in HEAD_TOOLCHAINS and mode == b"100644" and kind == b"blob"}
+        if len(pins) != len(HEAD_TOOLCHAINS):
+            raise Fault("TOOLCHAIN_MISMATCH", b"formal_math/lean-toolchain", "候选提交须有两份普通工具链文件")
+        ctx.head_toolchains = tuple(pins[path] for path in HEAD_TOOLCHAINS)
     config_entries = head_configs if use_head else base_configs
     source = "已批准的 infra 候选提交" if use_head else "基线"
     configs = []
@@ -420,16 +533,20 @@ def step_fetch(ctx):
         return reds, ""
     if not content:
         raise Fault("NO_CONTENT", ctx.head, "被审提交没有内容文件")
-    data = blobs(ctx, [oid for _, oid in trusted_files + configs + content])
-    for rel, oid in content:
-        try:
-            data[oid].decode("utf-8")
-        except UnicodeDecodeError:
-            reds.append(("CONTENT_ENCODING", "formal_math/" + rel, "内容文件不是合法的 UTF-8"))
+    oids = [oid for _, oid in trusted_files + configs + content]
+    sizes = blob_sizes(ctx, oids)
+    ctx.trusted_dir, ctx.audited = os.path.join(ctx.workdir, "trusted"), os.path.join(ctx.workdir, "audited")
+    mkdir(ctx.trusted_dir, 0o700)
+    mkdir(ctx.audited, 0o700)
+    with blob_stream(ctx, oids, sizes) as chunks:
+        write_files(ctx.trusted_dir, (("verification/" + rel, chunks(oid)) for rel, oid in trusted_files))
+        write_files(ctx.audited, ((rel, chunks(oid)) for rel, oid in configs))
+        write_files(ctx.audited, ((rel, utf8_chunks(chunks(oid), rel, reds)) for rel, oid in content))
     if reds:
         return reds, ""
     # 第 7 步的搜索路径从本次配置的清单对象定下来，不读构建后的工作区来决定输入。
-    manifest = strict_json(data[dict(configs)["lake-manifest.json"]], "INPUT", "formal_math/lake-manifest.json")
+    manifest = strict_json(read(os.path.join(ctx.audited, "lake-manifest.json")), "INPUT",
+                           "formal_math/lake-manifest.json")
     try:
         names = [p["name"] for p in manifest["packages"]]
     except (KeyError, TypeError):
@@ -440,20 +557,39 @@ def step_fetch(ctx):
     if missing:
         raise Fault("PACKAGES", os.path.join(ctx.packages, missing[0]), "依赖目录缺构建清单里的包")
     ctx.package_names = names
-    ctx.trusted_dir, ctx.audited = os.path.join(ctx.workdir, "trusted"), os.path.join(ctx.workdir, "audited")
-    mkdir(ctx.trusted_dir, 0o700)
-    mkdir(ctx.audited, 0o700)
-    write_files(ctx.trusted_dir, [("verification/" + rel, data[oid]) for rel, oid in trusted_files])
-    write_files(ctx.audited, [(rel, data[oid]) for rel, oid in configs + content])
     ctx.content = sorted(rel for rel, _ in content)
     ctx.modules = [rel[:-5].replace("/", ".") for rel in ctx.content]
     ctx.lock = object_at(ctx, ctx.head, b"formal_math/statement-lock.json")
     return [], "受信 %d 个文件，内容 %d 个模块，配置取自%s" % (len(trusted_files), len(content), source)
 
 
+def utf8_chunks(chunks, rel, reds):
+    """边写边检查 UTF-8（字符可跨块）；即使判红也读完，以继续核对 git 协议与其余文件。"""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    for chunk in chunks:
+        if decoder is not None:
+            try:
+                decoder.decode(chunk)
+            except UnicodeDecodeError:
+                decoder = None
+        yield chunk
+    if decoder is not None:
+        try:
+            decoder.decode(b"", final=True)
+            return
+        except UnicodeDecodeError:
+            pass
+    reds.append(("CONTENT_ENCODING", "formal_math/" + rel, "内容文件不是合法的 UTF-8"))
+
+
 # ---- 第 3 步：构建审计程序（受信目录，来源与配置都取自受信提交） ----
 
 def step_auditor(ctx):
+    if ctx.approved and ctx.prechecked_role == b"infra":
+        main_pin, auditor_pin = ctx.head_toolchains
+        pins = blobs(ctx, [main_pin, auditor_pin])
+        if pins[main_pin] != pins[auditor_pin]:
+            raise Fault("TOOLCHAIN_MISMATCH", b"formal_math/" + HEAD_TOOLCHAINS[1], "候选提交的两份工具链文件不同")
     pkg = os.path.join(ctx.trusted_dir, "verification", "auditor")
     toolchain = read(os.path.join(ctx.audited, "lean-toolchain"))
     if not os.path.isfile(os.path.join(pkg, "lean-toolchain")) or read(os.path.join(pkg, "lean-toolchain")) != toolchain:
@@ -558,7 +694,7 @@ def allowed_edge(src, dst, local, transitive=False):
 
 def step_headers(ctx):
     ctx.auditor_args = [x for rel, mod in zip(ctx.content, ctx.modules) for x in (mod, rel)]
-    binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.trusted_dir, ctx.trusted_dir)]
+    binds = [("--ro-bind", ctx.audited, ctx.audited), ("--ro-bind", ctx.auditor, ctx.auditor)]
     findings, rows = run_auditor(ctx, "headers", binds, {}, TIMEOUT["headers"])
     source = {}
     for row in rows:
@@ -819,15 +955,17 @@ def parse(argv):
 def prepare(argv):
     opts, approved, until = parse(argv)
     ctx = Run()
-    ctx.repo, ctx.approved, ctx.until, ctx.branch = os.path.abspath(opts[b"--repo"]), approved, until, opts[b"--branch"]
+    ctx.repo, ctx.approved, ctx.until, ctx.branch = os.path.realpath(opts[b"--repo"]), approved, until, opts[b"--branch"]
     ctx.base, ctx.head = commit(ctx, opts[b"--base"]), commit(ctx, opts[b"--head"])
     ctx.bootstrap = b"--bootstrap-trusted-from" in opts
     ctx.trusted = commit(ctx, opts[b"--bootstrap-trusted-from"]) if ctx.bootstrap else ctx.base
     ctx.workdir, ctx.packages = (os.path.realpath(os.fsdecode(opts[k])) for k in (b"--workdir", b"--packages"))
-    guarded = [os.path.realpath(os.fsdecode(out.strip()))
-               for flag in (b"--show-toplevel", b"--absolute-git-dir", b"--git-common-dir")
-               for rc, out in [git(ctx, b"rev-parse", b"--path-format=absolute", flag, ok=(0, 128))] if rc == 0]
-    if any(inside(ctx.workdir, g) or inside(g, ctx.workdir) for g in guarded + [ctx.packages]):
+    ctx.repo_paths = [os.fsdecode(ctx.repo)]
+    for flag, ok in ((b"--show-toplevel", (0, 128)), (b"--absolute-git-dir", (0,)), (b"--git-common-dir", (0,))):
+        rc, out = git(ctx, b"rev-parse", b"--path-format=absolute", flag, ok=ok)
+        if rc == 0:
+            ctx.repo_paths.append(os.path.realpath(os.fsdecode(out.removesuffix(b"\n"))))
+    if any(inside(ctx.workdir, g) or inside(g, ctx.workdir) for g in ctx.repo_paths + [ctx.packages]):
         raise Fault("WORKDIR", ctx.workdir, "工作目录必须在仓库检出、git 目录与依赖目录之外，且互不包含")
     if not os.path.isdir(ctx.packages):
         raise Fault("PACKAGES", ctx.packages, "依赖目录不存在")

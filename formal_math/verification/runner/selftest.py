@@ -9,9 +9,11 @@
 - `--mutants`：在临时副本里逐一改弱运行脚本或审计程序，每种弱化都必须让骨架自测失败；先断言未改弱的副本全过。
 共享依赖目录只读使用：凡是要验证「依赖目录写不进」的用例都用临时目录里自建的假依赖目录（lite 基线，无依赖包）。
 须先 `source scripts/fm_env.sh`，并整体包在 `flock <lean.lock> guard.sh` 里跑。"""
+import errno
 import json
 import os
 import signal
+import socket
 import stat
 import re
 import runpy
@@ -55,17 +57,38 @@ while [ $# -gt 0 ]; do
   shift 3
 done
 """
+PROBE_PATHS = r"""
+import os, socket, sys
+for name, path in zip(("host", "repo", "git"), sys.argv[1:4]):
+    try:
+        os.stat(path)
+        print(name, "visible")
+    except OSError as e:
+        print(name, e.errno)
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.settimeout(2)
+    try:
+        client.connect(sys.argv[4])
+        print("socket connected")
+    except OSError as e:
+        print("socket", e.errno)
+"""
 
 def probe(ctx, step, binds, env, cwd):
     cfg = json.loads(os.environ["FM_SELFTEST_PROBE"])
     pkgs = ctx.audited + "/.lake/packages" if step == "build" else ctx.packages
-    args = ["see", "host", cfg["host"], "see", "repo", cfg["repo"],
-            "see", "trusted", ctx.trusted_dir + "/verification/runner/run.py",
+    args = ["see", "trusted", ctx.trusted_dir + "/verification/runner/run.py",
             "write", "src", ctx.audited + "/probe-src", "write", "lake", ctx.audited + "/.lake/probe-lake",
             "write", "packages", pkgs + "/probe-pkg", "write", "trusted", ctx.trusted_dir + "/probe-trusted"]
     p = orig(ctx, ["/bin/sh", "-c", PROBE, "probe", *args], binds, env, cwd, 60, "PROBE", "probe")
+    paths = orig(ctx, ["/usr/bin/python3", "-I", "-c", PROBE_PATHS,
+                       *(cfg[key] for key in ("host", "repo", "git", "socket"))],
+                 binds, env, cwd, 60, "PROBE", "probe-paths")
+    p.check_returncode()
+    paths.check_returncode()
     with open(cfg["out"], "a") as f:
-        f.write(json.dumps({"step": step, "lines": p.stdout.decode(errors="replace").splitlines()}) + "\n")
+        f.write(json.dumps({"step": step, "lines": p.stdout.decode().splitlines(),
+                            "paths": dict(line.split() for line in paths.stdout.decode().splitlines())}) + "\n")
 
 def patched(ctx, cmd, binds, env, cwd, *a, **k):
     if mode == "build-output-limit" and cmd[:2] == ["lake", "build"]:
@@ -108,6 +131,14 @@ if mode == "timeout":
     run.TIMEOUT["build"] = 30
 if mode == "build-output-limit":
     run.BUILD_LOG_LIMIT = 8192
+if mode.startswith("fetch-limit:"):
+    run.MAX_BLOB_BYTES, run.MAX_FETCH_BYTES = map(int, mode.split(":")[1:])
+    real_stream = run.blob_stream
+    def record_stream(*args):
+        if run.STATE["step"] == "fetch":
+            run.emit(2, "LOG", "selftest", "已启动内容流")
+        return real_stream(*args)
+    run.blob_stream = record_stream
 if mode == "late-signal":
     # 结果行写出之后、主路径返回之前给自己发 SIGTERM：处理函数里的 finish() 不得再写第二行结果行。
     import signal
@@ -301,7 +332,7 @@ class Suite:
             [sys.executable, "-I", os.path.join(self.tmp, "driver.py"), RUN, mode, *argv]
         p = subprocess.run(cmd, capture_output=True, env={"PATH": os.environ["PATH"], CANARY: "leak-canary",
                                                           "HOME": os.environ.get("HOME", "/"), **(env or {})},
-                           preexec_fn=None if umask is None else (lambda: os.umask(umask)))
+                           umask=umask if umask is not None else -1)
         res = parse_result(p)
         res["work"] = work
         if not keep:
@@ -371,6 +402,11 @@ def snapshot(root):
 
 # ---- 形状门红例目录：（相对 formal_math 的路径，导入，正文，期望红码集合） ----
 T, F = "Chan/Thm/", "Chan/Final/"
+GUARD_WARNING = ("info: fun x => 0 : Nat → Nat\n---\nwarning: Variable name `x` is not explicitly referenced.\n\n"
+                 "Hint: The binding can be removed (if unused) or named `_` (if used implicitly). "
+                 "Alternatively, prefix the name with `_` to silence this warning:\n"
+                 "  [apply] _x\n\nNote: This linter can be disabled with `set_option linter.unusedVariables false`")
+GUARD_CHECK = "#guard_msgs in\n#check (fun (x : Nat) => 0)"
 SHAPE_RED = [
     # 命令白名单：本地元编程与不在名单里的命令
     (T + "CmdMacro.lean", (), 'macro "fm_m" : term => `(1)', {"SHAPE_COMMAND"}),
@@ -401,6 +437,11 @@ SHAPE_RED = [
      {"SHAPE_DERIVING"}),
     # #guard_msgs 的限制
     (F + "GuardSpec.lean", (), "/-- info: Nat : Type -/\n#guard_msgs (drop warning) in\n#check Nat", {"SHAPE_GUARD_MSGS"}),
+    (F + "GuardWarning.lean", (), "/--\n" + GUARD_WARNING + "\n-/\n" + GUARD_CHECK, {"SHAPE_GUARD_MSGS"}),
+    (F + "GuardWarningFolded.lean", (), "/-- " + GUARD_WARNING.replace("\n", " ") + " -/\n" + GUARD_CHECK,
+     {"SHAPE_GUARD_MSGS"}),
+    (F + "GuardError.lean", (), "/-- error: Unknown identifier `fmUnknown` -/\n#guard_msgs in\n#check fmUnknown",
+     {"SHAPE_GUARD_MSGS"}),
     (F + "GuardInner.lean", (), "#guard_msgs in\nexample : True := trivial", {"SHAPE_GUARD_MSGS"}),
     (F + "PrintAxiomsBare.lean", (), "#print axioms Nat.add", {"SHAPE_GUARD_MSGS"}),
     (T + "GuardOutsideFinal.lean", (), "/-- info: Nat : Type -/\n#guard_msgs in\n#check Nat", {"SHAPE_COMMAND"}),
@@ -789,30 +830,62 @@ def skeleton(s):
     @case("S22")
     def _():
         probe_out = os.path.join(s.tmp, "probe-%d.jsonl" % id(object()))
-        cfg = {"out": probe_out, "host": s.host_canary, "repo": os.path.join(s.repo.path, ".git")}
-        r = s.run("S22-probe", lite_green, mode="probe", lite=True, env={"FM_SELFTEST_PROBE": json.dumps(cfg)})
+        # 真正传给 --repo 的目录在 workdir 外；套接字使用短路径以满足 sockaddr_un 的长度限制。
+        repo_canary = os.path.join(s.repo.path, "pr2312-s22-canary")
+        with open(repo_canary, "x") as f:
+            f.write("repo canary\n")
+        with tempfile.TemporaryDirectory(prefix="fm-sock-") as short, \
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            endpoint = os.path.join(short, "s")
+            listener.bind(endpoint)
+            listener.listen(8)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as host_client:
+                host_client.connect(endpoint)
+                listener.accept()[0].close()
+            cfg = {"out": probe_out, "host": s.host_canary, "repo": repo_canary,
+                   "git": os.path.join(s.repo.path, ".git"), "socket": endpoint}
+            r = s.run("S22-probe", lite_green, mode="probe", lite=True, env={"FM_SELFTEST_PROBE": json.dumps(cfg)})
         seen = {}
         if os.path.exists(probe_out):
-            for line in open(probe_out):
-                row = json.loads(line)
-                seen[row["step"]] = row["lines"]
+            with open(probe_out) as f:
+                for line in f:
+                    row = json.loads(line)
+                    seen[row["step"]] = row
         allowed = {"HOME", "TMPDIR", "LANG", "PATH", "PWD", "SHLVL", "_", "OLDPWD", "LEAN_PATH", "LEAN_SYSROOT"}
 
         def facts(step):
-            lines = seen.get(step, [])
+            lines = seen.get(step, {}).get("lines", [])
             net = [x[4:] for x in lines if x.startswith("NET:")]
             env = [x[4:] for x in lines if x.startswith("ENV:")]
             return (net[0].strip(",").split(",") if net else None,
                     set(env[0].strip(",").split(",")) if env else None,
                     {x[4:] for x in lines if x.startswith("SEE:")}, {x[6:] for x in lines if x.startswith("WROTE:")})
         b, e, h = facts("build"), facts("env"), facts("shape")
-        good = r["rc"] == 0 and b[0] == ["lo"] and e[0] == ["lo"] and h[0] == ["lo"] and b[1] is not None and \
+        paths = {step: row["paths"] for step, row in seen.items()}
+        missing = dict.fromkeys(("host", "repo", "git", "socket"), str(errno.ENOENT))
+        good = paths == dict.fromkeys(("shape", "build", "env"), missing) and \
+            r["rc"] == 0 and b[0] == ["lo"] and e[0] == ["lo"] and h[0] == ["lo"] and b[1] is not None and \
             b[1] <= allowed and e[1] is not None and e[1] <= allowed and h[1] is not None and h[1] <= allowed and \
             b[2] == set() and e[2] == {"trusted"} and h[2] == {"trusted"} and \
             b[3] == {"lake"} and e[3] == set() and h[3] == set()
-        return check("S22 沙箱探针（第 5、6、7 步同挂载同环境）：只有回环网卡、环境已清、宿主机目录与仓库不可见、"
+        return check("S22 沙箱探针（第 5、6、7 步）：只有回环网卡、环境已清、仓库哨兵／.git／宿主机套接字均 ENOENT、"
                      "第 6 步只有 .lake 可写、第 5、7 步全只读、受信目录第 6 步不可见", good, r,
-                     "第5步=%s 第6步=%s 第7步=%s" % (h, b, e))
+                     "第5步=%s 第6步=%s 第7步=%s 路径=%s" % (h, b, e, paths))
+
+    @case("S22b")
+    def _():
+        repo = Repo(os.path.join(s.tmp, "common-repo"))
+        head = repo.commit(s.lite_files)
+        linked = os.path.join(s.tmp, "linked-repo")
+        repo.git("worktree", "add", "--detach", linked, head)
+        # objects/ 在 common-dir 内，却不在 linked checkout 的专属 git-dir 内。
+        packages = os.path.join(repo.path, ".git", "objects")
+        work = s.workdir("S22b-common-dir")
+        r = s.run("S22b-common-dir", head, workdir=work, argv=[
+            "--repo", linked, "--base", head, "--head", head, "--branch", "proof/selftest",
+            "--workdir", work, "--packages", packages, "--until", "5"])
+        good = r["rc"] == 2 and r["faults"] == ["SANDBOX"] and last_step(r) == "shape"
+        return check("S22b 依赖挂载落在关联工作树的 git-common-dir 内：挂载前 SANDBOX 退 2", good, r)
 
     impostors = ("re", "json", "os", "sitecustomize", "traceback", "posix", "sys", "signal", "stat", "time")
 
@@ -885,10 +958,11 @@ def skeleton(s):
             argv = [sys.executable, "-I", os.path.join(s.tmp, "driver.py"), RUN, "plain", "--repo", s.repo.path,
                     "--base", s.lite_base, "--head", spin,
                     "--branch", "proof/selftest", "--workdir", work, "--packages", s.fake_packages]
-            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            reset_int = "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])"
+            p = subprocess.Popen([sys.executable, "-I", "-c", reset_int, *argv],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env={"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"),
-                                      "FM_SELFTEST_SKIP_SHAPE": "1"},
-                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+                                      "FM_SELFTEST_SKIP_SHAPE": "1"})
             tick = os.path.join(work, "audited", ".lake", "tick")
             for _ in range(900):
                 if os.path.exists(tick):
@@ -970,6 +1044,50 @@ def skeleton(s):
         good = r["rc"] == 2 and r["faults"] == ["BUILD_OUTPUT_LIMIT"] and took and float(took[1]) < 8 and \
             "FM LOG build short line\n" in r["err"] and "FM RESULT FAULT build BUILD_OUTPUT_LIMIT\n" in r["out"]
         return check("S35 构建输出超过测试上限，立即中止进程组，BUILD_OUTPUT_LIMIT 退 2", good, r)
+
+    @case("S36")
+    def _():
+        pin = "formal_math/verification/auditor/lean-toolchain"
+        head = s.lite({pin: s.lite_files[pin] + b"\n"})
+        r = s.run("S36-infra-auditor-pin", head, branch="infra/selftest", lite=True, keep=True,
+                  extra=["--trusted-change-approved", "--until", "3"])
+        try:
+            pkg = os.path.join(r["work"], "trusted", "verification", "auditor")
+            good = r["rc"] == 2 and r["faults"] == ["TOOLCHAIN_MISMATCH"] and \
+                last_step(r) == "auditor" and not os.path.lexists(os.path.join(pkg, ".lake"))
+            return check("S36 已批准 infra 只改候选审计器工具链：构建审计器前 TOOLCHAIN_MISMATCH 退 2", good, r)
+        finally:
+            rmtree(r["work"])
+
+    @case("S37")
+    def _():
+        blob = b"module\n/- " + (b"x" * 262144) + b" -/\n"
+        one = {"formal_math/Chan/Thm/LargeOne.lean": blob}
+        two = {**one, "formal_math/Chan/Thm/LargeTwo.lean": blob}
+        # 总量边界容纳原有取料及一个 blob；两个文件引用同一 blob 也必须超限。
+        overhead = sum(len(data) for path, data in s.lite_files.items()
+                       if path != "formal_math/statement-lock.json")
+        budget = overhead + len(blob)
+        ok = True
+        for name, files, single, total, fault in (
+                ("单文件", one, len(blob) - 1, budget, True),
+                ("重复对象总量", two, len(blob), budget, True),
+                ("等于两项边界", one, len(blob), budget, False)):
+            r = s.run("S37-fetch-limit", s.lite(files), lite=True, keep=True, extra=["--until", "2"],
+                      mode=f"fetch-limit:{single}:{total}")
+            try:
+                streamed = "FM LOG selftest 已启动内容流\n" in r["err"]
+                if fault:
+                    good = r["rc"] == 2 and r["faults"] == ["FETCH_LIMIT"] and last_step(r) == "fetch" and \
+                        not streamed and not os.path.exists(os.path.join(r["work"], "audited"))
+                else:
+                    good = r["rc"] == 2 and not r["faults"] and "FM RESULT PARTIAL " in r["out"] and streamed and \
+                        read(os.path.join(r["work"], "audited", "Chan", "Thm", "LargeOne.lean")) == blob
+                ok = check("S37 %s：%s" % (name, "取料预检 FETCH_LIMIT 退 2，未启动内容流" if fault else
+                                         "分块写出逐字一致"), good, r) and ok
+            finally:
+                rmtree(r["work"])
+        return ok
 
     oracle_src = read(os.path.join(VERIFICATION, "must_green", "known-not-covered", "linarith-oracle-eval", "formal_math",
                                    "Chan", "Thm", "LinarithOracle.lean"))
@@ -1360,7 +1478,7 @@ def elab_consistency(s, work):
     auditor = os.path.join(pkg, ".lake", "build", "bin", "fm_audit")
     prefix = os.path.realpath(subprocess.run(["lean", "--print-prefix"], cwd=pkg, check=True,
                                              capture_output=True, text=True).stdout.strip())
-    ctx = SimpleNamespace(workdir=work, prefix=prefix)
+    ctx = SimpleNamespace(prefix=prefix, repo_paths=[os.path.realpath(p) for p in (s.repo.path, os.path.dirname(FM))])
     binds = [("--ro-bind", audited, audited), ("--ro-bind", s.packages, s.packages),
              ("--ro-bind", auditor, auditor)]
     mods = []
@@ -1392,7 +1510,9 @@ def elab_consistency(s, work):
             if row[0] == "file":
                 parsed[row[1]] = row[3]
     env["LEAN_PATH"] = ":".join(libs + [os.path.join(audited, ".lake", "build", "lib", "lean")])
-    counter = os.path.join(HERE, "selftest-cases", "shape", "ElabCount.lean")
+    # 自测夹具也先取到仓库外；沙箱只读挂这个文件，不挂运行自测的检出。
+    counter = os.path.join(work, "trusted", "ElabCount.lean")
+    shutil.copyfile(os.path.join(HERE, "selftest-cases", "shape", "ElabCount.lean"), counter)
     elab_binds = binds + [("--ro-bind", counter, "/tmp/ElabCount.lean")]
     # 一个进程只精化一个文件：同一进程里第二次带初始化器加载另一组导入时，作用域记号等扩展状态不可靠。
     elab = {}
@@ -1507,8 +1627,11 @@ MUTANTS = [
      [('args.append(b"--clearenv")', 'args += []'),
       ('env={"PATH": GIT_ENV["PATH"]})\n    if p.returncode >= 128', 'env=dict(os.environ))\n    if p.returncode >= 128')],
      "S22"),
-    ("沙箱不遮宿主机目录", RUNNER, [('for hidden in ("/home", "/root", "/run", "/var", "/tmp", ctx.workdir):',
-                               'for hidden in ("/tmp",):')], "S7,S22"),
+    ("最小挂载退化为只读宿主根", RUNNER,
+     [('mounts += binds + [("--ro-bind", ctx.prefix, ctx.prefix)]',
+       'mounts = binds + [("--ro-bind", ctx.prefix, ctx.prefix)]'),
+      ('return [b"bwrap", b"--tmpfs", b"/tmp", b"--dir", b"/tmp/home", b"--dev", b"/dev", b"--proc", b"/proc",',
+       'return [b"bwrap", b"--ro-bind", b"/", b"/", b"--dev", b"/dev", b"--proc", b"/proc",')], "S22"),
     ("去掉「产物目录顶层只许内容根」（R16）", RUNNER,
      [('rel.rsplit("/", 1)[1].split(".")[0] not in ROOT_NAMES:', "False:")], "S20"),
     ("去掉目录项类型检查：符号链接、管道等（R3、R15）", RUNNER,
@@ -1612,6 +1735,13 @@ MUTANTS = [
     ("合并构建日志不设总量上限", RUNNER,
      [("max(1, min(64 * 1024, BUILD_LOG_LIMIT - total))", "64 * 1024"),
       ("if total > BUILD_LOG_LIMIT:", "if False:")], "S35"),
+    ("已批准 infra 不核对候选工具链一致性", RUNNER,
+     [("if pins[main_pin] != pins[auditor_pin]:", "if False:")], "S36"),
+    ("取料不设单文件上限", RUNNER, [("if size > MAX_BLOB_BYTES:", "if False:")], "S37"),
+    ("取料总量不计重复对象", RUNNER, [("sum(sizes[oid] for oid in oids)", "sum(sizes.values())")], "S37"),
+    ("沙箱不检查 git-common-dir 重叠", RUNNER, [(', (b"--git-common-dir", (0,))', "")], "S22b"),
+    ("允许 #guard_msgs 匹配告警或错误", SHAPE,
+     [("if kind == `Lean.guardMsgsCmd && guardExpectsDiagnostic stx then", "if false then")], "H1"),
 ]
 
 

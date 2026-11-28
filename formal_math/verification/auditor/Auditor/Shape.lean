@@ -113,6 +113,16 @@ private def attributeName (attr : Syntax) : Name :=
 /-- 一条发现：(语法节点, 规则码, 说明)。 -/
 abbrev Issue := Syntax × String × String
 
+/-- Lean 4.36 的可选 docComment 在第 0 槽，原始正文是 commentBody 的首个 atom。
+默认匹配把换行换成空格，所以同时检查逐行头和折叠成一行的 ` --- ` 消息分隔符。 -/
+private def guardExpectsDiagnostic (stx : Syntax) : Bool :=
+  let body := stx[0][0][1][0].getAtomVal
+  let diagnostic (s : String) :=
+    let line := s.trimAsciiStart.copy
+    line.startsWith "warning:" || line.startsWith "error:"
+  (body.splitOn "\n").any diagnostic ||
+    ((body.replace "⏎\n" "\n" |>.replace "\n" " ").splitOn " --- ").any diagnostic
+
 /--
 对一条命令的语法树做白名单与禁用检查。`command` 为真时该节点处于命令位置（顶层、`in` 两侧、`mutual` 内、
 `#guard_msgs` 内）；`guarded` 为真时处于 `#guard_msgs` 之内。
@@ -131,6 +141,8 @@ private partial def inspect (mod : Name) (stx : Syntax) (command guarded : Bool)
       issues := issues.push (stx, "SHAPE_GUARD_MSGS", s!"#guard_msgs 内只许 #check 与 #print axioms：{kind}")
   if kind == `Lean.guardMsgsCmd && !stx[2].isNone then
     issues := issues.push (stx, "SHAPE_GUARD_MSGS", "#guard_msgs 只许不带规格的精确匹配写法")
+  if kind == `Lean.guardMsgsCmd && guardExpectsDiagnostic stx then
+    issues := issues.push (stx, "SHAPE_GUARD_MSGS", "#guard_msgs 不得匹配 warning: 或 error: 消息")
   if kind == `Lean.Parser.Command.declaration && !declKinds.contains stx[1].getKind then
     issues := issues.push (stx[1], "SHAPE_DECL", s!"声明不在白名单：{stx[1].getKind}")
   if kind == `Lean.Parser.Command.declModifiers then

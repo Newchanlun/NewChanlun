@@ -6,7 +6,7 @@ else
 fi
 
 _fm_setup() {
-  local script=$1 root lake store target actual version
+  local script=$1 root lake store target actual version hash
   root=$(cd -P -- "$(dirname -- "$script")/.." && pwd) || return 1
   lake=$root/formal_math/.lake
   case $(uname -s) in
@@ -17,7 +17,8 @@ _fm_setup() {
         printf '%s\n' 'FM: AgentStorage 未挂载在独立卷上。' >&2
         return 1
       fi
-      target=$store/lake/${root##*/}
+      hash=$(printf '%s' "$root" | shasum -a 256 | cut -c1-16) || return 1
+      target=$store/lake/${root##*/}-$hash
       export TMPDIR=$store/tmp
       mkdir -p -- "$TMPDIR" "$target" || return 1
       if [ ! -L "$lake" ] && [ ! -e "$lake" ]; then

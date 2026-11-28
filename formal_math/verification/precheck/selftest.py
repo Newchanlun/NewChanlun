@@ -6,7 +6,6 @@
 输出一律按 UTF-8 字节写文件描述符，不经 print。
 """
 import functools
-import hashlib
 import importlib.util
 import os
 import re
@@ -64,6 +63,9 @@ class Repo:
                 return mode, b"commit", self.commit({}).encode()
             if inner is MISSING:  # 用给定模式指向一个仓库里没有的对象
                 return mode, b"blob", b"2" * 40
+            if inner is TREE_LIKE_BLOB:
+                # 对象类型是 blob，但内容恰好是含一条文件记录的合法树对象字节。
+                return mode, b"blob", self.blob(b"100644 A.lean\0" + bytes.fromhex(self.blob(MOD).decode()))
             return (mode,) + (self.entry(inner)[1:] if isinstance(inner, (dict, list)) else (b"blob", self.blob(inner)))
         if isinstance(value, dict):
             return b"40000", b"tree", self.raw([(n, value[n]) for n in sorted(value, key=lambda n: gitkey(n, value[n]))])
@@ -91,7 +93,7 @@ class Repo:
         return git(self.path, *args).strip().decode()
 
 
-KEEP, COMMIT_OBJ, MISSING = object(), object(), object()
+KEEP, COMMIT_OBJ, MISSING, TREE_LIKE_BLOB = object(), object(), object(), object()
 
 
 class Body(bytes):
@@ -161,8 +163,6 @@ def root_raw(insert, before=True):
     return items
 
 
-# 一个 blob，内容恰好是合法的树对象字节（含一条指向 MOD 的 A.lean），用来区分「按类型读」与「按内容猜」。
-TREE_LIKE_BLOB = b"100644 A.lean\0" + hashlib.sha1(b"blob %d\0" % len(MOD) + MOD).digest()
 def root_edit(name, value):
     """根树原样写，只把 name 那一条换成 value。"""
     return {b"": [(n, value if n == name else KEEP) for n, v in root_raw(None) if v is KEEP]}
@@ -536,8 +536,10 @@ def special(script, repo, base, heads):
     got = run(script, [r, base, red, "decl/x"], stdout=wr, stderr=subprocess.PIPE)
     os.close(wr)
     expect("红例遇管道断开", (got[0], b"", got[2]), 1, set())
-    got = subprocess.run([sys.executable, "-I", script, r, base, green, "proof/x"], env=RUN_ENV,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=lambda: os.close(1))
+    close_stdout = "import os, sys; os.close(1); os.execv(sys.argv[1], sys.argv[1:])"
+    got = subprocess.run([sys.executable, "-I", "-c", close_stdout,
+                          sys.executable, "-I", script, r, base, green, "proof/x"], env=RUN_ENV,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     expect("绿例遇标准输出关闭", (got.returncode, b"", got.stderr), 2, {"OUTPUT"},
            b"Bad file descriptor" in got.stderr)
     ascii_env = {"PATH": RUN_ENV["PATH"], "LC_ALL": "C"}

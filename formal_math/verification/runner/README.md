@@ -11,12 +11,16 @@
 
 ## 调用
 
+普通审阅从**独立、受信的基线检出**启动。先进入该检出，再加载其环境脚本并调用其运行脚本。不得在已检出候选 PR 的工作树里 `source scripts/fm_env.sh`，也不得执行候选的 `run.py`：脚本内的 blob 比对发生在启动后，不能替调用方建立信任。候选仓库只作为 `--repo` 的只读 git 对象来源。
+
 ```sh
-source scripts/fm_env.sh
+trusted_checkout='<受信基线检出>'
+cd "$trusted_checkout" || exit 1
+source "$trusted_checkout/scripts/fm_env.sh" || exit 1
 flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
-  python3 -I formal_math/verification/runner/run.py [--trusted-change-approved] \
+  python3 -I "$trusted_checkout/formal_math/verification/runner/run.py" [--trusted-change-approved] \
     [--bootstrap-trusted-from <提交>] [--until <1-7>] \
-    --repo <仓库> --base <基线提交> --head <被审提交> --branch <分支名> \
+    --repo <候选仓库> --base <基线提交> --head <被审提交> --branch <分支名> \
     --workdir <工作目录> --packages <依赖目录>
 ```
 
@@ -37,7 +41,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 #2309 基线 `a5cf477e00` 已有 `Chan/Smoke.lean`，没有门禁。#2312 同批引入受信门禁和基础内容：`ChanTest/Probe.lean`、`ChanDyn/BuildAnchor.lean`、`HISTORY.md`、`formalization.yaml`、`statement-lock.json`。普通 `infra` 放行不允许这些内容变更，`--bootstrap-trusted-from` 只指定受信代码来源，也不会放宽角色规则。首次跨越该基线须人工审批并记账；`Chan/Smoke.lean` 保持基线原样。
 
-把候选提交作为落地后的基线，在 Linux 上用它自己的门禁、构建配置和已准备好的只读依赖运行：
+首次落地的自洽验证与普通审阅分开：在 Linux 上，把已独立确认可执行的落地提交作为基线和被审提交，用该提交的门禁、构建配置和预编译只读依赖运行：
 
 ```sh
 head=$(git rev-parse HEAD)
@@ -53,8 +57,8 @@ python3 -I formal_math/verification/runner/run.py \
 | 步 | 名字 | 做什么 | 判红码 | 无法判定（退 2）的码 |
 |---|---|---|---|---|
 | 1 | `precheck` | 从受信提交取出 `precheck.py` 写到 `<工作目录>/step1/`，`python3 -I` 运行，参数是解析后的基线、被审提交全名与分支名。输出逐行核对：退 0 须恰好一行绿行且提交名相符；退 1 须每行都是红行 | 第一片的全部规则码，原样转出 | `PRECHECK_EXIT`、`PRECHECK_OUTPUT`、`PRECHECK` |
-| 2 | `fetch` | 受信目录 `<工作目录>/trusted/verification/` ← 受信提交的 `formal_math/verification/` 整棵树。被审工作区 `<工作目录>/audited/` ← 被审提交的内容文件（`Chan/`、`ChanTest/`、`ChanChallenge/`、`ChanDyn/`、`ChanExplore/` 下与顶层 `Chan.lean`、`ChanExplore.lean`）+ 按「取料」选出同一提交的 `lakefile.toml`、`lake-manifest.json`、`lean-toolchain`。见下「取料」 | `CONTENT_PATH`（内容根下有不合文法、不是 100644 普通 `.lean` 文件的条目，或顶层有别的 `.lean`）；`CONTENT_ENCODING`（内容文件不是合法 UTF-8） | `TRUSTED_TREE`、`BASE_CONFIG`、`HEAD_CONFIG`、`NO_PACKAGE`、`NO_CONTENT`、`GIT`、`INPUT`（构建清单）、`PACKAGES`（依赖目录缺清单里的包） |
-| 3 | `auditor` | 核对受信 `auditor/lean-toolchain` 与被审工作区的工具链文件逐字节相同；`lean --print-prefix` 定位工具链并核对 `lean --version`；在受信目录里 `lake build`。输出审计二进制的路径与 sha256 | — | `TOOLCHAIN_MISMATCH`、`TOOLCHAIN`、`AUDITOR_BUILD`、`BUILD_OUTPUT_LIMIT` |
+| 2 | `fetch` | 受信目录 `<工作目录>/trusted/verification/` ← 受信提交的 `formal_math/verification/` 整棵树。被审工作区 `<工作目录>/audited/` ← 被审提交的内容文件（`Chan/`、`ChanTest/`、`ChanChallenge/`、`ChanDyn/`、`ChanExplore/` 下与顶层 `Chan.lean`、`ChanExplore.lean`）+ 按「取料」选出同一提交的 `lakefile.toml`、`lake-manifest.json`、`lean-toolchain`。见下「取料」 | `CONTENT_PATH`（内容根下有不合文法、不是 100644 普通 `.lean` 文件的条目，或顶层有别的 `.lean`）；`CONTENT_ENCODING`（内容文件不是合法 UTF-8） | `TRUSTED_TREE`、`BASE_CONFIG`、`HEAD_CONFIG`、`NO_PACKAGE`、`NO_CONTENT`、`GIT`、`FETCH_LIMIT`、`TOOLCHAIN_MISMATCH`（已批准的候选缺工具链文件）、`INPUT`（构建清单）、`PACKAGES`（依赖目录缺清单里的包） |
+| 3 | `auditor` | 已批准的 `infra` 先静态核对候选的两份工具链文件；再核对受信 `auditor/lean-toolchain` 与被审工作区的工具链文件逐字节相同；`lean --print-prefix` 定位工具链并核对 `lean --version`；在受信目录里 `lake build`。输出审计二进制的路径与 sha256 | — | `TOOLCHAIN_MISMATCH`、`TOOLCHAIN`、`AUDITOR_BUILD`、`BUILD_OUTPUT_LIMIT` |
 | 4 | `headers` | 沙箱里跑 `fm_audit headers <模块> <路径> …`：审计程序只解析文件头，不加载任何导入。头部白名单的发现由审计程序给出；目录方向表、传递闭包、整库导入 Mathlib 由运行脚本按审计程序给的导入列表判定 | `MODULE_FIRST`、`PRELUDE`、`IMPORT_ALL`、`META_IMPORT`、`IMPORT_PINNED`、`IMPORT_SOURCE`、`HEADER_PARSE`（审计程序）；`WHOLE_MATHLIB`、`IMPORT_EDGE`、`IMPORT_CLOSURE`（运行脚本） | `AUDITOR_OUTPUT`、`MODULE_COUNT`、`AUDITOR`、`SIGNAL` |
 | 5 | `shape` | 沙箱里先跑 `fm_audit shape-plan`（只解析文件头，按模块制的导入规则算出每个文件在真实构建里加载的库模块），按库模块集合分组，每组一个沙箱进程跑 `fm_audit shape <库模块>… -- <模块> <路径> …`：只加载这组钉选库，逐条**解析**命令、不精化，过白名单与禁用清单。派生目标类语法节点的位置写成派生证书 `<工作目录>/trusted/derived.json`，交第 7 步。见「第 5 步：源码形状门」 | `SHAPE_PARSE`、`SHAPE_COMMAND`、`SHAPE_DECL`、`SHAPE_MODIFIER`、`SHAPE_ATTRIBUTE`、`SHAPE_DERIVING`、`SHAPE_GUARD_MSGS`、`SHAPE_OPTION`、`SHAPE_OPTION_CONTROLLED`、`SHAPE_FORBIDDEN`、`SHAPE_EXPOSE`、`SHAPE_IMPORT` | `AUDITOR_OUTPUT`、`MODULE_COUNT`、`AUDITOR`、`SIGNAL` |
 | 6 | `build` | 先在同一沙箱里跑 `lean --version` 作探针，再 `lake build --wfail`（所选配置的默认目标）。之后把被审构建可写的整个 `.lake` 逐项过形状表，见下「产物形状表」 | `BUILD_WFAIL`、`NO_ARTIFACT`、`EXTRA_ARTIFACT`、`ARTIFACT_ROOT`、`ARTIFACT_FORM` | `SANDBOX`、`BUILD`（超时）、`BUILD_OUTPUT_LIMIT`、`SIGNAL`（沙箱顶层进程被信号终止，见「沙箱布局」） |
@@ -64,31 +68,34 @@ python3 -I formal_math/verification/runner/run.py \
 
 ### 取料
 
-- 只用 `ls-tree -r -z <提交>:<路径>` 加 `cat-file --batch` 逐个取 blob 原始字节。不用 `git archive`、检出或 `git worktree`，所以被审树里的 `.gitattributes`（`export-ignore`、`filter`、`eol`）与仓库配置的过滤器都不起作用。
+- 用 `ls-tree -r -z <提交>:<路径>` 枚举文件；`cat-file --batch-check` 先核对 blob 类型与大小，单文件超过 16 MiB 或待写文件合计超过 128 MiB（重复引用的 blob 按写出次数计）即报 `FETCH_LIMIT`，不读取内容。预检通过后，单个 `cat-file --batch` 进程按最多 64 KiB 一块直接写文件，并逐个核对对象头、尾换行和批次末尾。不用 `git archive`、检出或 `git worktree`，所以被审树里的 `.gitattributes`（`export-ignore`、`filter`、`eol`）与仓库配置的过滤器都不起作用。
 - 受信目录里每条路径段须合 `[A-Za-z0-9_][A-Za-z0-9_.-]*` 且是 100644 普通文件，否则退 2。内容文件的每个路径段（去掉 `.lean`）须合模块名文法 `[A-Za-z][A-Za-z0-9_]*`。
 - 写文件用 `O_CREAT|O_EXCL|O_NOFOLLOW`，模式固定 0644，目录 0755（建好后再 `chmod`，不受 umask 影响）；已存在或遇到符号链接即失败。
 - 默认三份构建配置都取自基线。只有第 1 步实跑判绿、绿行确认 `role=infra`、调用方传入 `--trusted-change-approved`，且三份配置中至少一份实际变化时，才全部取自候选提交。第 2 步摘要写明「配置取自已批准的 infra 候选提交」；缺配置退 2（`HEAD_CONFIG`），无效配置不得按旧配置放行。内容角色与未获放行的运行不使用候选配置；审计程序始终取自受信提交。
 - 所选清单从 git 对象严格解析，定下第 7 步搜索路径用的包名，并逐一核对依赖目录（缺了退 2）。第 3 步在被审代码运行前读取取料写出的 `lean-toolchain`，须与受信审计程序的工具链文件一致。第 6 步之后不再读被审工作区里的配置来决定输入。
-- **与预检的交接**：模式是文件的条目必须指向 blob。预检（`d660582472` 起）自己核对这一点，不是则 `TREE_FORM` 判红；取料仍保留同一道检查作纵深防御：用 `cat-file --batch` 读每个对象时核对头行类型必须是 `blob`，不是就 `GIT` 故障退 2，这一步发生在建任何目录之前，被审工作区与受信目录都不会写出，更不会把它当空文件写出或跳过。自测 S16 两例（对象实为树、实为提交）各跑两次：经预检在第 1 步 `TREE_FORM`；绕过预检从第 2 步起跑则取料退 2。
+- 已批准的 `infra` 候选必须同时具备 `formal_math/lean-toolchain` 与 `formal_math/verification/auditor/lean-toolchain`，两份 git 对象逐字节一致才允许继续；缺失或不同报 `TOOLCHAIN_MISMATCH`。这项静态检查不执行候选审计器。同步升级两处钉选后，还须走独立自举／工具链升级通道验证：普通审阅使用基线审计器，它仍按旧工具链构建。
+- **与预检的交接**：模式是文件的条目必须指向 blob。预检（`d660582472` 起）自己核对这一点，不是则 `TREE_FORM` 判红；取料仍保留同一道检查作纵深防御：在取内容前用 `cat-file --batch-check` 核对对象类型必须是 `blob`，不是就 `GIT` 故障退 2，被审工作区与受信目录都不会写出，更不会把它当空文件写出或跳过。自测 S16 两例（对象实为树、实为提交）各跑两次：经预检在第 1 步 `TREE_FORM`；绕过预检从第 2 步起跑则取料退 2。
 - 第 1 步只接受两种预检输出：退 0 且恰好一行绿行；退 1 且每行都是 `PRECHECK RED <码> <对象> <说明>`。红码按 `[A-Z_]+` 原样转出，预检新增的码（`LAKE_FILE`、`TREE_FORM` 等）不需要改运行脚本；其它任何输出（未知格式、退 2 的 `BASE_FORM`、`NOT_ANCESTOR` 等，此时预检已写到标准输出的红行不转出）一律退 2。
 - 被审提交里 `formal_math/` 下的其它文件（README、台账等）不进被审工作区。锁文件由运行脚本在第 7 步直接从被审提交的 git 对象读。
 
 ### 沙箱布局（第 4–7 步）
 
-`bwrap --ro-bind / /`，`/home`、`/root`、`/run`、`/var`、`/tmp` 与**整个工作目录**先盖成空 tmpfs，再按步回绑；`--clearenv` 后只放回 `HOME=/tmp/home`、`TMPDIR=/tmp`、`LANG=C.UTF-8`、`PATH=<工具链>/bin:/usr/bin:/bin`（第 5、7 步另加 `LEAN_PATH`、`LEAN_SYSROOT`；第 5 步的 `LEAN_PATH` 只有依赖包的 `.lake/build/lib/lean`，没有被审产物）；`--unshare-all`（断网）、`--die-with-parent`、`--new-session`。`bwrap` 进程本身也只拿到 `PATH` 一个环境变量（两层：调用 `bwrap` 时的环境与 `--clearenv`）。**信号**：`bwrap` 只转出它直接启动的那个进程（第 4、5、7 步的审计程序，第 6 步的 `lake` 与探针 `lean --version`）的退出状态。沙箱里由运行脚本直接启动的那个进程以大于等于 128 或负的退出码结束时，归入 `SIGNAL` 退 2（自测 S18、S27）。`lake` 启动的 `lean` 工作进程被杀时，`lake` 把它记成一次构建失败、自己以 1 退出，运行脚本报 `BUILD_WFAIL` 退 1：运行脚本分不清「`lean` 被内核杀掉」与「被审代码自己搞死 `lean`」，构建日志又是被审方可写的。两种情形退出码都非零。超时由运行脚本杀掉 `bwrap` 所在的整个进程组，`--die-with-parent` 带走沙箱里的进程（自测 S19 核对超时后再无写入）。
+`bwrap` 从空根开始。系统路径只读挂载 `/usr`，按宿主实际形态还原 `/bin`、`/lib`、`/lib64`、`/lib32`、`/sbin` 的符号链接或目录，并按存在性挂载 `/etc/ld.so.cache`、`/etc/ld.so.conf`、`/etc/ld.so.conf.d`、`/etc/alternatives`、`/etc/passwd`、`/etc/group`。不挂宿主根、整棵 `/etc` 或宿主的 `/home`、`/root`、`/run`、`/var`、`/Volumes`；工作目录也只挂表中列出的输入和输出。沙箱另建 `/tmp`（含空的 `/tmp/home`）、`/dev`、`/proc`。挂载源与解析后的仓库工作树、Git 目录和 git-common-dir 互不重叠；工作树、`.git` 与挂载白名单以外的宿主机 Unix 套接字均不可达。S22 用真实仓库哨兵与真实监听套接字逐步验证 `ENOENT`。
+
+`--clearenv` 后只放回 `HOME=/tmp/home`、`TMPDIR=/tmp`、`LANG=C.UTF-8`、`PATH=<工具链>/bin:/usr/bin:/bin`（第 5、7 步另加 `LEAN_PATH`、`LEAN_SYSROOT`；第 5 步的 `LEAN_PATH` 只有依赖包的 `.lake/build/lib/lean`，没有被审产物）；`--unshare-all`（断网）、`--die-with-parent`、`--new-session`。`bwrap` 进程本身也只拿到 `PATH` 一个环境变量（两层：调用 `bwrap` 时的环境与 `--clearenv`）。**信号**：`bwrap` 只转出它直接启动的那个进程（第 4、5、7 步的审计程序，第 6 步的 `lake` 与探针 `lean --version`）的退出状态。沙箱里由运行脚本直接启动的那个进程以大于等于 128 或负的退出码结束时，归入 `SIGNAL` 退 2（自测 S18、S27）。`lake` 启动的 `lean` 工作进程被杀时，`lake` 把它记成一次构建失败、自己以 1 退出，运行脚本报 `BUILD_WFAIL` 退 1：运行脚本分不清「`lean` 被内核杀掉」与「被审代码自己搞死 `lean`」，构建日志又是被审方可写的。两种情形退出码都非零。超时由运行脚本杀掉 `bwrap` 所在的整个进程组，`--die-with-parent` 带走沙箱里的进程（自测 S19 核对超时后再无写入）。
 
 | 步 | 被审工作区 | `.lake` | 依赖目录 | 受信目录 | 工具链 |
 |---|---|---|---|---|---|
-| 4 | 只读 | — | 不挂 | 只读 | 只读 |
+| 4 | 只读 | — | 不挂 | 只读挂载审计二进制文件 | 只读 |
 | 5 | 只读（此时还没有 `.lake`） | — | 只读，挂在原路径 | 只读 | 只读 |
-| 6 | 只读 | **可写** | 只读挂到 `.lake/packages` | 不挂（被 tmpfs 盖住） | 只读 |
+| 6 | 只读 | **可写** | 只读挂到 `.lake/packages` | 不挂 | 只读 |
 | 7 | 只读（含产物） | 只读 | 只读，挂在原路径 | 只读 | 只读 |
 
 审计二进制永远是第 3 步在受信目录里构建的那一个，运行脚本按绝对路径执行它，不对被审包调用 `lake exe`。第 7 步的搜索路径由运行脚本按所选构建清单拼出：依赖包的 `.lake/build/lib/lean` 在前，被审产物在后，工具链自带的库由 Lean 追加在最后；第 6 步因此逐项核对 `.lake`（见下）；第 7 步的搜索路径里被审方的部分只有 `.lake/build/lib/lean`，它是核对过的那一部分，审计程序也只经搜索路径读产物。
 
 ### 产物形状表（第 6 步，`artifact_reds()`）
 
-被审构建在**宿主机上**只能写到 `.lake`。沙箱里 `/tmp`（含 `HOME=/tmp/home`）、`/dev`、`/dev/shm`、`/var`、`/run`、`/home`、`/root` 也可写，但它们都是 `bwrap` 建的 tmpfs，写进去的东西随沙箱消失、落不到宿主机。构建结束后运行脚本从 `.lake` 起递归遍历每一个目录项：用 `lstat`，不跟随符号链接；每个目录都必须列得出，列不出不跳过而是判红。形状表按 Lake 4.36.0 实际放的东西列（真实仓库与自测构建实测）：
+被审构建在**宿主机上**只能写到 `.lake`。沙箱里 `/tmp`（含 `HOME=/tmp/home`）、`/dev`、`/dev/shm` 也可写，但它们都是 `bwrap` 建的 tmpfs，写进去的东西随沙箱消失、落不到宿主机。构建结束后运行脚本从 `.lake` 起递归遍历每一个目录项：用 `lstat`，不跟随符号链接；每个目录都必须列得出，列不出不跳过而是判红。形状表按 Lake 4.36.0 实际放的东西列（真实仓库与自测构建实测）：
 
 | 位置 | 允许的目录项 |
 |---|---|
@@ -153,7 +160,7 @@ python3 -I formal_math/verification/runner/run.py \
 | 修饰符白名单（`SHAPE_MODIFIER`）：文档注释、属性、`private`、`public`、`protected`、`noncomputable`、`nonrec`；`meta`、`unsafe`、`partial` 与 `meta section` 必红 | 手写 `partial`、`unsafe`、`meta` 定义 | Lean 自动生成的 `partial`／`unsafe` 辅助项（派生处理器、编译影子、`ctorIdx`）；自动参数生成的 `meta` 战术载体 | 环境层按生成来源豁免（三类，含派生证书）；载体按第 4 类豁免 `ENV_META` |
 | 属性白名单（`SHAPE_ATTRIBUTE`）：`simp`、`ext`、`instance`、`reducible`、`irreducible`、`inline`、`specialize`、`expose`、`no_expose`、`grind`、`norm_cast`、`push_cast`、`refl`、`symm`、`trans`、`gcongrAttr`、`mono`、`congr`、`elab_as_elim`、`induction_eliminator`、`cases_eliminator`、`deprecated`、`simps`、`method_specs`；按 Lean `elabAttr` 的取名规则（`Attr.simple` 取标识符，其余取语法种类末段），`attribute [-x]` 同样查 | 注册宏、精化器、解析器、初始化器、派生处理器的属性；`implemented_by`、`extern`、`csimp`、`init` | 名单内属性的处理器在精化期做什么；属性宏不展开（见出入表） | 环境层（`implemented_by`、`extern`、`meta` 查全部常量）、内核 |
 | 派生目标类白名单（`SHAPE_DERIVING`）：`DecidableEq`、`BEq`、`ReflBEq`、`LawfulBEq`、`Hashable`、`Ord`、`Repr`、`Inhabited`、`Nonempty`，按写出来的标识符比对（去掉 `_root_`） | 名单外的派生处理器 | 名单内派生处理器生成的代码 | 环境层（派生证书只豁免证书位置上的 `partial` 辅助函数）、内核 |
-| `#guard_msgs` 的限制（`SHAPE_GUARD_MSGS`）：只许不带规格的精确匹配，内嵌命令只许 `#check` 与 `#print axioms`，只许在 `Chan/Final`（不在时报 `SHAPE_COMMAND`）；`#print axioms` 只许在 `#guard_msgs` 内 | 用期望消息吞掉告警或占位证明 | — | 第 6 步 `--wfail` |
+| `#guard_msgs` 的限制（`SHAPE_GUARD_MSGS`）：只许不带规格的精确匹配，内嵌命令只许 `#check` 与 `#print axioms`，只许在 `Chan/Final`（不在时报 `SHAPE_COMMAND`）；`#print axioms` 只许在 `#guard_msgs` 内。期望文档串逐行去掉前导空白后，不得有 `warning:` 或 `error:` 消息头；换行折叠成一行后仍查消息分隔符后的头。正常的 `info:` 和无级别头的公理文本放行 | 用期望消息吞掉告警或错误 | — | 第 6 步 `--wfail` |
 | 任何语法位置的 `set_option` 写法（凡首个子节点是 `set_option` 关键字的节点：命令、`… in`、项、战术、`grind =>` 内）：`autoImplicit`、`relaxedAutoImplicit`、`linter.*` 报 `SHAPE_OPTION_CONTROLLED`（门 2 的源码部分）；其余只许 `maxRecDepth`、`maxHeartbeats`、`synthInstance.maxHeartbeats`、`synthInstance.maxSize`、`match.ignoreUnusedAlts`、`pp.*`，名单外报 `SHAPE_OPTION` | 关告警、关内核检查（`debug.skipKernelTC`）、开 `autoImplicit` | 库宏展开时设置的选项（`rfl'` 展开出 `smartUnfolding`）；库里换了名字的选项设置器 | 构建选项来自第 2 步选定的配置；`smartUnfolding` 之类只影响精化，不影响健全性，证明仍由内核检查（自测语料 `known-not-covered/rfl-prime-false`：用 `rfl'` 证假命题，构建判红）；`debug.skipKernelTC` 之类经冷僻入口的后果由 #2315 的内核重放接 |
 | 点名的禁用清单（`SHAPE_FORBIDDEN`），按表层记号查：`sorry`、`admit`、`native_decide`、`include_str`、`eval%`、`by_elab`、`run_tac`、`run_cmd`、`run_meta`、`run_elab`、`sudo`、`trace`、`success_if_fail_with_msg`、`#eval`、`#eval!`、`#exit`；配置项 `+native`／`-native`／`(native := …)`；**旧式配置子句**：任何语法节点，只要前三个子节点依次是记号 `(`、一个名字以 `config` 结尾的记号或标识符、记号 `:=`，就判红（不按语法种类列名单，同 `set_option` 的判法）。钉选库里实际存在的这类子句只有两个名字：`config`（核心 `Lean.Parser.Tactic.config`，被 `plausible`、Batteries 的 `congr`／`rcongr` 复用；Aesop 的 `Aesop.Frontend.Parser.«tactic_clause(Config:=_)»`；新式 `optConfig` 里键为 `config` 的 `valConfigItem`）与 `simp_config`（Aesop 的 `«tactic_clause(Simp_config:=_)»`）；检索方法见下。新式字面量配置项（`(maxSteps := 1000)`、`+contextual`、`-zeta`、`+kernel`）不受影响；项级 `unsafe`（语法种类）；标识符 `sorryAx`（含 `_root_.sorryAx`） | **给走捷径的作者看的提示，不是防线。** 明文的占位证明与精化期求值入口。旧式配置子句的取值在精化期经 `declare_config_elab` 编译求值（独审 r1 甲-1） | 清单外的求值入口：名字不以 `config` 结尾、但库在精化期替被审代码对其中的项求值的子句或战术，本片没有逐个列出；任何经库宏展开出来的同类构造。独审 r1 的调查结论见「已知不防」 | 占位证明与 `native_decide` 落在环境层公理闭包（`ENV_SORRY`、`ENV_AXIOM_DEP`）；构建期的宿主机读写由第 6 步沙箱接；伪造产物由 #2315 的内核重放接 |
 | `Chan/Defs` 下的文件须用 `@[expose] public section`（`SHAPE_EXPOSE`，旧门 15 的源码层） | 定义体不对外暴露、下游只能当黑箱用 | 节里的个别定义另加 `@[no_expose]` | 环境层门 15 查公开定义确有公开定义体（`EXPOSE_SECTION`） |
@@ -400,12 +407,15 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | S19 † | 构建期无限循环、每 0.2 秒往 `.lake/tick` 追加一行；驱动脚本把第 6 步时限改成 30 秒：`BUILD` 超时退 2；运行结束后再等 2 秒，`tick` 不再增长 |
 | S20 † | 构建期在 `.lake` 里放 `Init/Fake.olean`、没有源码的 `Chan/Ghost.olean`、名字带多余点的 `Chan/Base.x.olean`、名为 `Chan/Dir.olean` 的目录、指向 `/etc/hostname` 的符号链接、命名管道、`.lake/stray`、`.lake/build/bin/x`，并把 `build/lib/lean/ChanDyn` 改成 0111、把合法名文件 `Chan/Base.ilean` 改成 0755：逐项比对（红码，路径）集合，十一项各报其码（`ChanDyn` 与 0755 的 `Base.ilean` 报 `ARTIFACT_FORM`，其中模块因此 `NO_ARTIFACT`） |
 | S21 | 基线配置不构建 `ChanDyn`，被审提交加 `ChanDyn/X.lean`：第 6 步 `NO_ARTIFACT` |
-| S22 | 沙箱探针：驱动脚本在第 5、6、7 步各用**同一份挂载与环境**先跑一段 shell（第 5 步与第 7 步的断言相同：受信目录只读可见、什么都写不进）。断言两步都只有回环网卡；环境变量只在 `HOME`、`TMPDIR`、`LANG`、`PATH`、`PWD`、`SHLVL`、`_`、`OLDPWD`、`LEAN_PATH`、`LEAN_SYSROOT` 之内（运行脚本自己的环境里放了金丝雀变量）；宿主机临时目录里的金丝雀文件与仓库 `.git` 都不可见；第 6 步受信目录不可见，第 7 步只读可见；第 6 步只有 `.lake` 可写，被审源码、假依赖目录、受信目录都写不进；第 7 步什么都写不进 |
+| S22 | 第 5、6、7 步实测同一步的挂载与环境：只有回环网卡、没有环境金丝雀变量；仓库哨兵、`.git`、宿主机哨兵和真实监听的 Unix 套接字均返回 `ENOENT`；第 5、7 步受信目录只读，第 6 步不可见，且只有 `.lake` 可写 |
+| S22b | 关联工作树的 git-common-dir 在另一处，尝试将其对象目录作为依赖挂载：挂载前报 `SANDBOX` 退 2 |
 | S31 | 绿结果行写出之后、主路径返回之前，驱动脚本让运行脚本给自己发 SIGTERM：处理函数里的 `finish()` 被「整次运行至多写一次」挡住，标准输出仍只有那一行绿结果行，`FM FAULT … SIGNAL` 写到标准错误，退 2（单向契约下允许；不套用 `protocol()` 的双向核对）。骨架复审 r3 的缺口 Q5 |
 | S32 | 驱动脚本跳过第 5 步且不写派生凭证：第 7 步 `NO_CERTIFICATE` 退 2（不靠 `INTERNAL` 兜底）。其余跳过第 5 步的用例（†）与环境层、声明锁语料由驱动脚本有意写一份空凭证 `[]` 到同一路径，照常走到第 7 步 |
 | S33 | 派生凭证非空但不是第 5 步写出的那一份（驱动脚本把它指向受信目录里另一个存在的文件 `verification/runner/run.py`）：第 7 步 `NO_CERTIFICATE` 退 2（独审 r2 乙-C1，钉住条件的路径比对那一半） |
 | S34a、S34b | 已批准的纯配置 `infra` 提交：无效 TOML 在第 6 步判红；合法 TOML 逐字取自候选提交，七步全绿 |
 | S35 | 第 6 步合并输出越过测试上限，已读的短行照常写出；进程组立即中止，报 `BUILD_OUTPUT_LIMIT` 退 2 |
+| S36 | 已批准的 `infra` 候选只改审计器工具链文件：第 3 步在构建审计器前报 `TOOLCHAIN_MISMATCH` 退 2 |
+| S37 | 单文件超限、重复 blob 写成两文件导致总量超限：第 2 步报 `FETCH_LIMIT` 退 2，未启动内容流；恰等于上限时分块写出逐字一致 |
 | S24 | 把 `run.py` 复制到一个放了 `re`、`json`、`os`、`sitecustomize`、`traceback`、`posix`、`sys`、`signal`、`stat`、`time` 十个冒名模块的目录，不带 `-I` 运行，两路正常、标准输出关闭、标准错误关闭、两路都关闭、标准输出写满、标准错误写满各一次：都退 2，冒名模块一个都没有被执行 |
 | S25 | 标准输出是满的非阻塞管道，0.6 秒后读端才开始读（开头几行因 `EAGAIN` 写不出，后来又写得出）：退 2，至多一行结果行，没有绿结果行 |
 | S26a–b † | 第 6 步期间给运行脚本发 SIGINT、SIGTERM：标准输出最后一行是 `FM RESULT FAULT build SIGNAL`，退 2，沙箱里的进程随之结束、没有残留进程 |
@@ -422,7 +432,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 | E11a–b | 内容路径带换行：经预检 `PATH_GRAMMAR`；绕过预检取料 `CONTENT_PATH` |
 | E12 | 内容文件不是 UTF-8：取料 `CONTENT_ENCODING` |
 | E16 | 形状门发现的说明栏含被审文字（选项名带换行、行分隔符与方向控制符；解析错误消息）：`SHAPE_OPTION`、`SHAPE_PARSE`，输出协议不破 |
-| H1 | 形状门红例目录（`selftest.py` 的 `SHAPE_RED`，一个提交里 66 个文件，每个文件只放一种写法，其中 1 个是必绿对照）：逐文件比对（红码，文件）集合，多一个少一个都算失败。覆盖：命令白名单 8 例（`macro`、`syntax`、`notation`、`elab`、`initialize`、`#print`、`export`、`lemma`）；声明 `axiom`；修饰符 `meta`、`unsafe`、`partial`、`meta section`；属性 `implemented_by`、`extern`、`init`、`csimp`、`attribute [-x]`、`local macro`；派生行内与 `deriving instance`；`#guard_msgs` 带规格、内嵌非 `#check`、在 `Chan/Final` 之外，裸 `#print axioms`；`set_option` 的命令、`… in`、项、战术、`grind =>` 五种位置与书名号写法、`trace.*`；禁用清单每一项（`sorry` 项与战术、`admit`、`native_decide`、`+native`、`(native := true)`、`(config := …)`、旧式配置子句（`aesop (config := …)` 在战术块里、`aesop (simp_config := …)` 在 `by` 项里、`plausible (config := …)` 在 `first` 分支里、Batteries `congr (config := …)`、`conv` 里的 `simp (config := …)`；参数名以 `config` 结尾的函数应用命名参数 `fmRun (config := 1) 2`，钉住按形状判的代价）、`include_str`、`eval%`、`by_elab`、`run_tac`、`run_cmd`、`run_meta`、`run_elab`、`sudo set_option`、项级 `unsafe`、`trace`、`success_if_fail_with_msg`、`#eval`、`#eval!`、`#exit`、`sorryAx`、`_root_.sorryAx` 在 `#check`、`variable` 默认值与 `#guard_msgs` 里）；解析失败；导入钉选库里没有的模块；必绿对照 `CfgNewStyleGreen.lean`（`simp (maxSteps := 1000)`、`+contextual`、`-zeta`、`decide +kernel`、`conv` 与 `first` 里的新式配置、命名参数 `(cfg := 1)`、类型标注 `(my_config : Nat)`、元组 `(config, config)`）不得出现在红行里 |
+| H1 | 形状门红例目录（`selftest.py` 的 `SHAPE_RED`，一个提交里 69 个文件，每个文件只放一种写法，其中 1 个是必绿对照）：逐文件比对（红码，文件）集合，多一个少一个都算失败。覆盖：命令白名单 8 例（`macro`、`syntax`、`notation`、`elab`、`initialize`、`#print`、`export`、`lemma`）；声明 `axiom`；修饰符 `meta`、`unsafe`、`partial`、`meta section`；属性 `implemented_by`、`extern`、`init`、`csimp`、`attribute [-x]`、`local macro`；派生行内与 `deriving instance`；`#guard_msgs` 带规格、内嵌非 `#check`、在 `Chan/Final` 之外、文档串匹配告警（逐行和折叠两例）或错误，裸 `#print axioms`；`set_option` 的命令、`… in`、项、战术、`grind =>` 五种位置与书名号写法、`trace.*`；禁用清单每一项（`sorry` 项与战术、`admit`、`native_decide`、`+native`、`(native := true)`、`(config := …)`、旧式配置子句（`aesop (config := …)` 在战术块里、`aesop (simp_config := …)` 在 `by` 项里、`plausible (config := …)` 在 `first` 分支里、Batteries `congr (config := …)`、`conv` 里的 `simp (config := …)`；参数名以 `config` 结尾的函数应用命名参数 `fmRun (config := 1) 2`，钉住按形状判的代价）、`include_str`、`eval%`、`by_elab`、`run_tac`、`run_cmd`、`run_meta`、`run_elab`、`sudo set_option`、项级 `unsafe`、`trace`、`success_if_fail_with_msg`、`#eval`、`#eval!`、`#exit`、`sorryAx`、`_root_.sorryAx` 在 `#check`、`variable` 默认值与 `#guard_msgs` 里）；解析失败；导入钉选库里没有的模块；必绿对照 `CfgNewStyleGreen.lean`（`simp (maxSteps := 1000)`、`+contextual`、`-zeta`、`decide +kernel`、`conv` 与 `first` 里的新式配置、命名参数 `(cfg := 1)`、类型标注 `(my_config : Nat)`、元组 `(config, config)`）不得出现在红行里 |
 | H1b | `decl` 角色的提交：`Chan/Defs` 下不用 `@[expose] public section` 的文件 `SHAPE_EXPOSE`，用了的文件不报 |
 | H2a–c | 作用域跟踪（`selftest-cases/shape/scope/`，以 Mathlib 的作用域记号 `n !` 为探针）：阴性对照里有 `namespace`/`section`/`end` 嵌套、`open … in`、`mutual … end`、`public section`、文件末尾未闭合的节，七步全绿，且只解析与真实精化的命令数逐文件相等；三个红例（`end Nat` 之后、`section` 内 `open` 再 `end` 之后、`open … in` 的下一条命令）第 5 步 `SHAPE_PARSE`；同一红例提交跳过第 5 步时真实构建同样拒绝 |
 | H3a–b | 不执行被审代码：带 `initialize`、`#eval`、宏定义、`run_cmd` 与宏使用的文件第 5 步红，这些代码打印的标记不出现在任何日志里、构建目录没建；正对照：跳过第 5 步时同一个 `#eval` 在构建期执行，标记出现在构建日志里 |
@@ -435,7 +445,7 @@ flock /home/workspace/fm/lean.lock /home/workspace/fm/guard.sh \
 
 **单元自测**（与流水线自测分开报数，随全量与 `--skip-corpus` 一起跑，`--cases U1` 单跑）：U1 在临时目录起一个最小 Lean 包，只依赖工具链自带的 Lean（不碰 Mathlib，不写共享依赖目录），用 `selftest-cases/autoparam/Forge.lean` 以 `addDecl` 直接造 25 个候选常量（正例 7：生成器本身产出、逐字照抄的字段名形态、多段数字后缀 `_auto_1_1`、仅被定义体引用、含 `Name.num` 与非空 `Syntax.Preresolved`、9 段全字符串名、含标识符的语法树；反例 18：每个只在一条判据上与正例不同——名字 5、安全性 2、提示 2、宇宙参数 1、类型 1、引用 1、值 4、对照 2），再由 `Check.lean` 按私有层级读回、调用审计程序库里的 `FM.autoParamCarriers`，逐个比对判定。它是测试设施，不是被审内容，不经过流水线；它证明判定函数按所写判据工作，不证明流水线能防伪造产物。
 
-**弱化自测**（`--mutants`）：把 `runner/`、`precheck/`、`auditor/` 与骨架用例依赖的夹具目录（`SKELETON_FIXTURES`）复制到临时目录，先断言未改弱的副本骨架全过，再逐一在副本里改弱一处、用副本自己的自测跑相关骨架用例，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时也判失败。第四片另加 18 种（见下），自动参数片另加 7 种（见下），本轮另加两种（S34a/S34b 抓到仍取基线配置，S35 抓到取消构建日志上限），共 55 种，清单见 `selftest.py` 的 `MUTANTS`。骨架片的 28 种：上一轮的 18 种（其中三种产物核对的改弱点随形状表改写）；独审 r2 另做而自测没抓到的 10 种，除不再适用的一种外都已收进来，共 7 个新改弱点——JSON 接受重复键（R2）、去掉目录项类型检查（R3 产物目录本身是符号链接与 R15 任意层级符号链接是同一处）、绿的结论不再要求标准输出都写出去了（R4）、信号判定只对第 6 步生效（R5b）、JSON 不要求合法 UTF-8（R7）、不核对依赖目录里的包（R8）、建目录后不 `chmod`（R14），R16「去掉顶层只许内容根」与上一轮的「去掉 ARTIFACT_ROOT」是同一处；本轮另加 3 种：目录模式异常或列不出时跳过、不装 SIGINT 与 SIGTERM 处理函数、隔离检查失败时的诊断经 `sys` 的流写且不兜异常（N-1 的旧形）。r2 的「`.olean` 不要求是文件」不再适用：形状表按目录项类型分别查目录表与文件表，名为 `X.olean` 的目录从来查不到文件表，没有单独的「须是文件」一步可改弱（S20 的 `Chan/Dir.olean` 覆盖这个形状）。沙箱不清环境一种同时去掉 `--clearenv` 与「调用 `bwrap` 时只给 `PATH`」两层，只去掉一层时另一层仍挡住、观察不到。
+**弱化自测**（`--mutants`）：把 `runner/`、`precheck/`、`auditor/` 与骨架用例依赖的夹具目录（`SKELETON_FIXTURES`）复制到临时目录，先断言未改弱的副本骨架全过，再逐一在副本里改弱一处、用副本自己的自测跑相关骨架用例，每种弱化都必须有用例失败；改弱点在源码里找不到或不唯一时也判失败。第四片另加 18 种（见下），自动参数片另加 7 种（见下），本轮另加两种（S34a/S34b 抓到仍取基线配置，S35 抓到取消构建日志上限），R3 加入候选工具链、单文件上限、总量重复计数、告警与错误文档串、git-common-dir 重叠五种，并把宿主目录弱化改为只读挂载宿主根（S22）；共 60 种，清单见 `selftest.py` 的 `MUTANTS`。骨架片的 28 种：上一轮的 18 种（其中三种产物核对的改弱点随形状表改写）；独审 r2 另做而自测没抓到的 10 种，除不再适用的一种外都已收进来，共 7 个新改弱点——JSON 接受重复键（R2）、去掉目录项类型检查（R3 产物目录本身是符号链接与 R15 任意层级符号链接是同一处）、绿的结论不再要求标准输出都写出去了（R4）、信号判定只对第 6 步生效（R5b）、JSON 不要求合法 UTF-8（R7）、不核对依赖目录里的包（R8）、建目录后不 `chmod`（R14），R16「去掉顶层只许内容根」与上一轮的「去掉 ARTIFACT_ROOT」是同一处；本轮另加 3 种：目录模式异常或列不出时跳过、不装 SIGINT 与 SIGTERM 处理函数、隔离检查失败时的诊断经 `sys` 的流写且不兜异常（N-1 的旧形）。r2 的「`.olean` 不要求是文件」不再适用：形状表按目录项类型分别查目录表与文件表，名为 `X.olean` 的目录从来查不到文件表，没有单独的「须是文件」一步可改弱（S20 的 `Chan/Dir.olean` 覆盖这个形状）。沙箱不清环境一种同时去掉 `--clearenv` 与「调用 `bwrap` 时只给 `PATH`」两层，只去掉一层时另一层仍挡住、观察不到。
 
 第四片的 18 种（括号里是抓它的用例）。独审 r2 后加的一种：`NO_CERTIFICATE` 只查为空不比路径（S33）；「`legacyConfig` 不要求第三个子节点是 `:=`」与原规则等价、抓不到，没有加，原因见「按形状判的代价」后一段。独审 r1 后加的两种：去掉旧式配置子句规则（H1）、第 7 步不要求第 5 步产出的派生凭证（S32）。骨架复审 r3 指出的两个自测缺口：去掉产物文件模式检查（S20 的 0755 文件）、`finish()` 去掉「至多写一次」的守卫（S31）。形状门的 13 种：去掉命令白名单、声明白名单、修饰符白名单、属性白名单、派生目标类白名单、`#guard_msgs` 规格限制（H1）；禁用清单去掉 `native_decide`（H1）；`set_option` 只查命令位置（H1 的项、战术、`grind` 三例）；解析失败不判红（H1、H2）；去掉 `Chan/Defs` 规则（H1b）；派生证书不比对位置、同模块即豁免（D2）；形状检查的沙箱里被审工作区可写（S22）；不核对每组的文件行（S5g）。另有两种原有弱化的改弱点随本片更新：「去掉模块数比对」现在同时由 S5a、S5f 抓；「第 7 步被审工作区可写」的改弱点加了上下文以区分第 5 步的同形挂载。
 
