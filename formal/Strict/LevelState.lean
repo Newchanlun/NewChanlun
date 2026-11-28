@@ -198,68 +198,80 @@ private theorem classify_below_iff (c : Center) (p : Int) :
 /-- `rlevelOf = bot ↔ IsBot`。 -/
 theorem rlevelOf_eq_bot (ctx : RContext) : rlevelOf ctx = bot ↔ IsBot ctx := by
   unfold rlevelOf IsBot
-  cases h : ctx.lastCenter with
+  cases ctx.lastCenter with
   | none => simp
   | some c =>
-    cases hcl : Formal.CenterPosition.classify c ctx.price <;>
-      cases hb : ctx.b3 <;> cases hs : ctx.s3 <;> simp_all
+    cases hcl : Formal.CenterPosition.classify c ctx.price with
+    | within => simp [hcl]
+    | above => cases ctx.b3 <;> simp [hcl]
+    | below => cases ctx.s3 <;> simp [hcl]
 
 /-- `rlevelOf = inside ↔ IsInside`。 -/
 theorem rlevelOf_eq_inside (ctx : RContext) : rlevelOf ctx = inside ↔ IsInside ctx := by
   unfold rlevelOf IsInside
-  cases h : ctx.lastCenter with
+  cases ctx.lastCenter with
   | none => simp
   | some c =>
     simp only [Option.some.injEq, exists_eq_left']
     rw [← classify_within_iff c ctx.price]
-    cases hcl : Formal.CenterPosition.classify c ctx.price <;>
-      cases hb : ctx.b3 <;> cases hs : ctx.s3 <;> simp_all
+    cases Formal.CenterPosition.classify c ctx.price with
+    | within => simp
+    | above => cases ctx.b3 <;> simp
+    | below => cases ctx.s3 <;> simp
 
 /-- `rlevelOf = aboveB3 ↔ IsAboveB3`。 -/
 theorem rlevelOf_eq_aboveB3 (ctx : RContext) : rlevelOf ctx = aboveB3 ↔ IsAboveB3 ctx := by
   unfold rlevelOf IsAboveB3
-  cases h : ctx.lastCenter with
+  cases ctx.lastCenter with
   | none => simp
   | some c =>
     simp only [Option.some.injEq, exists_eq_left']
     rw [← classify_above_iff c ctx.price]
-    cases hcl : Formal.CenterPosition.classify c ctx.price <;>
-      cases hb : ctx.b3 <;> cases hs : ctx.s3 <;> simp_all
+    cases Formal.CenterPosition.classify c ctx.price with
+    | within => simp
+    | above => cases ctx.b3 <;> simp
+    | below => cases ctx.s3 <;> simp
 
 /-- `rlevelOf = aboveNo3B ↔ IsAboveNo3B`。 -/
 theorem rlevelOf_eq_aboveNo3B (ctx : RContext) :
     rlevelOf ctx = aboveNo3B ↔ IsAboveNo3B ctx := by
   unfold rlevelOf IsAboveNo3B
-  cases h : ctx.lastCenter with
+  cases ctx.lastCenter with
   | none => simp
   | some c =>
     simp only [Option.some.injEq, exists_eq_left']
     rw [← classify_above_iff c ctx.price]
-    cases hcl : Formal.CenterPosition.classify c ctx.price <;>
-      cases hb : ctx.b3 <;> cases hs : ctx.s3 <;> simp_all
+    cases Formal.CenterPosition.classify c ctx.price with
+    | within => simp
+    | above => cases ctx.b3 <;> simp
+    | below => cases ctx.s3 <;> simp
 
 /-- `rlevelOf = belowS3 ↔ IsBelowS3`。 -/
 theorem rlevelOf_eq_belowS3 (ctx : RContext) : rlevelOf ctx = belowS3 ↔ IsBelowS3 ctx := by
   unfold rlevelOf IsBelowS3
-  cases h : ctx.lastCenter with
+  cases ctx.lastCenter with
   | none => simp
   | some c =>
     simp only [Option.some.injEq, exists_eq_left']
     rw [← classify_below_iff c ctx.price]
-    cases hcl : Formal.CenterPosition.classify c ctx.price <;>
-      cases hb : ctx.b3 <;> cases hs : ctx.s3 <;> simp_all
+    cases Formal.CenterPosition.classify c ctx.price with
+    | within => simp
+    | above => cases ctx.b3 <;> simp
+    | below => cases ctx.s3 <;> simp
 
 /-- `rlevelOf = belowNo3S ↔ IsBelowNo3S`。 -/
 theorem rlevelOf_eq_belowNo3S (ctx : RContext) :
     rlevelOf ctx = belowNo3S ↔ IsBelowNo3S ctx := by
   unfold rlevelOf IsBelowNo3S
-  cases h : ctx.lastCenter with
+  cases ctx.lastCenter with
   | none => simp
   | some c =>
     simp only [Option.some.injEq, exists_eq_left']
     rw [← classify_below_iff c ctx.price]
-    cases hcl : Formal.CenterPosition.classify c ctx.price <;>
-      cases hb : ctx.b3 <;> cases hs : ctx.s3 <;> simp_all
+    cases Formal.CenterPosition.classify c ctx.price with
+    | within => simp
+    | above => cases ctx.b3 <;> simp
+    | below => cases ctx.s3 <;> simp
 
 /-! ### ★核心定理：R 6 态互斥穷尽（Σ𝟙 = 1） -/
 
@@ -408,11 +420,27 @@ open BSPVector
   ★与 BSPLabels.bsp_totality（标签集 nonempty 字段）对应：标签集非空 ⟺ bit-vector 非空。
 -/
 theorem bspvector_wellformed (v : BSPVector) : v.NonEmpty ↔ v ≠ BSPVector.empty := by
-  unfold BSPVector.NonEmpty BSPVector.empty
   cases v with
   | mk b1 b2 b3 s1 s2 s3 =>
-    cases b1 <;> cases b2 <;> cases b3 <;> cases s1 <;> cases s2 <;> cases s3 <;>
-      simp
+    unfold BSPVector.NonEmpty BSPVector.empty
+    constructor
+    · intro h heq
+      cases heq
+      simp at h
+    · intro hne
+      cases b1
+      · cases b2
+        · cases b3
+          · cases s1
+            · cases s2
+              · cases s3
+                · exact absurd rfl hne
+                · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr rfl))))
+              · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))
+            · exact Or.inr (Or.inr (Or.inr (Or.inl rfl)))
+          · exact Or.inr (Or.inr (Or.inl rfl))
+        · exact Or.inr (Or.inl rfl)
+      · exact Or.inl rfl
 
 /--
   ★bit-vector 容许 2/3 类共存（非互斥正面形式，L0）。
@@ -454,11 +482,24 @@ def toLabels (v : BSPVector) (lvl : Nat) : List BSPLabel :=
 -/
 theorem toLabels_nonempty_iff (v : BSPVector) (lvl : Nat) :
     v.NonEmpty ↔ toLabels v lvl ≠ [] := by
-  unfold BSPVector.NonEmpty toLabels
   cases v with
   | mk b1 b2 b3 s1 s2 s3 =>
-    cases b1 <;> cases b2 <;> cases b3 <;> cases s1 <;> cases s2 <;> cases s3 <;>
-      simp
+    unfold BSPVector.NonEmpty toLabels
+    cases b1
+    · cases b2
+      · cases b3
+        · cases s1
+          · cases s2
+            · cases s3 <;> simp
+            · simp
+          · simp
+        · simp
+      · simp
+    · simp
+
+private theorem mem_if_singleton {α : Type} (c : Bool) (x y : α) :
+    x ∈ (if c then [y] else []) ↔ c = true ∧ x = y := by
+  cases c <;> simp
 
 /--
   ★对接定理：bit-vector 含某买点位 ⟺ 标签列表含对应标签（L0）。
@@ -469,10 +510,8 @@ theorem toLabels_nonempty_iff (v : BSPVector) (lvl : Nat) :
 theorem toLabels_mem_b3 (v : BSPVector) (lvl : Nat) :
     v.b3 = true ↔ (⟨lvl, BSPType.type3, Side.buy⟩ : BSPLabel) ∈ toLabels v lvl := by
   unfold toLabels
-  cases v with
-  | mk b1 b2 b3 s1 s2 s3 =>
-    cases b1 <;> cases b2 <;> cases b3 <;> cases s1 <;> cases s2 <;> cases s3 <;>
-      simp
+  simp only [List.mem_append, mem_if_singleton, BSPLabel.mk.injEq, reduceCtorEq,
+    and_false, or_false, false_or, and_true]
 
 /-! ════════════════════════════════════════════════════════════════════════
     § Part 3 — 每级完整状态 LevelState = (D_ℓ, R_ℓ, E_ℓ)
