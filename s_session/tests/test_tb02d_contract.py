@@ -86,15 +86,60 @@ def rebind(p, segment):
     d.update(segment_id=segment, entity_id=identity); p["slot"] = identity
     return p
 
+_NODE_WORKER = (
+    "const a=require(process.argv[1]),rl=require('node:readline').createInterface({input:process.stdin,terminal:false});"
+    "rl.on('line',line=>{if(!line)return;try{const [k,p]=JSON.parse(line);a.validateSegmentPayload(k,p);"
+    "console.log(JSON.stringify({ok:true}))}catch(e){console.log(JSON.stringify({ok:false,err:e.message}))}})"
+)
+
+
 class SecondContractTest(unittest.TestCase):
+    _node_proc = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls._node_proc = subprocess.Popen(
+            ["node", "-e", _NODE_WORKER, str(ROOT / "browser/tb01c-client.js")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        proc = cls._node_proc
+        cls._node_proc = None
+        if proc is not None:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+    def _js_validate(self, kind, p):
+        proc = self._node_proc
+        assert proc is not None and proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(json.dumps([kind, p]) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            self.fail(proc.stderr.read() if proc.stderr is not None else "node worker exited unexpectedly")
+        return json.loads(line)
+
     def both(self, kind, p, valid=True):
         if valid:
             c.validate_payload(kind, p)
         else:
             with self.assertRaises(ValueError): c.validate_payload(kind, p)
-        program = "const a=require(process.argv[1]);let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{const p=JSON.parse(s);try{a.validateSegmentPayload(process.argv[2],p)}catch(e){process.exit(3)}})"
-        result = subprocess.run(["node", "-e", program, str(ROOT / "browser/tb01c-client.js"), kind], input=json.dumps(p), text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0 if valid else 3, result.stderr)
+        res = self._js_validate(kind, p)
+        self.assertEqual(res["ok"], valid, res.get("err", ""))
 
     def test_second_and_case_two_accept(self):
         second, segment = samples()
@@ -137,10 +182,9 @@ class SecondContractTest(unittest.TestCase):
 
     def reject_reasons(self, kind, p):
         with self.assertRaises(ValueError) as caught: c.validate_payload(kind, p)
-        program = "const a=require(process.argv[1]);let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{try{a.validateSegmentPayload(process.argv[2],JSON.parse(s))}catch(e){process.stdout.write(e.message);process.exit(3)}})"
-        result = subprocess.run(["node", "-e", program, str(ROOT / "browser/tb01c-client.js"), kind], input=json.dumps(p), text=True, capture_output=True)
-        self.assertEqual(result.returncode, 3, result.stderr)
-        return str(caught.exception), result.stdout
+        res = self._js_validate(kind, p)
+        self.assertFalse(res["ok"])
+        return str(caught.exception), res["err"]
 
     def test_empty_stroke_refs_rejected_by_both_sides(self):
         # 审查 L2：空 stroke_refs 无从取身份锚；FIRST 与 SECOND 都必须在同一道门被两侧拒绝。
