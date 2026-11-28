@@ -338,44 +338,115 @@ def b23_existsHigherCenterAnywhereBool : List CompletedWave → Bool
     b23_tripleOverlapsBool w1 w2 w3 || b23_existsHigherCenterAnywhereBool (w2 :: w3 :: rest)
   | _ => false
 
-/-- 同级别趋势中单个中枢的完整波动区间 `[dd, gg]`（用于刻画 `018:42`/`020:36`/`033:24` 允许的无上限同级趋势延续 `A0 + b1 + A1 + b2 + ...`，其中 `b_k` 仅作为相邻两中枢之间的连接段或 `033:24` 跳空缺口）。
-引文：[018:42]「同样，面对趋势，形成两个依次同向的缠中说禅走势中枢后，任何趋势都可以随时结束而完美，但也可以不断地延伸下去，形成更多的中枢。」
-引文：[033:24]「在最极端的情况下，在a+A+b+B+c的走势系列类型里，a和c并不是必然存在的，而b完全可以是一个跳空缺口，这样，整个走势就可以简化为两个孤零零的中枢。」 -/
-structure LevelCenterBand where
-  /-- 中枢波动区间最低点 `DD`。 -/
-  dd : Int
-  /-- 中枢波动区间最高点 `GG`。 -/
-  gg : Int
+/-- 构成下跌趋势中单个同级别中枢的真实三段次级别已完成走势见证（上-下-上三段首尾衔接且存在非空公共重叠），所有中枢边界指标直接由三段推导，杜绝裸区间伪造。
+引文：[017:38]「某级别走势类型中，被至少三个连续次级别走势类型所重叠的部分，称为缠中说禅走势中枢」
+引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」 -/
+structure B23CenterWitness where
+  /-- 构成中枢的第 1 个次级别已完成走势段（向上 `Z1`）。 -/
+  s1 : CompletedWave
+  /-- 构成中枢的第 2 个次级别已完成走势段（向下反向段）。 -/
+  s2 : CompletedWave
+  /-- 构成中枢的第 3 个次级别已完成走势段（向上 `Z2`）。 -/
+  s3 : CompletedWave
   deriving Repr, DecidableEq
 
-/-- B-23 无限同级反向趋势延续载体（撤除有限前缀截断与任意悬空区间）：
-已完成同级别向上走势 `t1` 之后，市场走入一条由无穷多个依次向下且波动区间严格分离的同级别中枢 `centers n` 构成的反向趋势（相邻两中枢间仅以连接段或 `033:24` 跳空缺口 `b_k` 相连，满足 `018:42` 与 `020:36`“不断产生新的走势中枢并相应围绕波动互不重叠而形成趋势”）。
+/-- 由三段见证推导该中枢入口价（向上首段 `s1` 的低点）。
+引文：[017:38]「某级别走势类型中，被至少三个连续次级别走势类型所重叠的部分，称为缠中说禅走势中枢」 -/
+def B23CenterWitness.entryPrice (c : B23CenterWitness) : Int :=
+  c.s1.lo
+
+/-- 由三段见证推导该中枢出口价（向上末段 `s3` 的高点）。
+引文：[017:38]「某级别走势类型中，被至少三个连续次级别走势类型所重叠的部分，称为缠中说禅走势中枢」 -/
+def B23CenterWitness.exitPrice (c : B23CenterWitness) : Int :=
+  c.s3.hi
+
+/-- 按 `020:54` 由同向 `Z` 段 `(s1, s3)` 推导中枢核心下沿 `ZD = max(d1, d2)`。
+引文：[020:54]「特别地，再定义ZG= min(g1、g2),ZD=max(d1、d2)，显然，[ZD，ZG]就是缠中说禅走势中枢的区间，由此有了如下定理：」 -/
+def B23CenterWitness.zd (c : B23CenterWitness) : Int :=
+  if c.s1.lo ≤ c.s3.lo then c.s3.lo else c.s1.lo
+
+/-- 按 `020:54` 由同向 `Z` 段 `(s1, s3)` 推导中枢核心上沿 `ZG = min(g1, g2)`。
+引文：[020:54]「特别地，再定义ZG= min(g1、g2),ZD=max(d1、d2)，显然，[ZD，ZG]就是缠中说禅走势中枢的区间，由此有了如下定理：」 -/
+def B23CenterWitness.zg (c : B23CenterWitness) : Int :=
+  if c.s1.hi ≤ c.s3.hi then c.s1.hi else c.s3.hi
+
+/-- 按 `020:52` 仅遍历同向 `Z` 段 `(s1, s3)` 推导波动最低点 `DD = min(d1, d2)`。
+引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」 -/
+def B23CenterWitness.dd (c : B23CenterWitness) : Int :=
+  if c.s1.lo ≤ c.s3.lo then c.s1.lo else c.s3.lo
+
+/-- 按 `020:52` 仅遍历同向 `Z` 段 `(s1, s3)` 推导波动最高点 `GG = max(g1, g2)`。
+引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」 -/
+def B23CenterWitness.gg (c : B23CenterWitness) : Int :=
+  if c.s1.hi ≤ c.s3.hi then c.s3.hi else c.s1.hi
+
+/-- 校验三段见证构成合法的同级别回升型三段中枢（`s1` 上、`s2` 下、`s3` 上，逐段非退化、首尾严格衔接且三段存在非空公共重叠）。
+引文：[017:38]「某级别走势类型中，被至少三个连续次级别走势类型所重叠的部分，称为缠中说禅走势中枢」 -/
+def b23_validUpCenterWitness (c : B23CenterWitness) : Bool :=
+  decide (c.s1.isUp = true) &&
+  b23_validAltWaveSeqBool [c.s1, c.s2, c.s3] &&
+  b23_tripleOverlapsBool c.s1 c.s2 c.s3
+
+/-- 相邻中枢之间的具体向下连接段见证：常规无缺口的次级别向下连接段 `subWave w`，或 `033:24` 明确允许的中枢间向下跳空缺口 `gap`。
+引文：[033:24]「在最极端的情况下，在a+A+b+B+c的走势系列类型里，a和c并不是必然存在的，而b完全可以是一个跳空缺口，这样，整个走势就可以简化为两个孤零零的中枢。」 -/
+inductive B23Connector where
+  /-- 连续无缺口的次级别向下连接段 `b`。 -/
+  | subWave (w : CompletedWave)
+  /-- `033:24` 允许的相邻两同级中枢间的向下跳空缺口。 -/
+  | gap
+  deriving Repr, DecidableEq
+
+/-- 校验向下连接见证把前驱出口价 `prevExit` 合法连接到后继入口价 `nextEntry`（无缺口时要求 `w.isUp = false ∧ w.lo < w.hi ∧ w.hi = prevExit ∧ w.lo = nextEntry`；缺口时仅限中枢间且要求 `nextEntry < prevExit`）。
+引文：[033:24]「在最极端的情况下，在a+A+b+B+c的走势系列类型里，a和c并不是必然存在的，而b完全可以是一个跳空缺口，这样，整个走势就可以简化为两个孤零零的中枢。」 -/
+def b23_validDownConnector (prevExit nextEntry : Int) : B23Connector → Bool
+  | .subWave w =>
+    decide (w.isUp = false) &&
+    decide (w.lo < w.hi) &&
+    decide (w.hi = prevExit) &&
+    decide (w.lo = nextEntry)
+  | .gap =>
+    decide (nextEntry < prevExit)
+
+/-- B-23 无限后续连续轨迹前提（带完整三段成枢见证与具体连接段 `b_n` 见证，**绝不**将 `(centers (n + 1)).gg < (centers n).dd` 写入前提以防同义反复）：
+已完成同级别向上走势 `t1` 之后，经具体连接见证 `bInit` 衔接至首个由三段次级别走势构成的中枢 `centers 0`；
+其后对所有 `n : Nat`，每个 `centers n` 均具完整合法三段成枢见证，经具体连接见证 `links n` 衔接至 `centers (n + 1)`，且仅要求连接段与下一中枢首段满足 `018:64`/`054:24` 对前中枢核心下沿 `zd` 的严格第三类卖点破坏（`entryPrice < prev.zd ∧ s1.hi < prev.zd`）。
+注：该前提下既存在后续 `s3` 反抽触及前枢 `dd` 从而形成大一级别中枢扩展的合法轨迹，也存在全程零缺口（全部使用 `.subWave`）且所有相邻中枢波动区间互不重叠的无止境同级下跌趋势（`018:42`/`020:36`）。
 引文：[018:42]「同样，面对趋势，形成两个依次同向的缠中说禅走势中枢后，任何趋势都可以随时结束而完美，但也可以不断地延伸下去，形成更多的中枢。」
+引文：[018:64]「某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。」
 引文：[020:36]「换言之，走势中枢的延伸与不断产生新的走势中枢并相应围绕波动互不重叠而形成趋势，在这两种情况下」
 引文：[020:36]「一定不可能形成更大级别的走势中枢。」 -/
-def b23_validUnendingDownTrendAfter
-    (t1 : CompletedWave) (centers : Nat → LevelCenterBand) : Prop :=
+def b23_validPostCompletedDownTrendTrace
+    (t1 : CompletedWave)
+    (bInit : B23Connector)
+    (centers : Nat → B23CenterWitness)
+    (links : Nat → B23Connector) : Prop :=
   t1.isUp = true ∧
   t1.lo < t1.hi ∧
-  (∀ n : Nat, (centers n).dd < (centers n).gg) ∧
-  (centers 0).gg < t1.lo ∧
-  (∀ n : Nat, (centers (n + 1)).gg < (centers n).dd)
+  b23_validDownConnector t1.hi (centers 0).entryPrice bInit = true ∧
+  (centers 0).s1.hi < t1.hi ∧
+  (∀ n : Nat,
+    b23_validUpCenterWitness (centers n) = true ∧
+    b23_validDownConnector (centers n).exitPrice (centers (n + 1)).entryPrice (links n) = true ∧
+    (centers (n + 1)).entryPrice < (centers n).zd ∧
+    (centers (n + 1)).s1.hi < (centers n).zd)
 
-/-- 依据 `020:44` 走势级别延续定理二：后续同级中枢流中存在连续两个同级中枢的波动区间产生重叠，从而形成高一级别中枢。
+/-- 依据 `020:44` 走势级别延续定理二：后续同级中枢流中存在连续两个同级中枢的波动区间 `[dd, gg]` 产生重叠，从而形成高一级别中枢。
 引文：[020:44]「缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。」 -/
-def b23_hasOverlappingCenterPair (centers : Nat → LevelCenterBand) : Prop :=
+def b23_hasOverlappingCenterPair (centers : Nat → B23CenterWitness) : Prop :=
   ∃ n : Nat,
     (centers n).dd ≤ (centers (n + 1)).gg ∧
     (centers (n + 1)).dd ≤ (centers n).gg
 
-/-- B-23 无活性前提检验命题（无限演化模型，不截断有限前缀、不接受任意悬空四段）：一个同级别走势 `t1` 完成后，即便不引入“后续反向趋势必然终结”的活性公理、允许后续按 `018:42`/`020:36`/`033:24` 持续走出无限多个以连接段/缺口 `b_k` 相隔的互不重叠同级中枢，仍必然出现相邻中枢波动重叠从而进入大一级别中枢震荡。
-所刻画确切命题：揭示 `099:30` 与 `043:20` 的真实逻辑边界——当后续满足活性（至少走出 3 段无缺口交替已完成同级走势）时，高一级中枢确实必然成立（含 `099:24` 后续 `f\g\h` 独立成枢）；但若剥离活性公理，允许后续反向趋势按 `018:42`/`020:36` 无止境延续（中枢间仅以连接段或 `033:24` 缺口 `b_k` 相连），则大一级别中枢永不出现。
+/-- B-23 无活性前提检验命题（带完整三段成枢与连续连接段 `b_n` 见证、无前提循环）：一个同级别走势 `t1` 完成后，在不引入“后续反向趋势必然终结”的活性公理、允许后续持续经连续连接段或 `033:24` 缺口走入满足第三类卖点破坏的无穷同级中枢链时，仍必然出现首中枢与 `t1` 区间相交或相邻同级中枢波动重叠从而进入大一级别中枢震荡。
+所刻画确切命题：揭示 `099:30` 与 `043:20` 的真实逻辑边界——当后续满足活性（至少走出 3 段无缺口交替已完成同级走势）时，高一级中枢确实必然成立（含 `099:24` 后续 `f\g\h` 独立成枢）；但若剥离活性公理，即便要求每枢具备完整三段成枢见证且相邻中枢全程以无缺口次级别向下连接段 `.subWave` 首尾衔接（且不预先假定波动分离、同时排除 `centers 0` 回到 `t1` 区间内的伪反例），仍存在合法无止境同级下跌趋势使大一级别中枢永不出现。
 引文：[099:30]「由此可见，因为划分中的这种情况，我们就很明确地知道，走势的最大特点就是，连接中枢的走势级别一定小于中枢，换言之，一个走势级别完成后必然面临至少大一级别的中枢震荡。例如，一个5分钟的上涨结束后，必然至少要有一个30分钟的中枢震荡，这就是任何走势的必然结论，没有任何走势可以逃脱。」
 引文：[018:42]「同样，面对趋势，形成两个依次同向的缠中说禅走势中枢后，任何趋势都可以随时结束而完美，但也可以不断地延伸下去，形成更多的中枢。」
 引文：[033:24]「在最极端的情况下，在a+A+b+B+c的走势系列类型里，a和c并不是必然存在的，而b完全可以是一个跳空缺口，这样，整个走势就可以简化为两个孤零零的中枢。」 -/
 def b23_unconditionalHigherCenterWithoutLivenessLiteral : Prop :=
-  ∀ (t1 : CompletedWave) (centers : Nat → LevelCenterBand),
-    b23_validUnendingDownTrendAfter t1 centers →
+  ∀ (t1 : CompletedWave) (bInit : B23Connector)
+    (centers : Nat → B23CenterWitness) (links : Nat → B23Connector),
+    b23_validPostCompletedDownTrendTrace t1 bInit centers links →
+    (t1.lo ≤ (centers 0).gg ∧ (centers 0).dd ≤ t1.hi) ∨
     b23_hasOverlappingCenterPair centers
 
 end Chan.Audit.Literal
