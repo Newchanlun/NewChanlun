@@ -783,18 +783,6 @@ jobs:
           cat ../locks.tsv
           exit $fail
 
-      # #1640 §2.3 第 3 层（产物机检）：不 strip 的生产增量 release 构建，nm 子串与禁串（固定＋自动抽取清单）零命中。
-      #   Cargo.toml 的 release profile 不设 strip，符号表保留。
-      # #1875：产物机检原在 release-locks 里与 S4 后台并行（R5，当时 S4 单线程、构建被锁的时长盖住）。#2041 让 S4 冷臂
-      #   用上第二个核后，后台构建（rustc/LLVM 代码生成多线程）与它争 CPU：Boat 同机 S4 并行版独占 490–502 s，带后台构建
-      #   599–626 s。改在 economic 组前台构建（该组中位 4.3 min，加上构建仍远短于 release-locks），用满核数。
-      - name: 生产增量 release 产物无测试钩子（#1640）
-        if: ${{ !cancelled() && startsWith(matrix.group, 'economic') }}
-        timeout-minutes: 30
-        run: |
-          ../.github/scripts/run-cargo-with-telemetry.sh cargo build --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}"
-          ../.github/scripts/check-prod-artifact-hooks.sh target/release/s_structure_session
-
       - name: Upload release-only lock logs（#1640）
         if: ${{ always() && matrix.group == 'release-locks' }}
         uses: actions/upload-artifact@v4
@@ -839,6 +827,18 @@ jobs:
       - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
+
+      # #1640 §2.3 第 3 层（产物机检）：不 strip 的生产增量 release 构建，nm 子串与禁串（固定＋自动抽取清单）零命中。
+      #   Cargo.toml 的 release profile 不设 strip，符号表保留。
+      # #1875：原在 economic 组（dev opt-level 1）从零冷编 release（约 190 s）；迁到本作业紧随纯生产 --release 步之后，
+      #   直接复用已编好的 release 依赖图（同机 4 核 Boat 实测 117.14 → 68.60 s，-41.4%，nm 7 项与禁串 1663 项逐项一致），
+      #   同时把 economic 组缩短约 190 s。本作业与 extras 共享同一 changes.outputs.rust 门控，同入 ci-ok / rust-green。
+      - name: 生产增量 release 产物无测试钩子（#1640）
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        timeout-minutes: 30
+        run: |
+          ../.github/scripts/run-cargo-with-telemetry.sh cargo build --release --locked --features s_session,s_incremental --bin s_structure_session --jobs "${CI_CARGO_JOBS_RELEASE:-4}"
+          ../.github/scripts/check-prod-artifact-hooks.sh target/release/s_structure_session
 
       # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）。三个测试步都带
       #   `!cancelled() && steps.setup.outcome == 'success'`：前一个测试步失败不跳过后面的（失败照样使本作业失败），
