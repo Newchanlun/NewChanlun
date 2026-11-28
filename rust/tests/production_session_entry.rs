@@ -16,7 +16,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -175,6 +175,11 @@ fn anchor(db: &Path) -> PathBuf {
 fn anchor_with_wire_limit(db: &Path, max_total_wire_bytes: u64) -> PathBuf {
     let db = db.canonicalize().unwrap();
     let state = db.parent().unwrap().join("s-state");
+    anchor_in(&db, &state, max_total_wire_bytes)
+}
+
+fn anchor_in(db: &Path, state: &Path, max_total_wire_bytes: u64) -> PathBuf {
+    let db = db.canonicalize().unwrap();
     let published = state.join("s-admission");
     std::fs::create_dir_all(&published).unwrap();
     std::fs::set_permissions(&published, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1071,4 +1076,597 @@ fn production_launcher_does_not_forward_theta_diagnostic_switch() {
     eventually("S socket", || space.path("s.sock").exists());
     assert_s_environ_lacks_theta_diagnostic(&kids);
     assert_eq!(stop(&mut launcher).code(), Some(0));
+}
+
+// ADR 0059：拒启夹具不预先 init；正控用真实 launcher 和已签 synthetic S 配置，两档 feature 共跑。
+struct LayoutFixture {
+    space: Space,
+    manifest: PathBuf,
+    launcher: Value,
+    economic: Value,
+}
+
+impl LayoutFixture {
+    fn new() -> Self {
+        Self::with_layout(true, false)
+    }
+
+    fn with_layout(separate: bool, init_s: bool) -> Self {
+        let space = Space::new();
+        let source = declaration("TestOnlyStructure", DECLARED_NS);
+        let p = space.path("s");
+        let a = if separate {
+            space.path("admission")
+        } else {
+            p.join("s-state")
+        };
+        let db = if init_s {
+            s_init_v3(&space, Some(&source))
+        } else {
+            space.s_db()
+        };
+        let limits = if init_s {
+            anchor_in(&db, &a, 1_073_741_824)
+        } else {
+            std::fs::create_dir_all(&a).unwrap();
+            a.join("s-admission/limits.json")
+        };
+        let xp = x_profile(&space, "simulation", None, Some("tb09-sentinel"), false);
+        let manifest = launcher_manifest(&space, "simulation", &source, &db, &limits, &xp);
+        let launcher: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        let economic =
+            serde_json::from_slice(&std::fs::read(space.path("economic.json")).unwrap()).unwrap();
+        let mut fixture = Self {
+            space,
+            manifest,
+            launcher,
+            economic,
+        };
+        if separate {
+            for domain in ["e", "b", "x"] {
+                fixture.dir(domain);
+            }
+            fixture.e_db(&fixture.path("e/e.db"));
+            fixture.b_db(&fixture.path("b/b.db"));
+            fixture.launcher["x"]["db"] = json!(fixture.path("x/x.db"));
+            fixture.economic["e"]["socket"] = json!(fixture.path("e/e.sock"));
+            fixture.economic["chongs"][0]["socket"] = json!(fixture.path("b/b.sock"));
+        }
+        fixture
+    }
+
+    fn path(&self, rel: &str) -> PathBuf {
+        self.space.path(rel)
+    }
+
+    fn dir(&self, rel: &str) -> PathBuf {
+        let path = self.path(rel);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn e_db(&mut self, db: &Path) {
+        self.launcher["economic"]["e"]["db"] = json!(db);
+        self.economic["e"]["db"] = json!(db);
+    }
+
+    fn b_db(&mut self, db: &Path) {
+        self.launcher["economic"]["b"][0]["db"] = json!(db);
+        self.economic["chongs"][0]["db"] = json!(db);
+    }
+
+    fn write_manifests(&self) {
+        write_json(&self.manifest, &self.launcher);
+        write_json(&self.path("economic.json"), &self.economic);
+    }
+
+    fn assert_refused(&self) -> String {
+        // 递归比对整份场地（包含 P、A、域目录和 launcher state_dir），不跟随软链。
+        // 这样也会查到夹具中预置的悬空链接目标被创建，或原有条目被移走。
+        fn entries(dir: &Path) -> Vec<PathBuf> {
+            let mut paths = Vec::new();
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    paths.extend(entries(&path));
+                }
+                paths.push(path);
+            }
+            paths.sort_unstable();
+            paths
+        }
+
+        let before = entries(self.space.0.path());
+        let out = run_refusal(
+            Command::new(launcher_bin())
+                .arg("--manifest")
+                .arg(&self.manifest)
+                .env_remove(THETA_DIAGNOSTIC.0),
+        );
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(!stderr.contains("\"event\":\"start\""), "{stderr}");
+        assert_eq!(entries(self.space.0.path()), before, "{stderr}");
+        stderr
+    }
+
+    fn assert_conflict(&self, field: &str, q: &Path, source: &str, member: &Path) {
+        self.write_manifests();
+        let stderr = self.assert_refused();
+        let expected =
+            format!("InvalidDomain：{field} 的判定目录 {q:?} 命中 {source} 的测量域 {member:?}");
+        assert!(stderr.lines().any(|line| line == expected), "{stderr}");
+    }
+
+    fn assert_listens(&self) {
+        self.write_manifests();
+        let mut launcher = spawn_launcher(&self.manifest);
+        let sockets = [
+            &self.launcher["s"]["socket"],
+            &self.economic["e"]["socket"],
+            &self.economic["chongs"][0]["socket"],
+        ]
+        .map(|v| Path::new(v.as_str().unwrap()));
+        let x_db = Path::new(self.launcher["x"]["db"].as_str().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let ready = loop {
+            if let Some(status) = launcher.try_wait().unwrap() {
+                panic!(
+                    "launcher 提前退出 {status}：{}",
+                    launcher_stderr(&mut launcher)
+                );
+            }
+            if sockets.iter().all(|p| {
+                std::fs::symlink_metadata(p).is_ok_and(|meta| meta.file_type().is_socket())
+            }) && domain_children(launcher.id())
+                .iter()
+                .any(|(name, _)| name == "x_execution_session")
+                && meta(x_db, "SELECT value FROM x_meta WHERE key='writer_epoch'").as_deref()
+                    == Some("1")
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let status = stop(&mut launcher);
+        let stderr = launcher_stderr(&mut launcher);
+        assert!(ready, "S/E/B socket 或 X epoch 未就绪：{stderr}");
+        assert_eq!(status.code(), Some(0), "{stderr}");
+    }
+}
+
+#[test]
+fn layout_rejects_e_db_in_s_db_parent() {
+    let mut f = LayoutFixture::new();
+    f.e_db(&f.path("s/e.db"));
+    f.assert_conflict("economic.e.db", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_b_db_in_s_db_parent() {
+    let mut f = LayoutFixture::new();
+    f.b_db(&f.path("s/b.db"));
+    f.assert_conflict("economic.b[0].db", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_x_db_in_s_db_parent() {
+    let mut f = LayoutFixture::new();
+    f.launcher["x"]["db"] = json!(f.path("s/x.db"));
+    f.assert_conflict("x.db", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_e_db_under_admission_state() {
+    let mut f = LayoutFixture::new();
+    f.launcher["s"]["admission_job_limits"] = json!(f.path("s/s-admission/limits.json"));
+    let q = f.dir("s/e");
+    f.e_db(&q.join("e.db"));
+    f.assert_conflict("economic.e.db", &q, "s.admission_job_limits", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_e_db_under_separate_admission_state() {
+    let mut f = LayoutFixture::new();
+    let q = f.dir("admission/e");
+    f.e_db(&q.join("e.db"));
+    f.assert_conflict(
+        "economic.e.db",
+        &q,
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_rejects_e_db_under_s_family_entry() {
+    let mut f = LayoutFixture::new();
+    let q = f.dir("s/s.db.admission-private/e");
+    f.e_db(&q.join("e.db"));
+    f.assert_conflict(
+        "economic.e.db",
+        &q,
+        "s.db",
+        &f.path("s/s.db.admission-private"),
+    );
+    let member = f.path("s/s.db.marker");
+    std::fs::File::create(&member).unwrap();
+    f.e_db(&f.path("s/s.db.marker//e.db"));
+    f.assert_conflict("economic.e.db", &member, "s.db", &member);
+}
+
+#[test]
+fn layout_rejects_symlink_alias_of_s_parent() {
+    let mut f = LayoutFixture::new();
+    symlink(f.path("s"), f.path("linked-s")).unwrap();
+    f.e_db(&f.path("linked-s/e.db"));
+    f.assert_conflict("economic.e.db", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_resolves_not_yet_existing_db_dirs() {
+    let mut f = LayoutFixture::new();
+    symlink(f.path("admission"), f.path("linked-a")).unwrap();
+    f.e_db(&f.path("linked-a/new/e.db"));
+    f.assert_conflict(
+        "economic.e.db",
+        &f.path("admission/new"),
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_preserves_missing_path_suffix_in_measurement_domain() {
+    let mut f = LayoutFixture::new();
+    let family = f.dir("s/s.db.fam");
+    for (member, suffix, source) in [
+        (
+            f.path("admission"),
+            "missing/../sub",
+            "s.admission_job_limits",
+        ),
+        (family, "missing/../x", "s.db"),
+    ] {
+        assert!(!member.join("missing").exists());
+        let q = member.join(suffix);
+        f.e_db(&q.join("e.db"));
+        f.assert_conflict("economic.e.db", &q, source, &member);
+    }
+}
+
+#[test]
+fn layout_preserves_curdir_in_missing_path_suffix() {
+    let mut f = LayoutFixture::new();
+    let admission = f.path("admission");
+    let family = f.dir("s/s.db.fam");
+    for (member, suffix, source) in [
+        (&admission, "missing/./sub", "s.admission_job_limits"),
+        (&admission, "missing/.", "s.admission_job_limits"),
+        (&family, "missing/./x", "s.db"),
+    ] {
+        assert!(!member.join("missing").exists());
+        let q = member.join(suffix);
+        f.e_db(&q.join("e.db"));
+        f.assert_conflict("economic.e.db", &q, source, member);
+    }
+}
+
+#[test]
+fn layout_preserves_missing_path_suffix_toward_safe_sibling() {
+    let mut f = LayoutFixture::new();
+    let admission = f.path("admission");
+    let safe = f.dir("safe");
+    assert!(!admission.join("missing").exists());
+    let q = admission.join("missing/../../safe");
+    f.e_db(&q.join("e.db"));
+    f.assert_conflict("economic.e.db", &q, "s.admission_job_limits", &admission);
+    assert!(!safe.join("e.db").exists());
+}
+
+#[test]
+fn layout_rejects_x_db_file_symlink_into_s_parent() {
+    let mut f = LayoutFixture::new();
+    std::fs::File::create(f.path("s/x.db")).unwrap();
+    symlink(f.path("s/x.db"), f.path("x/alias.db")).unwrap();
+    f.launcher["x"]["db"] = json!(f.path("x/alias.db"));
+    f.assert_conflict("x.db", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_e_db_dangling_symlink_into_admission_state() {
+    let mut f = LayoutFixture::new();
+    // 相对目标跨两跳：每跳都从该链接的父目录解析。
+    symlink("../admission/e.db", f.path("b/next.db")).unwrap();
+    symlink("../b/next.db", f.path("e/alias.db")).unwrap();
+    f.e_db(&f.path("e/alias.db"));
+    f.assert_conflict(
+        "economic.e.db",
+        &f.path("admission"),
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_rejects_writer_lock_symlink_into_s_parent() {
+    let f = LayoutFixture::new();
+    std::fs::File::create(f.path("x/x.db")).unwrap();
+    symlink(f.path("s/x-external-lock"), f.path("x/x.db.writer.lock")).unwrap();
+    f.assert_conflict("x.db", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_absent_db_writer_lock_symlink_into_admission_state() {
+    let mut f = LayoutFixture::new();
+    let e_real = f.dir("e-real");
+    symlink(e_real.join("e.db"), f.path("e/alias.db")).unwrap();
+    symlink(
+        f.path("admission/e-external-lock"),
+        f.path("e/alias.db.writer.lock"),
+    )
+    .unwrap();
+    f.e_db(&f.path("e/alias.db"));
+    f.assert_conflict(
+        "economic.e.db",
+        &f.path("admission"),
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_rejects_e_socket_in_s_parent() {
+    let mut f = LayoutFixture::new();
+    f.economic["e"]["socket"] = json!(f.path("s/e.sock"));
+    f.assert_conflict("e.socket", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_b_socket_under_admission_state() {
+    let mut f = LayoutFixture::new();
+    f.economic["chongs"][0]["socket"] = json!(f.path("admission/b.sock"));
+    f.assert_conflict(
+        "chongs[0].socket",
+        &f.path("admission"),
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_rejects_e_socket_under_s_family_entry() {
+    let mut f = LayoutFixture::new();
+    let q = f.dir("s/s.db.admission-private");
+    f.economic["e"]["socket"] = json!(q.join("e.sock"));
+    f.assert_conflict("e.socket", &q, "s.db", &q);
+}
+
+#[test]
+fn layout_rejects_b_socket_parent_symlink_into_s_parent() {
+    let mut f = LayoutFixture::new();
+    symlink(f.path("s"), f.path("b/run")).unwrap();
+    f.economic["chongs"][0]["socket"] = json!(f.path("b/run/b.sock"));
+    f.assert_conflict("chongs[0].socket", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_e_socket_final_dangling_symlink_into_s_parent() {
+    let mut f = LayoutFixture::new();
+    let run = f.dir("e-run");
+    let alias = run.join("alias.sock");
+    symlink(f.path("s/e.sock"), &alias).unwrap();
+    f.economic["e"]["socket"] = json!(alias);
+    f.assert_conflict("e.socket", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_b_socket_final_dangling_symlink_into_admission_state() {
+    let mut f = LayoutFixture::new();
+    let run = f.dir("b-run");
+    let alias = run.join("alias.sock");
+    symlink(f.path("admission/b.sock"), &alias).unwrap();
+    f.economic["chongs"][0]["socket"] = json!(alias);
+    f.assert_conflict(
+        "chongs[0].socket",
+        &f.path("admission"),
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_accepts_db_file_symlink_between_safe_dirs() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    let db = f.dir("x-real").join("x.db");
+    std::fs::File::create(&db).unwrap();
+    symlink(&db, f.path("x/alias.db")).unwrap();
+    // 库已存在：只走 L2，词法文件名派生的 L1 不会被打开。
+    let unused = f.path("s/unused-lock");
+    symlink(&unused, f.path("x/alias.db.writer.lock")).unwrap();
+    f.launcher["x"]["db"] = json!(f.path("x/alias.db"));
+    f.assert_listens();
+    assert!(!unused.exists());
+}
+
+#[test]
+fn layout_accepts_sockets_in_non_family_subdir_of_s_parent() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    let run = f.dir("s/run");
+    f.economic["e"]["socket"] = json!(run.join("e.sock"));
+    f.economic["chongs"][0]["socket"] = json!(run.join("b.sock"));
+    f.assert_listens();
+}
+
+#[test]
+fn layout_allows_s_socket_in_s_parent() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    f.launcher["s"]["socket"] = json!(f.path("s/s.sock"));
+    f.assert_listens();
+}
+
+#[test]
+fn layout_accepts_db_in_non_family_subdir_of_s_parent() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    // 用相同前缀但下一字节不是点或连字符的名字，锁住 S 族的精确边界。
+    let q = f.dir("s/s.dbwork");
+    f.e_db(&q.join("e.db"));
+    f.assert_listens();
+}
+
+#[test]
+fn layout_accepts_original_fixture_layout() {
+    LayoutFixture::with_layout(false, true).assert_listens();
+}
+
+#[test]
+fn layout_accepts_separate_directories() {
+    LayoutFixture::with_layout(true, true).assert_listens();
+}
+
+#[test]
+fn layout_accepts_parent_of_existing_symlink_target() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    // 链接的词法父目录是 P；链接不属 S 库名族，目标的物理父目录在测量域外。
+    symlink(f.dir("e/child"), f.path("s/physical-link")).unwrap();
+    let physical_db = f.path("e/e.db");
+    assert!(!physical_db.exists());
+    f.e_db(&f.path("s/physical-link/../e.db"));
+    f.assert_listens();
+    assert_eq!(
+        meta(&physical_db, "SELECT v FROM meta WHERE k='writer_epoch'").as_deref(),
+        Some("1")
+    );
+    assert!(!f.path("s/e.db").exists());
+}
+
+#[test]
+fn layout_allows_launcher_state_dir_equal_s_parent() {
+    let mut f = LayoutFixture::with_layout(true, true);
+    f.launcher["state_dir"] = json!(f.path("s"));
+    f.assert_listens();
+    assert!(f.path("s/structure-source.json").is_file());
+}
+
+#[test]
+fn layout_rejects_absent_db_future_writer_lock() {
+    let mut f = LayoutFixture::new();
+    let db = f.dir("e-real").join("e.db");
+    symlink(db, f.path("e/alias.db")).unwrap();
+    symlink(
+        f.path("admission/e-external-lock"),
+        f.path("e-real/e.db.writer.lock"),
+    )
+    .unwrap();
+    f.e_db(&f.path("e/alias.db"));
+    f.assert_conflict(
+        "economic.e.db",
+        &f.path("admission"),
+        "s.admission_job_limits",
+        &f.path("admission"),
+    );
+}
+
+#[test]
+fn layout_uses_actual_s_db_parent_and_basename() {
+    let mut f = LayoutFixture::new();
+    symlink(f.path("s/real.db"), f.path("s-alias.db")).unwrap();
+    f.launcher["s"]["db"] = json!(f.path("s-alias.db"));
+    let q = f.dir("s/real.db-private");
+    f.e_db(&q.join("e.db"));
+    f.assert_conflict("economic.e.db", &q, "s.db", &q);
+}
+
+#[test]
+fn layout_rejects_symlink_loops_before_start() {
+    let mut f = LayoutFixture::new();
+    symlink("second", f.path("e/first")).unwrap();
+    symlink("first", f.path("e/second")).unwrap();
+    for rel in ["e/first", "e/first/e.db"] {
+        f.e_db(&f.path(rel));
+        f.write_manifests();
+        assert!(f
+            .assert_refused()
+            .contains("InvalidDomain：economic.e.db 路径"));
+    }
+}
+
+#[test]
+fn layout_reads_b_socket_by_chong_identity() {
+    let mut f = LayoutFixture::new();
+    let mut extra = f.economic["chongs"][0].clone();
+    extra["chong_id"] = json!("two");
+    extra["operation_level"] = json!("2");
+    extra["db"] = json!(f.path("b/two.db"));
+    extra["socket"] = json!(f.path("b/two.sock"));
+    f.economic["chongs"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, extra);
+    f.economic["chongs"][1]["socket"] = json!(f.path("s/b.sock"));
+    f.assert_conflict("chongs[1].socket", &f.path("s"), "s.db", &f.path("s"));
+}
+
+#[test]
+fn layout_rejects_unreadable_or_incomplete_economic_manifest() {
+    let mut f = LayoutFixture::new();
+    let econ = f.path("economic.json");
+    f.launcher["economic"]["manifest"] = json!(f.path("absent.json"));
+    f.write_manifests();
+    assert!(f
+        .assert_refused()
+        .contains("InvalidDomain：读经济 manifest"));
+
+    f.launcher["economic"]["manifest"] = json!(econ);
+    f.write_manifests();
+    std::fs::write(&econ, "{").unwrap();
+    assert!(f
+        .assert_refused()
+        .contains("InvalidDomain：经济 manifest JSON"));
+
+    let valid = f.economic.clone();
+    for (field, path) in [
+        ("e.socket", "/e/socket"),
+        ("chongs[0].socket", "/chongs/0/socket"),
+        ("economic.b[0].chong", "/chongs/0/chong_id"),
+    ] {
+        *f.economic.pointer_mut(path).unwrap() = Value::Null;
+        f.write_manifests();
+        let stderr = f.assert_refused();
+        assert!(
+            stderr.contains("InvalidDomain") && stderr.contains(field),
+            "{stderr}"
+        );
+        f.economic = valid.clone();
+    }
+}
+
+#[test]
+fn layout_rejects_duplicate_economic_manifest_key_before_start() {
+    let f = LayoutFixture::new();
+    clock_plan(&f.space);
+    f.write_manifests();
+    let mut economic = f.economic.to_string();
+    assert_eq!(f.economic["schema_revision"], "economic-manifest/1");
+    economic.insert_str(1, r#""schema_revision":"economic-manifest/1","#);
+    std::fs::write(f.path("economic.json"), economic).unwrap();
+    let stderr = f.assert_refused();
+    assert!(
+        stderr.contains("InvalidDomain：经济 manifest JSON")
+            && stderr.contains("duplicate key schema_revision"),
+        "{stderr}"
+    );
+    for rel in [
+        "launcher-state/structure-source.json",
+        "s/s.db",
+        "e/e.db",
+        "b/b.db",
+        "x/x.db",
+    ] {
+        assert!(!f.path(rel).exists(), "{rel} 在拒启后出现");
+    }
 }

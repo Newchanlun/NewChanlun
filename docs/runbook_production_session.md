@@ -35,22 +35,47 @@ X 退出只记日志，S/E/B 继续。SIGTERM/SIGINT → 向全部子进程发 S
   "state_dir": "/abs/launcher-state",
   "execution_capabilities": {"namespaces": ["hl.perp.BTC"]},
   "structure_source": {"category": "TestOnlyStructure", "namespaces": ["testonly.tick.ohlc"]},
-  "s": {"db": "...", "session": "...", "catalog": "...", "profile": "...", "clock_plan": "...",
+  "s": {"db": "/abs/s/s.db", "session": "...", "catalog": "...", "profile": "...", "clock_plan": "...",
         "session_generation": "1", "delivery_retain_generations": "4",
-        "admission_job_limits": "<state>/s-admission/limits.json", "writer_epoch": "1",
-        "socket": "...", "resource_config": "<s-structure-resources/1 文件>"},
-  "economic": {"manifest": "<economic-manifest/1 文件>", "e": {"db": "...", "epoch": "1"},
-               "b": [{"chong": "one", "db": "...", "epoch": "1"}]},
-  "x": {"db": "...", "profile": "<x-execution-profile/1 文件>", "writer_epoch": "1"}
+        "admission_job_limits": "/abs/s-state/s-admission/limits.json", "writer_epoch": "1",
+        "socket": "/abs/s/s.sock", "resource_config": "<s-structure-resources/1 文件>"},
+  "economic": {"manifest": "<economic-manifest/1 文件>", "e": {"db": "/abs/e/e.db", "epoch": "1"},
+               "b": [{"chong": "one", "db": "/abs/b/one/b.db", "epoch": "1"}]},
+  "x": {"db": "/abs/x/x.db", "profile": "<x-execution-profile/1 文件>", "writer_epoch": "1"}
 }
 ```
+
+### 分目录部署
+
+按上例分开放置 S 库、admission state 目录 A、E/B/X 库；在经济 manifest 中将
+`e.socket` 设为 `/abs/e/e.sock`，将 `chong_id: "one"` 对应的 `socket` 设为
+`/abs/b/one/b.sock`。有多个 B 时，各自分目录。A 是 S owner 原件中的 `state_dir`；
+它与 launcher 顶层的 `state_dir`（上例为 `/abs/launcher-state`）是两个字段。
+
+S admission 的测量域由三部分组成：
+
+1. S 库实际所在目录 P **本身**；
+2. P 内与 S 库同名，或以库名加 `.`、`-` 开头的条目，以及这些条目的整棵子树；
+3. admission state 目录 A 的整棵子树。如果 A 就是 P，P 下所有子目录都在测量域内。
+
+launcher 在写声明、建库或拉起任何子进程前检查布局。E/B/X 库的目录项所在目录、
+实际库所在目录、首启和后续启动可能打开的 `<db>.writer.lock` 目标目录，以及 E/B socket
+的目录项所在目录和最终链接指向的目录，只要有一处落入测量域，就以 `InvalidDomain`
+退出，点名冲突字段和解析后的目录。检查会解析悬空链接；路径不存在时，在最近存在祖先
+的规范路径之后原样接上余下路径段（保留 `..`）。launcher 不会替你迁移或分目录。
+按错误指出的字段调整路径，再启动。
+
+A 与 P 分离时，P 下既不属于 S 库名族、也不在 A 内的子目录可用于 E/B/X 库或
+E/B socket。launcher 自身 `state_dir` 和 `s.socket` 不参与比较，可以直接放在 P；
+S 自己在打开库之后才监听，不代表可以重用已有 socket 路径。
 
 ### 结构源声明
 
 - `category` 只认 `UsEquityStockLineTick`、`TestOnlyStructure`（ADR 0020:151-154、ADR 0023:9-34）。
 - `namespaces` 与 `execution_capabilities.namespaces` 相交即 `InvalidDomain`，在拉起 S、创建 S 库之前退出——
   HL 行情即使与美股 bar 同形、类别标成个股线也不进 S。
-- launcher 每次启动在拉起域之前，把 manifest 的规范声明写到 `<state_dir>/structure-source.json`（#1845）。
+- launcher 每次启动在拉起域之前，把 manifest 的规范声明写到 launcher 自身 `state_dir` 下的
+  `structure-source.json`（#1845）。
 - S 库不存在：launcher 以 `init --protocol-revision s-session/3 ... --structure-source <state_dir>/structure-source.json` 建库，
   声明作为库固定属性落 `meta.structure_source`。
 - launcher 每次调用 S `serve --protocol-revision s-session/3` 都传同一文件的 `--structure-source`。
@@ -61,7 +86,8 @@ X 退出只记日志，S/E/B 继续。SIGTERM/SIGINT → 向全部子进程发 S
 - S.AcceptInput（`raw_input::accept_events`，v1/S2/S3 共用）对声明之外的 `source_namespace` 返回 `InvalidDomain`，
   不落行。不带声明的既有 TestOnly 库行为不变（但进不了 production_session）。
 
-S `serve` 需要 admission 锚（`<db>.control-owner.json` + `state/s-admission/{limits,binding}.json`）。
+S `serve` 需要 admission 锚：`<db>.control-owner.json`，以及 admission state 目录 A 内的
+`s-admission/{limits,binding}.json`。
 生产首签归 #1657，未决前只能用 TestOnly 夹具造锚。
 
 ## X 执行 profile（`x-execution-profile/1`）
