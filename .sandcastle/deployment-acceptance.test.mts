@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,9 +75,10 @@ test("行消费选择器按完整 nonce 和 row 匹配 used、cp、resume", () =
   ]) assert.equal(isRowClaim(file, nonce, "14"), false, file);
 });
 
-function world(t: { after: (fn: () => void) => void }, o: { candidatePath?: string; nonce?: string } = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "nc-1867-")));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+let seedTemplate: { root: string; repo: string; drainRoot: string; oldBase: string; partnerSha: string; head: string } | undefined;
+function getSeedTemplate() {
+  if (seedTemplate) return seedTemplate;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "nc-1867-seed-")));
   const repo = join(root, "repo"); mkdirSync(repo);
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" }).trim();
   git("init", "-q", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
@@ -90,10 +91,25 @@ function world(t: { after: (fn: () => void) => void }, o: { candidatePath?: stri
   git("checkout", "-q", "main");
   writeFileSync(join(repo, "deploy.txt"), "deployment\n"); git("add", "."); git("commit", "-qm", "deployment head");
   const head = git("rev-parse", "HEAD");
+  const drainRoot = join(root, "drain"); mkdirSync(drainRoot);
+  drain(drainRoot, "freeze");
+  seedTemplate = { root, repo, drainRoot, oldBase, partnerSha, head };
+  return seedTemplate;
+}
+after(() => { if (seedTemplate) rmSync(seedTemplate.root, { recursive: true, force: true }); });
+
+function world(t: { after: (fn: () => void) => void }, o: { candidatePath?: string; nonce?: string } = {}) {
+  const seed = getSeedTemplate();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "nc-1867-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = join(root, "repo");
+  cpSync(seed.repo, repo, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" }).trim();
+  const { oldBase, partnerSha, head } = seed;
   const partnerReview = join(root, "partner-review.md"); writeFileSync(partnerReview, `VERDICT: PASS\n伙伴 ${partnerSha} 只新增探针文档三行。\n`);
   const partner = { issue: PARTNER_ISSUE, branch: `sandcastle/issue-${PARTNER_ISSUE}`, sha: partnerSha, parent: oldBase, review: partnerReview, approval: "https://example.invalid/approval#partner" };
   const dir = mkdtempSync(join(root, "accept-")); const drainRoot = mkdtempSync(join(root, "drain-"));
-  drain(drainRoot, "freeze");
+  cpSync(seed.drainRoot, drainRoot, { recursive: true });
   const identity = { head, dirty: "" };
   const ctx = { dir, repo, identity, imageIdOf: () => IMG_ID, roots: [] as string[] };
   const creates: string[] = []; const gh: string[][] = []; const events: string[] = [];
@@ -152,6 +168,7 @@ function world(t: { after: (fn: () => void) => void }, o: { candidatePath?: stri
   return { root, repo, git, head, oldBase, partner, partnerSha, dir, drainRoot, ctx, identity, creates, gh, events, onCreate, deps, issue, claims, branchOf, sel, bind, reviewFile, admissionFile, noSideEffects };
 }
 
+describe("deployment-acceptance-core", { concurrency: 3 }, () => {
 test("完整冻结验收轮：row13 候选 pending → bind 封定 → rows14/15 真实冲突完成 → official accept；终态拒绝重放，accepted 跨 resume 保留", async (t) => {
   const w = world(t);
   const r = await w.issue();
@@ -319,6 +336,8 @@ test("row13 一次性：消费后 provider 初始化失败且容器写入了工�
   await assert.rejects(runDeploymentAcceptance(w.sel(r.nonce, "13"), w.deps()), /一次性的，已被占用/);
 });
 
+});
+
 test("并发：两个进程内调用竞争同一 row13，只一次消费、一次启动", async (t) => {
   const w = world(t); const r = await w.issue();
   const results = await Promise.allSettled([runDeploymentAcceptance(w.sel(r.nonce, "13"), w.deps()), runDeploymentAcceptance(w.sel(r.nonce, "13"), w.deps())]);
@@ -386,6 +405,7 @@ test("退役在先：随后的准入在锁内重核读不到 receipt，零消费
   w.noSideEffects("已退役");
 });
 
+describe("deployment-acceptance-bind", { concurrency: 2 }, () => {
 test("bind-merges 来源负控：无候选、独审 head 不符或同家族、主控准入错 nonce、输入改变、候选与伙伴不冲突都拒绝", async (t) => {
   const w = world(t); const r = await w.issue();
   await assert.rejects(w.bind(r.nonce, "a".repeat(40)), /尚无已发布候选/);
@@ -429,6 +449,8 @@ test("归并恢复边界：准入事实已写而工位未建可续建；无准�
   await assert.rejects(runDeploymentAcceptance(w.sel(r.nonce, "14"), w.deps()), /原检查点缺失：不能从基线重建/);
 });
 
+});
+
 test("row15 真实中断：冲突工蜂写 WIP 时 controller 被 SIGKILL，同命令恢复原 run：锁接管、孤儿 WIP 归档还原、resume 留痕、每输入唯一 trailer", async (t) => {
   const w = world(t); const r = await w.issue();
   const c = await runDeploymentAcceptance(w.sel(r.nonce, "13"), w.deps());
@@ -463,6 +485,7 @@ test("row15 真实中断：冲突工蜂写 WIP 时 controller 被 SIGKILL，同�
   for (const sha of [c.head, w.partnerSha]) assert.equal(log.split("\n").filter((l) => l === `Sandcastle-Merge: ${run.manifest.runId}/${sha}`).length, 1);
 });
 
+describe("deployment-acceptance-evidence", { concurrency: 3 }, () => {
 test("Sandcastle 依赖行为：库本身会删除未登记孤儿目录、会 force remove 初始化失败工位；共用初始化路径拒绝孤儿并锁定带写入的失败现场", async (t) => {
   const w = world(t);
   const orphan = join(w.repo, ".sandcastle/worktrees/orphan"); mkdirSync(orphan, { recursive: true }); writeFileSync(join(orphan, "WIP"), "x");
@@ -569,6 +592,8 @@ test("首次 run 准入：模型预检期间撤回独审 → 不发布准入、�
   assert.equal(w.creates.length, 1);
 });
 
+});
+
 test("首次 run 准入：等待仓库初始化锁期间撤回主控准入 → 不发布准入、不建工位、不消费；恢复后同命令完成", async (t) => {
   const w = world(t, { nonce: NONCE_WITH_ROW_SUBSTRING }); const r = await w.issue();
   const c = await runDeploymentAcceptance(w.sel(r.nonce, "13"), w.deps());
@@ -609,6 +634,7 @@ async function stopRow14AtPrepared(t: { after: (fn: () => void) => void }) {
   return { w, r, run, head: w.git("rev-parse", run.manifest.branch), creates: w.creates.length };
 }
 
+describe("deployment-acceptance-recovery", { concurrency: 3 }, () => {
 test("专用 run 恢复（prepared，无新 provider）：同代次 draining 正常完成宿主提交", async (t) => {
   const { w, r, run, head, creates } = await stopRow14AtPrepared(t);
   assert.equal((await runDeploymentAcceptance(w.sel(r.nonce, "14"), w.deps())).state, "merge_done");
@@ -699,4 +725,5 @@ test("首次 run 准入：最后一次镜像解析期间到期 → 准入事实�
   assert.equal(existsSync(plan.runs["14"].cwd), false);
   assert.equal(w.branchOf(plan.runs["14"].manifest.branch), "");
   assert.deepEqual(w.claims(), claims); assert.equal(w.creates.length, creates);
+});
 });
