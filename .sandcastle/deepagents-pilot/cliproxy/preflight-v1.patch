@@ -7175,10 +7175,10 @@ index e69de29..7d0d345 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..38e8ffc 100644
+index e69de29..493e9cd 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,387 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -7531,6 +7531,38 @@ index e69de29..38e8ffc 100644
 +		got, errAddr := proxyDialAddr(u, tc.defPort)
 +		if errAddr != nil || got != tc.want {
 +			t.Fatalf("proxyDialAddr(%q, %q) = (%q, %v), want (%q, nil)", tc.raw, tc.defPort, got, errAddr, tc.want)
++		}
++	}
++}
++
++func TestPreflightReceiptControlledTLSNextProtosRespectsGODEBUGHTTP2Client(t *testing.T) {
++	// Astra P2 #2 (PR #2280 R95): dialTLS MUST NOT advertise h2 ALPN when GODEBUG disables
++	// Go's HTTP/2 client (rightmost http2client=0 wins).
++	cases := []struct {
++		godebug  string
++		disabled bool
++		want     []string
++	}{
++		{"", false, []string{"h2", "http/1.1"}},
++		{"http2client=0", true, []string{"http/1.1"}},
++		{"foo=1,http2client=0,bar=2", true, []string{"http/1.1"}},
++		{"http2client=0,http2client=1", false, []string{"h2", "http/1.1"}},
++		{"http2client=1,http2client=0", true, []string{"http/1.1"}},
++		{"xhttp2client=0", false, []string{"h2", "http/1.1"}},
++		{"http2client=1", false, []string{"h2", "http/1.1"}},
++	}
++	for _, tc := range cases {
++		if got := http2ClientDisabledForEnv(tc.godebug); got != tc.disabled {
++			t.Fatalf("http2ClientDisabledForEnv(%q) = %v, want %v", tc.godebug, got, tc.disabled)
++		}
++		gotProtos := controlledTLSNextProtos(tc.godebug)
++		if len(gotProtos) != len(tc.want) {
++			t.Fatalf("controlledTLSNextProtos(%q) = %v, want %v", tc.godebug, gotProtos, tc.want)
++		}
++		for i := range tc.want {
++			if gotProtos[i] != tc.want[i] {
++				t.Fatalf("controlledTLSNextProtos(%q)[%d] = %q, want %q", tc.godebug, i, gotProtos[i], tc.want[i])
++			}
 +		}
 +	}
 +}
@@ -8243,10 +8275,10 @@ index 0000000..e3a233e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..431ed5c
+index 0000000..2a7cf69
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,471 @@
 +package auth
 +
 +import (
@@ -8261,6 +8293,7 @@ index 0000000..431ed5c
 +	"net"
 +	"net/http"
 +	"net/url"
++	"os"
 +	"strings"
 +	"sync"
 +	"sync/atomic"
@@ -8468,6 +8501,25 @@ index 0000000..431ed5c
 +	}
 +}
 +
++func http2ClientDisabledForEnv(godebug string) bool {
++	disabled := false
++	for _, part := range strings.Split(godebug, ",") {
++		key, val, ok := strings.Cut(part, "=")
++		if !ok || key != "http2client" {
++			continue
++		}
++		disabled = val == "0"
++	}
++	return disabled
++}
++
++func controlledTLSNextProtos(godebug string) []string {
++	if http2ClientDisabledForEnv(godebug) {
++		return []string{"http/1.1"}
++	}
++	return []string{"h2", "http/1.1"}
++}
++
 +func newFreshStandardTransport(fixedSOCKS proxy.ContextDialer) *http.Transport {
 +	// Constructed directly without cloning http.DefaultTransport so an external
 +	// RegisterProtocol("https", ...) or TLSClientConfig mutation on DefaultTransport
@@ -8520,11 +8572,13 @@ index 0000000..431ed5c
 +		if err != nil {
 +			return nil, err
 +		}
++		godebug := os.Getenv("GODEBUG")
++		h2Disabled := http2ClientDisabledForEnv(godebug)
 +		tlsConn := tls.Client(rawConn, &tls.Config{
 +			ServerName: host,
 +			RootCAs:    controlledTransportRootCAs(),
 +			MinVersion: tls.VersionTLS12,
-+			NextProtos: []string{"h2", "http/1.1"},
++			NextProtos: controlledTLSNextProtos(godebug),
 +		})
 +		hsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 +		defer cancel()
@@ -8537,7 +8591,7 @@ index 0000000..431ed5c
 +			copyCS := cs
 +			slot.Store(&copyCS)
 +		}
-+		if cs.NegotiatedProtocol == "h2" {
++		if !h2Disabled && cs.NegotiatedProtocol == "h2" {
 +			return tlsConn, nil
 +		}
 +		return preflightreceipt.NewStrictHTTP1FramingTLSConn(tlsConn), nil
@@ -8555,7 +8609,7 @@ index 0000000..431ed5c
 +		},
 +		DialContext:           dialPlainHTTP,
 +		DialTLSContext:        dialTLS,
-+		ForceAttemptHTTP2:     true,
++		ForceAttemptHTTP2:     !http2ClientDisabledForEnv(os.Getenv("GODEBUG")),
 +		DisableKeepAlives:     true,
 +		DisableCompression:    true,
 +		MaxIdleConns:          100,
@@ -8698,10 +8752,10 @@ index 0000000..431ed5c
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport_tls_test.go b/sdk/cliproxy/auth/preflight_transport_tls_test.go
 new file mode 100644
-index 0000000..d892db8
+index 0000000..8e6959c
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport_tls_test.go
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,244 @@
 +//go:build preflight_test_roots
 +
 +package auth
@@ -8912,6 +8966,39 @@ index 0000000..d892db8
 +			t.Fatalf("case %s: ControlledTransportForProxy unexpectedly accepted invalid TLS HTTP/1.1 response", tc.name)
 +		}
 +	}
++
++	// 3. Astra P2 #2 (PR #2280 R95): With GODEBUG=http2client=0, dialTLS MUST advertise only
++	//    http/1.1 ALPN even when the upstream TLS server prefers h2, avoiding ALPN mismatch.
++	h2Srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++		_, _ = io.WriteString(w, "ok-h1")
++	}))
++	h2Srv.EnableHTTP2 = true
++	h2Srv.TLS = &tls.Config{
++		Certificates: []tls.Certificate{cert},
++		NextProtos:   []string{"h2", "http/1.1"},
++	}
++	h2Srv.StartTLS()
++	defer h2Srv.Close()
++
++	t.Setenv("GODEBUG", "http2client=0")
++	h1OnlyReq, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, h2Srv.URL+"/v1/responses", nil)
++	h1OnlyResp, errH1Only := directRT.RoundTrip(h1OnlyReq)
++	if errH1Only != nil {
++		t.Fatalf("GODEBUG=http2client=0 RoundTrip against h2-capable server failed: %v", errH1Only)
++	}
++	h1Body, _ := io.ReadAll(h1OnlyResp.Body)
++	_ = h1OnlyResp.Body.Close()
++	if h1OnlyResp.StatusCode != http.StatusOK || h1OnlyResp.ProtoMajor != 1 || string(h1Body) != "ok-h1" || h1OnlyResp.TLS == nil || h1OnlyResp.TLS.NegotiatedProtocol != "http/1.1" {
++		t.Fatalf("GODEBUG=http2client=0 response = status:%d proto:%d.%d alpn:%q body:%q",
++			h1OnlyResp.StatusCode, h1OnlyResp.ProtoMajor, h1OnlyResp.ProtoMinor,
++			func() string {
++				if h1OnlyResp.TLS == nil {
++					return "<nil>"
++				}
++				return h1OnlyResp.TLS.NegotiatedProtocol
++			}(), string(h1Body))
++	}
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
 index ddbd342..bc1efb8 100644
@@ -9027,10 +9114,10 @@ index 0000000..89341b4
 +}
 diff --git a/sdk/preflightreceipt/http1_framing.go b/sdk/preflightreceipt/http1_framing.go
 new file mode 100644
-index 0000000..c736127
+index 0000000..659bdd9
 --- /dev/null
 +++ b/sdk/preflightreceipt/http1_framing.go
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,352 @@
 +package preflightreceipt
 +
 +import (
@@ -9240,6 +9327,14 @@ index 0000000..c736127
 +}
 +
 +func (c *strictHTTP1FramingConn) failClosed() error {
++	c.failed = ErrHTTP1FramingViolation
++	c.rawBuf = nil
++	c.ready = nil
++	_ = c.Conn.Close()
++	return ErrHTTP1FramingViolation
++}
++
++func (c *strictHTTP1FramingConn) failTransport() error {
 +	c.failed = ErrUnavailable
 +	c.rawBuf = nil
 +	c.ready = nil
@@ -9350,7 +9445,10 @@ index 0000000..c736127
 +		}
 +		if err != nil {
 +			if !c.done {
-+				// EOF or read error before the final response header block closed and validated.
++				if len(c.rawBuf) == 0 && c.infoCount == 0 {
++					return 0, c.failTransport()
++				}
++				// EOF or read error after partial headers / 1xx before a valid final header block closed.
 +				return 0, c.failClosed()
 +			}
 +			c.pendingErr = err
@@ -9373,10 +9471,10 @@ index 0000000..c736127
 +	return 0, c.failClosed()
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..9645827 100644
+index e69de29..7e36131 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,14902 @@
+@@ -0,0 +1,15189 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -9454,6 +9552,7 @@ index e69de29..9645827 100644
 +var maxStagingEntries = 512
 +
 +var ErrUnavailable = errors.New("preflight evidence unavailable")
++var ErrHTTP1FramingViolation = fmt.Errorf("%w: http1 framing violation", ErrUnavailable)
 +var errReviewSealed = errors.New("review receipt sealed or sealing")
 +var sessionPattern = regexp.MustCompile(`^preflight-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 +var reviewLaunchPattern = regexp.MustCompile(`^review-(?:preflight-)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -9878,8 +9977,24 @@ index e69de29..9645827 100644
 +	done          chan struct{}
 +}
 +
++type legacyPublishJob struct {
++	directory    string
++	session      string
++	data         []byte
++	dirDev       uint64
++	dirIno       uint64
++	hasDirID     bool
++	markerDev    uint64
++	markerIno    uint64
++	hasMarkerID  bool
++	markerSHA256 string
++	turnCtx      context.Context
++	deadline     time.Time
++}
++
 +type finalizeWait struct {
 +	job       *reviewFinalizeJob
++	legacyJob *legacyPublishJob
 +	holdsSlot bool
 +	turnCtx   context.Context
 +	deadline  time.Time
@@ -9974,10 +10089,40 @@ index e69de29..9645827 100644
 +	hasUnpersistedFlushCursor     bool
 +	tmpSeq                        atomic.Uint64
 +
-+	rootInitMu sync.Mutex
-+	rootLockMu sync.Mutex
-+	rootLocks  = make(map[string]*heldRootLock)
++	rootInitGatesMu sync.Mutex
++	rootInitGates   = make(map[string]*rootInitGate)
++	rootLockMu      sync.Mutex
++	rootLocks       = make(map[string]*heldRootLock)
 +)
++
++type rootInitGate struct {
++	mu      sync.Mutex
++	waiters int
++}
++
++// acquireRootInitLock serializes cold root/staging initialization per clean root path without
++// ever holding a global mutex across disk syscalls (mkdir/lstat/flock/fsync).
++func acquireRootInitLock(root string) func() {
++	rootInitGatesMu.Lock()
++	g := rootInitGates[root]
++	if g == nil {
++		g = &rootInitGate{}
++		rootInitGates[root] = g
++	}
++	g.waiters++
++	rootInitGatesMu.Unlock()
++
++	g.mu.Lock()
++	return func() {
++		g.mu.Unlock()
++		rootInitGatesMu.Lock()
++		g.waiters--
++		if g.waiters == 0 && rootInitGates[root] == g {
++			delete(rootInitGates, root)
++		}
++		rootInitGatesMu.Unlock()
++	}
++}
 +
 +func trimJSONSpace(b []byte) []byte {
 +	return bytes.Trim(b, " \t\r\n")
@@ -10172,6 +10317,7 @@ index e69de29..9645827 100644
 +	pathHasDisallowedSymlinkFn = pathHasDisallowedSymlink
 +	existingReviewProbeSem     = make(chan struct{}, maxPendingReviewInFlight)
 +	initialPersistSem          = make(chan struct{}, maxPendingReviewInFlight)
++	preflightDiskSem           = make(chan struct{}, maxPendingReviewInFlight)
 +	diskTaintCheckFn           = checkDiskTaintTarget
 +	diskTaintRootHealthyFn     = checkDiskTaintRootHealthy
 +)
@@ -11029,6 +11175,8 @@ index e69de29..9645827 100644
 +	invalid, sealed, handlerDone, lifecycleDone bool
 +	attemptFailed                               bool
 +	reserved                                    bool
++	reserving                                   bool
++	reserveDone                                 chan struct{}
 +	dirDev                                      uint64
 +	dirIno                                      uint64
 +	hasDirID                                    bool
@@ -11307,7 +11455,7 @@ index e69de29..9645827 100644
 +		return ctx, nil, ErrUnavailable
 +	}
 +	directory := filepath.Join(cleanRoot, session)
-+	c := &Collector{directory: directory, deadline: deadline, receipt: Receipt{Schema: Schema, Session: session, Started: now.UnixNano()}}
++	c := &Collector{directory: directory, deadline: deadline, turnCtx: ctx, receipt: Receipt{Schema: Schema, Session: session, Started: now.UnixNano()}}
 +	return context.WithValue(ctx, contextKey{}, c), c, nil
 +}
 +
@@ -11833,7 +11981,7 @@ index e69de29..9645827 100644
 +				}
 +			}
 +		}
-+		itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel}
++		itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel, containerID: item.ContainerID}
 +		itemArgs := toolPayloadField{sha: item.ArgsSHA, str: item.ArgsStr, isStr: item.ArgsIsStr}
 +		itemInput := toolPayloadField{sha: item.InputSHA, str: item.InputStr, isStr: item.InputIsStr}
 +		itemCode := toolPayloadField{sha: item.CodeSHA, str: item.CodeStr, isStr: item.CodeIsStr}
@@ -15069,7 +15217,7 @@ index e69de29..9645827 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
-+				itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel}
++				itemMeta := toolItemMeta{callID: item.CallID, name: item.Name, serverLabel: item.ServerLabel, containerID: item.ContainerID}
 +				itemArgs := toolPayloadField{sha: item.ArgsSHA, str: item.ArgsStr, isStr: item.ArgsIsStr}
 +				itemInput := toolPayloadField{sha: item.InputSHA, str: item.InputStr, isStr: item.InputIsStr}
 +				itemCode := toolPayloadField{sha: item.CodeSHA, str: item.CodeStr, isStr: item.CodeIsStr}
@@ -19522,92 +19670,127 @@ index e69de29..9645827 100644
 +	return 0, 0, false
 +}
 +
++func closeHeldRootLock(h *heldRootLock) {
++	if h == nil {
++		return
++	}
++	if h.file != nil {
++		_ = h.file.Close()
++	}
++	if h.dir != nil {
++		_ = h.dir.Close()
++	}
++	if h.parentFD != nil {
++		_ = h.parentFD.Close()
++	}
++}
++
++type rootPruneCandidate struct {
++	path string
++	lock *heldRootLock
++}
++
++func pruneStaleRootLocks(cands []rootPruneCandidate) {
++	var dead []rootPruneCandidate
++	for _, cand := range cands {
++		if _, statErr := os.Lstat(cand.path); statErr != nil {
++			dead = append(dead, cand)
++		}
++	}
++	if len(dead) == 0 {
++		return
++	}
++	var toClose []*heldRootLock
++	rootLockMu.Lock()
++	for _, cand := range dead {
++		if cur := rootLocks[cand.path]; cur == cand.lock {
++			delete(rootLocks, cand.path)
++			cur.refs--
++			if cur.refs == 0 {
++				toClose = append(toClose, cur)
++			}
++		}
++	}
++	rootLockMu.Unlock()
++	for _, h := range toClose {
++		closeHeldRootLock(h)
++	}
++}
++
++func tryReuseCachedRootLease(root string) *lockedRootLease {
++	rootLockMu.Lock()
++	held := rootLocks[root]
++	if held == nil || held.file == nil || held.dir == nil || held.parentFD == nil {
++		rootLockMu.Unlock()
++		return nil
++	}
++	held.refs++
++	lease := &lockedRootLease{lock: held, dir: held.dir}
++	rootLockMu.Unlock()
++	if verifyRootStillBound(held, root) == nil {
++		return lease
++	}
++	lease.Close()
++	return nil
++}
++
 +// acquirePrivateRootLease enforces single-writer ownership over a dedicated private receipt root
 +// across same-UID proxy processes via a non-blocking exclusive flock DIRECTLY on the verified root
 +// directory inode (cannot be bypassed by lock-file rotation), returning a ref-counted lease holding
 +// the locked root directory fd, the descriptor-pinned *os.Root, and the verified parent directory fd.
 +// Even if root is rotated or pruned from the cache while operations are in flight, neither the flock
 +// nor the directory descriptors are closed until the last active lease calls Close().
++// Global rootLockMu is NEVER held across disk I/O; cold initialization is serialized per clean root.
 +func acquirePrivateRootLease(root string) (*lockedRootLease, error) {
 +	cleanRoot, ok := cleanPrivateRoot(root)
 +	if !ok || pathHasDisallowedSymlink(cleanRoot) {
 +		return nil, ErrUnavailable
 +	}
 +	root = cleanRoot
-+	// Fast path: reuse an already-initialized, still-bound root lease without touching rootInitMu
-+	// or running parent-directory fsync so formal seal durability syncs never stall legacy preflight.
++	// Fast path: reuse an already-initialized, still-bound root lease without touching any init
++	// lock or performing disk I/O under global rootLockMu.
++	if lease := tryReuseCachedRootLease(root); lease != nil {
++		return lease, nil
++	}
++
++	unlockInit := acquireRootInitLock(root)
++	if lease := tryReuseCachedRootLease(root); lease != nil {
++		unlockInit()
++		return lease, nil
++	}
++
++	// Retire any stale cached entry for this root before opening/flocking so an obsolete
++	// descriptor on the same inode cannot self-conflict with LOCK_EX|LOCK_NB.
++	var staleToClose *heldRootLock
 +	rootLockMu.Lock()
-+	if held := rootLocks[root]; held != nil {
-+		if held.file != nil && held.dir != nil && held.parentFD != nil && verifyRootStillBound(held, root) == nil {
-+			held.refs++
-+			lease := &lockedRootLease{lock: held, dir: held.dir}
-+			rootLockMu.Unlock()
-+			return lease, nil
++	if prev := rootLocks[root]; prev != nil {
++		delete(rootLocks, root)
++		prev.refs--
++		if prev.refs == 0 {
++			staleToClose = prev
 +		}
 +	}
 +	rootLockMu.Unlock()
++	closeHeldRootLock(staleToClose)
 +
-+	if err := ensurePrivateRoot(root); err != nil {
++	if err := ensurePrivateRootLocked(root); err != nil {
++		unlockInit()
 +		return nil, ErrUnavailable
 +	}
 +	candRoot, rDev, rIno, err := openVerifiedPrivateRoot(root)
 +	if err != nil {
++		unlockInit()
 +		return nil, ErrUnavailable
 +	}
-+
-+	var toClose []*heldRootLock
-+	releaseRetired := func(h *heldRootLock) {
-+		h.refs--
-+		if h.refs == 0 {
-+			toClose = append(toClose, h)
-+		}
-+	}
-+	closeRetired := func() {
-+		for _, h := range toClose {
-+			_ = h.file.Close()
-+			if h.dir != nil {
-+				_ = h.dir.Close()
-+			}
-+			if h.parentFD != nil {
-+				_ = h.parentFD.Close()
-+			}
-+		}
-+	}
-+
-+	rootLockMu.Lock()
-+	if held := rootLocks[root]; held != nil {
-+		if held.file != nil && held.dir != nil && held.parentFD != nil && held.rootDev == rDev && held.rootIno == rIno && verifyRootStillBound(held, root) == nil {
-+			held.refs++
-+			lease := &lockedRootLease{lock: held, dir: held.dir}
-+			rootLockMu.Unlock()
-+			_ = candRoot.Close()
-+			return lease, nil
-+		}
-+		delete(rootLocks, root)
-+		releaseRetired(held)
-+	}
-+
-+	// Best-effort prune of stale locks whose temp directories have already been removed.
-+	if len(rootLocks) >= 32 {
-+		for k, v := range rootLocks {
-+			if _, statErr := os.Lstat(k); statErr != nil {
-+				delete(rootLocks, k)
-+				releaseRetired(v)
-+			}
-+		}
-+	}
-+
 +	parentFD, pDev, pIno, err := openVerifiedRootParent(root, rDev, rIno)
 +	if err != nil {
-+		rootLockMu.Unlock()
-+		closeRetired()
++		unlockInit()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
 +	rootFD, rfDev, rfIno, hasRFID, err := openPinnedDirFD(candRoot)
 +	if err != nil || (hasRFID && (rfDev != rDev || rfIno != rIno)) {
-+		rootLockMu.Unlock()
-+		closeRetired()
++		unlockInit()
 +		if rootFD != nil {
 +			_ = rootFD.Close()
 +		}
@@ -19616,16 +19799,14 @@ index e69de29..9645827 100644
 +		return nil, ErrUnavailable
 +	}
 +	if err := syscall.Flock(int(rootFD.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-+		rootLockMu.Unlock()
-+		closeRetired()
++		unlockInit()
 +		_ = rootFD.Close()
 +		_ = parentFD.Close()
 +		_ = candRoot.Close()
 +		return nil, ErrUnavailable
 +	}
 +	if err := syncPinnedDir(candRoot, root); err != nil {
-+		rootLockMu.Unlock()
-+		closeRetired()
++		unlockInit()
 +		_ = rootFD.Close()
 +		_ = parentFD.Close()
 +		_ = candRoot.Close()
@@ -19644,17 +19825,38 @@ index e69de29..9645827 100644
 +		refs:      2, // 1 for rootLocks cache + 1 for returned lease
 +	}
 +	if err := verifyRootStillBound(held, root); err != nil {
-+		rootLockMu.Unlock()
-+		closeRetired()
-+		_ = rootFD.Close()
-+		_ = parentFD.Close()
-+		_ = candRoot.Close()
++		unlockInit()
++		closeHeldRootLock(held)
 +		return nil, ErrUnavailable
++	}
++
++	var prevToClose *heldRootLock
++	var pruneCands []rootPruneCandidate
++	rootLockMu.Lock()
++	if prev := rootLocks[root]; prev != nil {
++		delete(rootLocks, root)
++		prev.refs--
++		if prev.refs == 0 {
++			prevToClose = prev
++		}
 +	}
 +	rootLocks[root] = held
 +	lease := &lockedRootLease{lock: held, dir: candRoot}
++	if len(rootLocks) >= 32 {
++		pruneCands = make([]rootPruneCandidate, 0, len(rootLocks))
++		for k, v := range rootLocks {
++			if k != root {
++				pruneCands = append(pruneCands, rootPruneCandidate{path: k, lock: v})
++			}
++		}
++	}
 +	rootLockMu.Unlock()
-+	closeRetired()
++	unlockInit()
++
++	closeHeldRootLock(prevToClose)
++	if len(pruneCands) > 0 {
++		pruneStaleRootLocks(pruneCands)
++	}
 +	// Newly acquired exclusive root-directory flock guarantees no other proxy process owns root;
 +	// safely sweep content-verified crash-orphaned producer staging artifacts not active in this process.
 +	sweepOrphanStagingInRoot(candRoot, root, true)
@@ -19675,16 +19877,19 @@ index e69de29..9645827 100644
 +	if !ok || pathHasDisallowedSymlink(cleanRoot) {
 +		return ErrUnavailable
 +	}
-+	root = cleanRoot
++	unlockInit := acquireRootInitLock(cleanRoot)
++	defer unlockInit()
++	return ensurePrivateRootLocked(cleanRoot)
++}
++
++func ensurePrivateRootLocked(root string) error {
 +	parentOfRoot := filepath.Dir(root)
 +	if parentOfRoot == "" || parentOfRoot == root {
 +		return ErrUnavailable
 +	}
 +	// Require the immediate parent directory of <receipt-root> to ALREADY exist as a real directory
 +	// (allowing fixed OS symlinks such as /tmp -> private/tmp on macOS via isAllowedOSSymlink, while
-+	// rejecting arbitrary symlinks and missing multi-level ancestors). Serialize creation + parent fsync.
-+	rootInitMu.Lock()
-+	defer rootInitMu.Unlock()
++	// rejecting arbitrary symlinks and missing multi-level ancestors). Caller holds per-root init lock.
 +	pfi, perr := os.Lstat(parentOfRoot)
 +	if perr != nil {
 +		return ErrUnavailable
@@ -21428,11 +21633,15 @@ index e69de29..9645827 100644
 +	if rootHandle == nil {
 +		return nil, ErrUnavailable
 +	}
-+	// Serialize shared .staging creation, parent fsync, and rollback across concurrent quota buckets
-+	// (preflight vs review) so a racing EEXIST caller never removes a .staging created by another
-+	// caller, and no caller can open .staging before its creation has synced cleanly.
-+	rootInitMu.Lock()
-+	defer rootInitMu.Unlock()
++	cleanRoot, ok := cleanPrivateRoot(root)
++	if !ok {
++		return nil, ErrUnavailable
++	}
++	// Serialize shared .staging creation, parent fsync, and rollback per clean root across concurrent
++	// quota buckets (preflight vs review) so a racing EEXIST caller never removes a .staging created
++	// by another caller, and one stalled root never blocks unrelated roots.
++	unlockInit := acquireRootInitLock(cleanRoot)
++	defer unlockInit()
 +	if _, err := rootHandle.Lstat(".staging"); errors.Is(err, os.ErrNotExist) {
 +		mkErr := rootHandle.Mkdir(".staging", 0700)
 +		createdStaging := mkErr == nil
@@ -22754,26 +22963,132 @@ index e69de29..9645827 100644
 +		}
 +		c.reserved = true
 +	} else {
-+		defer c.mu.Unlock()
-+		if !c.reserved {
-+			rootDir := filepath.Dir(c.directory)
-+			rootLease, err := acquirePrivateRootLease(rootDir)
-+			if err != nil {
-+				c.invalid = true
++		for !c.reserved {
++			turnCtx := c.turnCtx
++			deadline := c.deadline
++			if c.reserving {
++				waitCh := c.reserveDone
++				c.mu.Unlock()
++				startCtx, cancelStart, _ := deriveStartContext(ctx, turnCtx, deadline)
++				select {
++				case <-waitCh:
++					cancelStart()
++				case <-startCtx.Done():
++					cancelStart()
++					c.mu.Lock()
++					c.invalid = true
++					c.mu.Unlock()
++					return ctx, nil, ErrUnavailable
++				}
++				c.mu.Lock()
++				if c.invalid || c.sealed || c.handlerDone || c.lifecycleDone || time.Now().After(c.deadline) {
++					c.invalid = true
++					c.mu.Unlock()
++					return ctx, nil, ErrUnavailable
++				}
++				continue
++			}
++			dir := c.directory
++			session := c.receipt.Session
++			started := c.receipt.Started
++			reserveDone := make(chan struct{})
++			c.reserving = true
++			c.reserveDone = reserveDone
++			c.mu.Unlock()
++
++			finishReserve := func(markInvalid bool) {
++				c.mu.Lock()
++				if markInvalid {
++					c.invalid = true
++				}
++				c.reserving = false
++				c.reserveDone = nil
++				close(reserveDone)
++				c.mu.Unlock()
++			}
++
++			startCtx, cancelStart, _ := deriveStartContext(ctx, turnCtx, deadline)
++			if startCtx.Err() != nil || time.Now().After(deadline) {
++				cancelStart()
++				finishReserve(true)
 +				return ctx, nil, ErrUnavailable
 +			}
-+			subRoot, subFI, _, mDev, mIno, hasMID, mSHA, err := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, c.receipt.Session, false, c.receipt.Started)
-+			rootLease.Close()
-+			if err != nil {
-+				c.invalid = true
++			select {
++			case preflightDiskSem <- struct{}{}:
++			case <-startCtx.Done():
++				cancelStart()
++				finishReserve(true)
 +				return ctx, nil, ErrUnavailable
 +			}
-+			subDev, subIno, hasSubID := statDevIno(subFI)
-+			_ = subRoot.Close()
-+			c.dirDev, c.dirIno, c.hasDirID = subDev, subIno, hasSubID
-+			c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256 = mDev, mIno, hasMID, mSHA
-+			c.reserved = true
++			type legacyReserveRes struct {
++				subDev, subIno uint64
++				hasSubID       bool
++				mDev, mIno     uint64
++				hasMID         bool
++				mSHA           string
++				err            error
++			}
++			doneCh := make(chan legacyReserveRes, 1)
++			go func() {
++				semReleased := false
++				releaseSem := func() {
++					if !semReleased {
++						semReleased = true
++						<-preflightDiskSem
++					}
++				}
++				defer releaseSem()
++				rootDir := filepath.Dir(dir)
++				rootLease, lerr := acquirePrivateRootLease(rootDir)
++				if lerr != nil {
++					releaseSem()
++					doneCh <- legacyReserveRes{err: lerr}
++					return
++				}
++				subRoot, subFI, _, mDev, mIno, hasMID, mSHA, rerr := reserveStagedSubdirWithMarker(rootLease.dir, rootDir, session, false, started)
++				rootLease.Close()
++				if rerr != nil {
++					releaseSem()
++					doneCh <- legacyReserveRes{err: rerr}
++					return
++				}
++				subDev, subIno, hasSubID := statDevIno(subFI)
++				_ = subRoot.Close()
++				releaseSem()
++				doneCh <- legacyReserveRes{
++					subDev:   subDev,
++					subIno:   subIno,
++					hasSubID: hasSubID,
++					mDev:     mDev,
++					mIno:     mIno,
++					hasMID:   hasMID,
++					mSHA:     mSHA,
++				}
++			}()
++			var res legacyReserveRes
++			select {
++			case res = <-doneCh:
++				startErr := startCtx.Err()
++				cancelStart()
++				c.mu.Lock()
++				c.reserving = false
++				c.reserveDone = nil
++				close(reserveDone)
++				if res.err != nil || startErr != nil || c.invalid || c.sealed || c.handlerDone || c.lifecycleDone || time.Now().After(c.deadline) {
++					c.invalid = true
++					c.mu.Unlock()
++					return ctx, nil, ErrUnavailable
++				}
++				c.dirDev, c.dirIno, c.hasDirID = res.subDev, res.subIno, res.hasSubID
++				c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256 = res.mDev, res.mIno, res.hasMID, res.mSHA
++				c.reserved = true
++			case <-startCtx.Done():
++				cancelStart()
++				finishReserve(true)
++				return ctx, nil, ErrUnavailable
++			}
 +		}
++		defer c.mu.Unlock()
 +	}
 +	c.active++
 +	c.executions++
@@ -23206,7 +23521,7 @@ index e69de29..9645827 100644
 +	}
 +	if err != nil {
 +		if strict {
-+			if observed != "other" && isTLSVerificationError(err) {
++			if (observed != "other" && isTLSVerificationError(err)) || errors.Is(err, ErrHTTP1FramingViolation) {
 +				c.Taint()
 +			} else {
 +				c.Reject()
@@ -24083,6 +24398,49 @@ index e69de29..9645827 100644
 +	if fw == nil {
 +		return
 +	}
++	if fw.legacyJob != nil {
++		var waitCtx context.Context
++		var cancelWait context.CancelFunc
++		if !fw.deadline.IsZero() {
++			if !time.Now().Before(fw.deadline) {
++				return
++			}
++			waitCtx, cancelWait = context.WithDeadline(context.Background(), fw.deadline)
++		} else {
++			waitCtx, cancelWait = context.WithCancel(context.Background())
++		}
++		defer cancelWait()
++		if fw.turnCtx != nil && errors.Is(fw.turnCtx.Err(), context.DeadlineExceeded) {
++			return
++		}
++		select {
++		case preflightDiskSem <- struct{}{}:
++		case <-waitCtx.Done():
++			return
++		}
++		done := make(chan struct{})
++		job := *fw.legacyJob
++		go func() {
++			semReleased := false
++			releaseSem := func() {
++				if !semReleased {
++					semReleased = true
++					<-preflightDiskSem
++				}
++			}
++			defer func() {
++				releaseSem()
++				close(done)
++			}()
++			publishLegacyReceiptToDisk(job)
++			releaseSem()
++		}()
++		select {
++		case <-done:
++		case <-waitCtx.Done():
++		}
++		return
++	}
 +	hasDeadline := false
 +	if fw.turnCtx != nil {
 +		_, hasDeadline = fw.turnCtx.Deadline()
@@ -24177,7 +24535,7 @@ index e69de29..9645827 100644
 +		return nil
 +	}
 +	now := time.Now()
-+	if now.After(c.deadline) {
++	if now.After(c.deadline) || (c.turnCtx != nil && errors.Is(c.turnCtx.Err(), context.DeadlineExceeded)) {
 +		c.invalid = true
 +		return nil
 +	}
@@ -24191,99 +24549,126 @@ index e69de29..9645827 100644
 +	if err != nil {
 +		return nil
 +	}
-+	rootDir := filepath.Dir(c.directory)
++	return &finalizeWait{
++		legacyJob: &legacyPublishJob{
++			directory:    c.directory,
++			session:      c.receipt.Session,
++			data:         data,
++			dirDev:       c.dirDev,
++			dirIno:       c.dirIno,
++			hasDirID:     c.hasDirID,
++			markerDev:    c.markerDev,
++			markerIno:    c.markerIno,
++			hasMarkerID:  c.hasMarkerID,
++			markerSHA256: c.markerSHA256,
++			turnCtx:      c.turnCtx,
++			deadline:     c.deadline,
++		},
++		turnCtx:  c.turnCtx,
++		deadline: c.deadline,
++	}
++}
++
++func publishLegacyReceiptToDisk(job legacyPublishJob) {
++	if (!job.deadline.IsZero() && time.Now().After(job.deadline)) || (job.turnCtx != nil && errors.Is(job.turnCtx.Err(), context.DeadlineExceeded)) {
++		return
++	}
++	rootDir := filepath.Dir(job.directory)
 +	rootLease, err := acquirePrivateRootLease(rootDir)
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	defer rootLease.Close()
-+	subRoot, subFI, err := openVerifiedSubdir(rootLease.dir, c.receipt.Session)
++	subRoot, subFI, err := openVerifiedSubdir(rootLease.dir, job.session)
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	defer subRoot.Close()
-+	if c.hasDirID {
-+		if sDev, sIno, okID := statDevIno(subFI); okID && (sDev != c.dirDev || sIno != c.dirIno) {
-+			return nil
++	if job.hasDirID {
++		if sDev, sIno, okID := statDevIno(subFI); okID && (sDev != job.dirDev || sIno != job.dirIno) {
++			return
 +		}
 +	}
 +	// Refuse to publish into a polluted or tampered session directory: ONLY our exact verified
 +	// reservation marker (producer.json matching dev/ino/sha256) may exist prior to publication.
 +	subDirFile, err := subRoot.Open(".")
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	subEntries, readDirErr := subDirFile.ReadDir(4)
 +	_ = subDirFile.Close()
 +	if readDirErr != nil && !errors.Is(readDirErr, io.EOF) {
-+		return nil
++		return
 +	}
 +	if len(subEntries) != 1 || subEntries[0].Name() != "producer.json" {
-+		return nil
++		return
 +	}
-+	if !verifyMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256) {
-+		return nil
++	if !verifyMarkerInSubdir(subRoot, job.markerDev, job.markerIno, job.hasMarkerID, job.markerSHA256) {
++		return
 +	}
 +	stagingRoot, err := ensureStagingDir(rootLease.dir, rootDir)
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	defer stagingRoot.Close()
 +	stagingDirFD, _, _, _, err := openPinnedDirFD(stagingRoot)
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	defer stagingDirFD.Close()
 +	subDirFD, subFDDev, subFDIno, hasSubFDID, err := openPinnedDirFD(subRoot)
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	defer subDirFD.Close()
-+	if c.hasDirID && hasSubFDID && (subFDDev != c.dirDev || subFDIno != c.dirIno) {
-+		return nil
++	if job.hasDirID && hasSubFDID && (subFDDev != job.dirDev || subFDIno != job.dirIno) {
++		return
 +	}
 +	// Stage temporary file inside <root>/.staging and publish via descriptor-pinned non-overwriting linkat:
 +	// neither .staging nor <session> is re-resolved by path, readers see all or nothing, and an existing
 +	// receipt.json is never clobbered.
 +	tmp, f, releaseTmp, err := createStagingFile(rootLease.dir, stagingRoot, rootDir, "pending")
 +	if err != nil {
-+		return nil
++		return
 +	}
 +	defer releaseTmp()
-+	_, errWrite := f.Write(data)
++	_, errWrite := f.Write(job.data)
 +	errSync := f.Sync()
 +	errClose := f.Close()
 +	if errWrite != nil || errSync != nil || errClose != nil {
 +		_ = stagingRoot.Remove(tmp)
-+		return nil
++		return
 +	}
-+	if c.hasDirID {
-+		if curFI, lerr := rootLease.dir.Lstat(c.receipt.Session); lerr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
++	if (!job.deadline.IsZero() && time.Now().After(job.deadline)) || (job.turnCtx != nil && errors.Is(job.turnCtx.Err(), context.DeadlineExceeded)) {
++		_ = stagingRoot.Remove(tmp)
++		return
++	}
++	if job.hasDirID {
++		if curFI, lerr := rootLease.dir.Lstat(job.session); lerr != nil || !curFI.IsDir() || curFI.Mode()&os.ModeSymlink != 0 || curFI.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(curFI) {
 +			_ = stagingRoot.Remove(tmp)
-+			return nil
-+		} else if curDev, curIno, okCur := statDevIno(curFI); okCur && (curDev != c.dirDev || curIno != c.dirIno) {
++			return
++		} else if curDev, curIno, okCur := statDevIno(curFI); okCur && (curDev != job.dirDev || curIno != job.dirIno) {
 +			_ = stagingRoot.Remove(tmp)
-+			return nil
++			return
 +		}
 +	}
-+	if !verifyMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256) {
++	if !verifyMarkerInSubdir(subRoot, job.markerDev, job.markerIno, job.hasMarkerID, job.markerSHA256) {
 +		_ = stagingRoot.Remove(tmp)
-+		return nil
++		return
 +	}
 +	linkErr := linkatPinned(stagingDirFD, tmp, subDirFD, "receipt.json")
 +	_ = stagingRoot.Remove(tmp)
 +	if linkErr != nil {
-+		return nil
++		return
 +	}
-+	removeVerifiedMarkerInSubdir(subRoot, c.markerDev, c.markerIno, c.hasMarkerID, c.markerSHA256)
-+	_ = syncPinnedDir(subRoot, c.directory)
-+	return nil
++	removeVerifiedMarkerInSubdir(subRoot, job.markerDev, job.markerIno, job.hasMarkerID, job.markerSHA256)
++	_ = syncPinnedDir(subRoot, job.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..696dbd5 100644
+index e69de29..de884ca 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,18540 @@
+@@ -0,0 +1,18920 @@
 +package preflightreceipt
 +
 +import (
@@ -36564,8 +36949,8 @@ index e69de29..696dbd5 100644
 +	}
 +	defer func() { syncDirFn = origSync }()
 +
-+	// Hold global rootInitMu to prove reuse does not even block on rootInitMu.
-+	rootInitMu.Lock()
++	// Hold per-root init lock for this root to prove reuse does not even block on its own init lock.
++	unlockInit := acquireRootInitLock(filepath.Clean(root))
 +	done := make(chan error, 1)
 +	go func() {
 +		lease2, lerr := acquirePrivateRootLease(root)
@@ -36576,13 +36961,13 @@ index e69de29..696dbd5 100644
 +	}()
 +	select {
 +	case lerr := <-done:
-+		rootInitMu.Unlock()
++		unlockInit()
 +		if lerr != nil {
 +			t.Fatalf("acquirePrivateRootLease on existing initialized root = %v, want nil", lerr)
 +		}
 +	case <-time.After(2 * time.Second):
-+		rootInitMu.Unlock()
-+		t.Fatalf("acquirePrivateRootLease on existing initialized root blocked on rootInitMu")
++		unlockInit()
++		t.Fatalf("acquirePrivateRootLease on existing initialized root blocked on root init lock")
 +	}
 +	if got := parentSyncs.Load(); got != 0 {
 +		t.Fatalf("parent-dir fsync count on existing root reuse = %d, want 0", got)
@@ -42822,6 +43207,386 @@ index e69de29..696dbd5 100644
 +	}
 +	if elapsed > 2*time.Second {
 +		t.Fatalf("Begin did not abort stalled Lstat within deadline: elapsed=%v", elapsed)
++	}
++}
++
++func TestR95CodeInterpreterContainerIDStreamAndWireFramingTaintAndLockIsolation(t *testing.T) {
++	// 1. Sol P1 #1 (PR #2280 R95): verifyCompletedOutput and output_item snapshot/done handling
++	//    MUST pass item.ContainerID in toolItemMeta so valid streamed code_interpreter_call items
++	//    with container_id seal as SealOK while mismatched container_id is rejected.
++	runCodeInterpCase := func(name, addedContainer, doneContainer, completedContainer string) SealStatus {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), "r95-ci-"+name)
++		launch := "review-e9060606-2222-4333-8444-555555550001"
++		sess := "11111111-2222-4333-8444-555555559501"
++		addedField := ""
++		if addedContainer != "" {
++			addedField = fmt.Sprintf(`,"container_id":%q`, addedContainer)
++		}
++		doneField := ""
++		if doneContainer != "" {
++			doneField = fmt.Sprintf(`,"container_id":%q`, doneContainer)
++		}
++		compField := ""
++		if completedContainer != "" {
++			compField = fmt.Sprintf(`,"container_id":%q`, completedContainer)
++		}
++		sseBody := strings.Join([]string{
++			`event: response.created`,
++			`data: {"type":"response.created","response":{"id":"resp_r95_ci","status":"in_progress"}}`,
++			``,
++			`event: response.output_item.added`,
++			fmt.Sprintf(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ci_1","type":"code_interpreter_call","status":"in_progress","code":""%s}}`, addedField),
++			``,
++			`event: response.code_interpreter_call_code.delta`,
++			`data: {"type":"response.code_interpreter_call_code.delta","item_id":"ci_1","output_index":0,"delta":"print(1)"}`,
++			``,
++			`event: response.code_interpreter_call_code.done`,
++			`data: {"type":"response.code_interpreter_call_code.done","item_id":"ci_1","output_index":0,"code":"print(1)"}`,
++			``,
++			`event: response.output_item.done`,
++			fmt.Sprintf(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"print(1)"%s}}`, doneField),
++			``,
++			`event: response.output_item.added`,
++			`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":[]}}`,
++			``,
++			`event: response.output_item.done`,
++			`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`,
++			``,
++			`event: response.completed`,
++			fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_r95_ci","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"print(1)"%s},{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`, compField),
++			``,
++			``,
++		}, "\n")
++		ctx, col, err := BeginReview(context.Background(), root, launch, sess, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s BeginReview: %v", name, err)
++		}
++		ctx, execLease, err := col.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s Start: %v", name, err)
++		}
++		rt := httptransport.Decorate(ctx, &http.Client{
++			Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{
++					StatusCode:    http.StatusOK,
++					ProtoMajor:    1,
++					ProtoMinor:    1,
++					Header:        http.Header{"Content-Type": []string{"text/event-stream"}},
++					ContentLength: int64(len(sseBody)),
++					Body:          io.NopCloser(strings.NewReader(sseBody)),
++					TLS:           verifiedTLSState("chatgpt.com"),
++				}, nil
++			}),
++		})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := rt.Do(req)
++		if err != nil {
++			t.Fatalf("%s Do: %v", name, err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(col, raw)
++		execLease.End()
++		col.Complete(true)
++		col.HandlerDone(true)
++		return SealReview(root, launch, sess)
++	}
++	if st := runCodeInterpCase("matching_all", "cntr_r95_1", "cntr_r95_1", "cntr_r95_1"); st != SealOK {
++		t.Fatalf("streamed code_interpreter_call with matching container_id = %v, want SealOK", st)
++	}
++	if st := runCodeInterpCase("late_on_done", "", "cntr_r95_2", "cntr_r95_2"); st != SealOK {
++		t.Fatalf("streamed code_interpreter_call with container_id added on done = %v, want SealOK", st)
++	}
++	if st := runCodeInterpCase("mismatch_completed", "cntr_r95_a", "cntr_r95_a", "cntr_r95_b"); st != SealRejected {
++		t.Fatalf("streamed code_interpreter_call with mismatched completed container_id = %v, want SealRejected", st)
++	}
++	if st := runCodeInterpCase("dropped_completed", "cntr_r95_a", "cntr_r95_a", ""); st != SealRejected {
++		t.Fatalf("streamed code_interpreter_call with dropped completed container_id = %v, want SealRejected", st)
++	}
++
++	// 2. Astra P1 #1 (PR #2280 R95): Wire HTTP/1.1 framing violation (ErrHTTP1FramingViolation)
++	//    on a formal review launch MUST taint the launch so a later clean turn cannot seal it;
++	//    a benign 0-byte EOF before headers returns ErrUnavailable without tainting.
++	runWireTurn := func(root, launch, sess, rawWire string, useCleanMock bool) error {
++		ctx, col, err := BeginReview(context.Background(), root, launch, sess, "gpt-6.2-sol")
++		if err != nil {
++			return err
++		}
++		ctx, execLease, err := col.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			col.HandlerDone(false)
++			return err
++		}
++		var baseRT http.RoundTripper
++		if useCleanMock {
++			cleanSSE := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_clean_t2\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"VERDICT: PASS\"}]}]}}\n\n"
++			baseRT = fakeTransport(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{
++					StatusCode:    http.StatusOK,
++					ProtoMajor:    1,
++					ProtoMinor:    1,
++					Header:        http.Header{"Content-Type": []string{"text/event-stream"}},
++					ContentLength: int64(len(cleanSSE)),
++					Body:          io.NopCloser(strings.NewReader(cleanSSE)),
++					TLS:           verifiedTLSState("chatgpt.com"),
++				}, nil
++			})
++		} else {
++			ln, lerr := net.Listen("tcp", "127.0.0.1:0")
++			if lerr != nil {
++				t.Fatal(lerr)
++			}
++			defer ln.Close()
++			go func() {
++				conn, aerr := ln.Accept()
++				if aerr != nil {
++					return
++				}
++				defer conn.Close()
++				buf := make([]byte, 2048)
++				_, _ = conn.Read(buf)
++				if rawWire != "" {
++					_, _ = io.WriteString(conn, rawWire)
++				}
++			}()
++			dialer := &net.Dialer{Timeout: 5 * time.Second}
++			tr := &http.Transport{
++				DisableKeepAlives: true,
++				DialTLSContext: func(dctx context.Context, network, _ string) (net.Conn, error) {
++					c, derr := dialer.DialContext(dctx, "tcp", ln.Addr().String())
++					if derr != nil {
++						return nil, derr
++					}
++					return NewStrictHTTP1FramingConn(c), nil
++				},
++			}
++			baseRT = tr
++		}
++		client := httptransport.Decorate(ctx, &http.Client{Transport: baseRT})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, doErr := client.Do(req)
++		if doErr == nil && resp != nil {
++			raw, _ := io.ReadAll(resp.Body)
++			_ = resp.Body.Close()
++			observeStrictSSEForTest(col, raw)
++		}
++		execLease.End()
++		col.Complete(doErr == nil)
++		col.HandlerDone(doErr == nil)
++		return doErr
++	}
++	rootTaint := filepath.Join(t.TempDir(), "r95-wire-taint")
++	launchTaint := "review-e9060606-2222-4333-8444-555555550002"
++	sessTaint := "11111111-2222-4333-8444-555555559502"
++	errWire := runWireTurn(rootTaint, launchTaint, sessTaint, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n", false)
++	if !errors.Is(errWire, ErrHTTP1FramingViolation) || !errors.Is(errWire, ErrUnavailable) {
++		t.Fatalf("wire TE+CL turn error = %v, want ErrHTTP1FramingViolation wrapping ErrUnavailable", errWire)
++	}
++	if errT2 := runWireTurn(rootTaint, launchTaint, sessTaint, "", true); !errors.Is(errT2, ErrUnavailable) {
++		t.Fatalf("subsequent clean turn after wire framing violation = %v, want ErrUnavailable (tainted)", errT2)
++	}
++	if st := SealReview(rootTaint, launchTaint, sessTaint); st != SealRejected {
++		t.Fatalf("SealReview after wire framing violation = %v, want SealRejected", st)
++	}
++
++	rootDrop := filepath.Join(t.TempDir(), "r95-wire-benign-eof")
++	launchDrop := "review-e9060606-2222-4333-8444-555555550003"
++	sessDrop := "11111111-2222-4333-8444-555555559503"
++	errDrop := runWireTurn(rootDrop, launchDrop, sessDrop, "", false)
++	if errDrop == nil || errors.Is(errDrop, ErrHTTP1FramingViolation) {
++		t.Fatalf("0-byte EOF before headers error = %v, want non-nil non-framing error", errDrop)
++	}
++	if errDropT2 := runWireTurn(rootDrop, launchDrop, sessDrop, "", true); errDropT2 != nil {
++		t.Fatalf("clean Turn 2 after benign 0-byte drop failed: %v", errDropT2)
++	}
++	if st := SealReview(rootDrop, launchDrop, sessDrop); st != SealOK {
++		t.Fatalf("SealReview after benign 0-byte drop + clean Turn 2 = %v, want SealOK", st)
++	}
++
++	// 3. Sol P2 #2 (PR #2280 R95): Stalling syncDirFn on rootA during acquirePrivateRootLease
++	//    MUST NOT hold global rootLockMu or global rootInitMu, so both an already-initialized
++	//    rootB AND a brand-new rootC acquire leases promptly without blocking on rootA.
++	baseDir := t.TempDir()
++	rootA := filepath.Join(baseDir, "r95-lock-a")
++	rootB := filepath.Join(baseDir, "r95-lock-b")
++	rootC := filepath.Join(baseDir, "r95-lock-c")
++	leaseBInit, err := acquirePrivateRootLease(rootB)
++	if err != nil {
++		t.Fatalf("init rootB: %v", err)
++	}
++	leaseBInit.Close()
++
++	origSync := syncDirFn
++	enteredA := make(chan struct{})
++	unblockA := make(chan struct{})
++	var blockedAOnce atomic.Bool
++	cleanRootA := filepath.Clean(rootA)
++	syncDirFn = func(dir string) error {
++		if filepath.Clean(dir) == cleanRootA && blockedAOnce.CompareAndSwap(false, true) {
++			close(enteredA)
++			<-unblockA
++		}
++		if origSync != nil {
++			return origSync(dir)
++		}
++		return nil
++	}
++	doneA := make(chan error, 1)
++	go func() {
++		la, lerr := acquirePrivateRootLease(rootA)
++		if la != nil {
++			la.Close()
++		}
++		doneA <- lerr
++	}()
++	select {
++	case <-enteredA:
++	case <-time.After(2 * time.Second):
++		close(unblockA)
++		<-doneA
++		syncDirFn = origSync
++		t.Fatalf("rootA did not reach syncDirFn")
++	}
++
++	doneB := make(chan error, 1)
++	go func() {
++		lb, lerr := acquirePrivateRootLease(rootB)
++		if lb != nil {
++			lb.Close()
++		}
++		doneB <- lerr
++	}()
++	doneC := make(chan error, 1)
++	go func() {
++		lc, lerr := acquirePrivateRootLease(rootC)
++		if lc != nil {
++			lc.Close()
++		}
++		doneC <- lerr
++	}()
++	select {
++	case errB := <-doneB:
++		if errB != nil {
++			close(unblockA)
++			<-doneA
++			syncDirFn = origSync
++			t.Fatalf("existing rootB lease failed while rootA stalled: %v", errB)
++		}
++	case <-time.After(2 * time.Second):
++		close(unblockA)
++		<-doneA
++		syncDirFn = origSync
++		t.Fatalf("existing rootB blocked on stalled rootA")
++	}
++	select {
++	case errC := <-doneC:
++		if errC != nil {
++			close(unblockA)
++			<-doneA
++			syncDirFn = origSync
++			t.Fatalf("brand-new rootC lease failed while rootA stalled: %v", errC)
++		}
++	case <-time.After(2 * time.Second):
++		close(unblockA)
++		<-doneA
++		syncDirFn = origSync
++		t.Fatalf("brand-new rootC blocked on stalled rootA")
++	}
++	close(unblockA)
++	if errA := <-doneA; errA != nil {
++		syncDirFn = origSync
++		t.Fatalf("rootA lease failed after unblock: %v", errA)
++	}
++	syncDirFn = origSync
++
++	waitPreflightSemDrain := func() {
++		deadline := time.Now().Add(3 * time.Second)
++		for time.Now().Before(deadline) {
++			if len(preflightDiskSem) == 0 {
++				return
++			}
++			time.Sleep(10 * time.Millisecond)
++		}
++		t.Fatalf("preflightDiskSem did not drain: len=%d", len(preflightDiskSem))
++	}
++
++	// 4a. Astra P2 #3 (PR #2280 R95): Legacy preflight Collector.Start MUST honor ctx/deadline
++	//     when storage stalls rather than blocking indefinitely under c.mu.
++	rootStart := filepath.Join(baseDir, "r95-legacy-start-stall")
++	sessStart := "preflight-e9060606-2222-4333-8444-555555550004"
++	shortStartCtx, cancelStart := context.WithTimeout(context.Background(), 150*time.Millisecond)
++	defer cancelStart()
++	ctxS, colS, err := Begin(shortStartCtx, rootStart, sessStart)
++	if err != nil {
++		t.Fatalf("Begin legacy start-stall: %v", err)
++	}
++	unlockStartInit := acquireRootInitLock(filepath.Clean(rootStart))
++	tStart := time.Now()
++	_, execS, errStart := colS.Start(ctxS, "claude", "claude-opus-5-5")
++	elapsedStart := time.Since(tStart)
++	unlockStartInit()
++	waitPreflightSemDrain()
++	if !errors.Is(errStart, ErrUnavailable) || execS != nil {
++		t.Fatalf("stalled legacy Start = (%v, %v), want (nil, ErrUnavailable)", execS, errStart)
++	}
++	if elapsedStart > 2*time.Second {
++		t.Fatalf("stalled legacy Start exceeded ctx deadline: elapsed=%v", elapsedStart)
++	}
++
++	// 4b. Astra P2 #3 (PR #2280 R95): Legacy preflight publishLocked (via HandlerDone) MUST honor
++	//     ctx/deadline when storage stalls AND refuse to publish receipt.json after deadline passes.
++	rootPub := filepath.Join(baseDir, "r95-legacy-pub-stall")
++	sessPub := "preflight-e9060606-2222-4333-8444-555555550005"
++	pubCtx, cancelPub := context.WithTimeout(context.Background(), 350*time.Millisecond)
++	defer cancelPub()
++	ctxP, colP, err := Begin(pubCtx, rootPub, sessPub)
++	if err != nil {
++		t.Fatalf("Begin legacy pub-stall: %v", err)
++	}
++	ctxP, execP, err := colP.Start(ctxP, "claude", "claude-opus-5-5")
++	if err != nil {
++		t.Fatalf("Start legacy pub-stall: %v", err)
++	}
++	clientP := httptransport.Decorate(ctxP, &http.Client{
++		Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode:    http.StatusOK,
++				ProtoMajor:    1,
++				ProtoMinor:    1,
++				ContentLength: 2,
++				Body:          io.NopCloser(strings.NewReader("ok")),
++				TLS:           verifiedTLSState("api.anthropic.com"),
++			}, nil
++		}),
++	})
++	reqP, _ := http.NewRequestWithContext(ctxP, http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(`{}`))
++	respP, err := clientP.Do(reqP)
++	if err != nil {
++		t.Fatalf("legacy pub-stall Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, respP.Body)
++	_ = respP.Body.Close()
++	execP.End()
++	colP.Complete(true)
++
++	// Hold rootPub's per-root init lock so ensureStagingDir inside publishLegacyReceiptToDisk stalls
++	// until after pubCtx expires, proving HandlerDone returns promptly and no post-deadline receipt lands.
++	unlockPubInit := acquireRootInitLock(filepath.Clean(rootPub))
++	tPub := time.Now()
++	colP.HandlerDone(true)
++	elapsedPub := time.Since(tPub)
++	if elapsedPub > 2*time.Second {
++		unlockPubInit()
++		waitPreflightSemDrain()
++		t.Fatalf("stalled legacy HandlerDone exceeded ctx deadline: elapsed=%v", elapsedPub)
++	}
++	// Release after pubCtx has expired and verify background goroutine exits cleanly without publishing.
++	time.Sleep(50 * time.Millisecond)
++	unlockPubInit()
++	waitPreflightSemDrain()
++	if _, serr := os.Stat(filepath.Join(rootPub, sessPub, "receipt.json")); !os.IsNotExist(serr) {
++		t.Fatalf("stalled legacy publish unexpectedly created post-deadline receipt.json: stat err=%v", serr)
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
