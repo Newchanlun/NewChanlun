@@ -52,7 +52,7 @@
 #![allow(dead_code)]
 
 use super::audit_store::{CodecRead, CodecStore};
-use super::business_json::{self as bj, JsonOwner, RawEventsView, TextValue};
+use super::business_json::{self as bj, RawEventsView, TextValue};
 use super::fixed_radix::FixedRadix;
 use super::object_records;
 use crate::content_bi::{BiBuildInputView, BiLedgerView, ContentBi, PriorState};
@@ -318,12 +318,33 @@ impl<'a> Generated<'a> {
                     .to_string(),
             );
         }
-        let mut rows = CodecVec::default();
-        for object in &self.objects {
-            let row = catalog_projection_entry(&mut *store, object, &self.requests)?;
-            push_gen(&mut rows, row, store)?;
+        let mut payloads: CodecVec<Option<TextValue>> = CodecVec::default();
+        if let Some(work) = store.codec_work() {
+            payloads
+                .try_reserve_native(work, self.objects.len())
+                .map_err(codec_error)?;
         }
-        let rows = JsonOwners(&rows);
+        for object in &self.objects {
+            let payload = catalog_projection_payload(&mut *store, object, &self.requests)?;
+            push_gen(&mut payloads, payload, store)?;
+        }
+        let mut rows: CodecVec<ProjectionRow<'_>> = CodecVec::default();
+        if let Some(work) = store.codec_work() {
+            rows.try_reserve_native(work, self.objects.len())
+                .map_err(codec_error)?;
+        }
+        for (object, payload) in self.objects.iter().zip(payloads.iter()) {
+            push_gen(
+                &mut rows,
+                ProjectionRow {
+                    object_id: object.object_id(),
+                    kind: object.kind(),
+                    payload_json: payload.as_deref().unwrap_or("{}"),
+                },
+                store,
+            )?;
+        }
+        let rows = ProjectionRows(&rows);
         let projection = bj::json_from_view_admitted(store, JsonView::BorrowedArray(&rows))?;
         // 与原目录轴函数同一判据；借入实际 owner，不擦成裸 Value 数组。
         let axes_owner = crate::tb02a_facts::catalog_axes_admitted(
@@ -1824,17 +1845,28 @@ fn dedupe_observations(
                 .native_format(format_args!("\u{1}tb02a\u{1}{}", root.root))
                 .map_err(codec_error)?
         } else {
-            let kind = field_text_admitted(store, &root, "kind")?;
-            let start = field_text_admitted(store, &root, "window_start")?;
-            let mid = field_text_admitted(store, &root, "window_mid")?;
-            let end = field_text_admitted(store, &root, "window_end")?;
-            let reason = field_text_admitted(store, &root, "reason")?;
-            store
-                .native_format(format_args!(
-                    "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
-                    kind, start, mid, end, reason
-                ))
-                .map_err(codec_error)?
+            let fields = store
+                .lookup_subset_ref(
+                    (&root).into(),
+                    &["kind", "reason", "window_end", "window_mid", "window_start"],
+                )
+                .map_err(|error| format!("GenError：小路径定位失败：{error}"))?;
+            let mut bytes = CodecVec::default();
+            for (idx, name) in ["kind", "window_start", "window_mid", "window_end", "reason"]
+                .into_iter()
+                .enumerate()
+            {
+                if idx > 0 {
+                    write_admitted_bytes(store, &mut bytes, b"\x01")?;
+                }
+                let r = fields
+                    .get(name)
+                    .ok_or_else(|| format!("GenError：小路径定位失败：缺字段 {name}"))?;
+                render_ref_into(store, r, &mut bytes)?;
+            }
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|e| format!("GenError：小字段渲染非 UTF-8：{e}"))?;
+            native_text(store, text)?
         };
         if !seen.contains_key(key.as_str()) {
             store.native_map_room(&mut seen).map_err(codec_error)?;
@@ -1843,17 +1875,6 @@ fn dedupe_observations(
         }
     }
     Ok(out)
-}
-fn field_text_admitted(
-    store: &mut dyn NodeStore,
-    root: &ContentRef,
-    name: &str,
-) -> Result<TextValue, String> {
-    let reference = store
-        .lookup_field_ref(root.into(), name)
-        .map_err(|error| format!("GenError：小路径定位失败：{error}"))?;
-    let value = bj::render_json(store, reference.view())?;
-    json_text(store, value.view())
 }
 
 /// 目录轴的**最小消费投影**：每项只给 `object_id`/`kind` 与目录函数真正读取的小路径值。
@@ -1867,62 +1888,105 @@ fn field_text_admitted(
 /// - 其余 kind：空对象（旧函数对这些 kind 从不解析 `payload_json`）。
 ///
 /// 不读 `source_coords`/`input_refs` 等大边，也不重造整份 payload。
-struct JsonOwners<'a>(&'a [JsonOwner]);
-impl sc::capture_allocation::audit_json::JsonArray for JsonOwners<'_> {
+struct ProjectionRow<'a> {
+    object_id: &'a str,
+    kind: &'a str,
+    payload_json: &'a str,
+}
+impl sc::capture_allocation::audit_json::JsonObject for ProjectionRow<'_> {
+    fn len(&self) -> usize {
+        3
+    }
+    fn field(&self, index: usize) -> Option<(&str, JsonView<'_>)> {
+        match index {
+            0 => Some(("object_id", JsonView::String(self.object_id))),
+            1 => Some(("kind", JsonView::String(self.kind))),
+            2 => Some(("payload_json", JsonView::String(self.payload_json))),
+            _ => None,
+        }
+    }
+}
+struct ProjectionRows<'a>(&'a [ProjectionRow<'a>]);
+impl sc::capture_allocation::audit_json::JsonArray for ProjectionRows<'_> {
     fn len(&self) -> usize {
         self.0.len()
     }
     fn get(&self, index: usize) -> Option<JsonView<'_>> {
-        self.0.get(index).map(JsonOwner::view)
+        self.0
+            .get(index)
+            .map(|row| JsonView::borrowed_object(row).expect("projection三字段唯一"))
     }
 }
-fn json_text(store: &dyn NodeStore, view: JsonView<'_>) -> Result<TextValue, String> {
-    struct Output<'a> {
-        bytes: CodecVec<u8>,
-        source: &'a dyn NodeStore,
+fn write_admitted_bytes(
+    store: &dyn NodeStore,
+    out: &mut CodecVec<u8>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if let Some(work) = store.codec_work() {
+        out.try_reserve_native(work, bytes.len())
+            .map_err(codec_error)?;
     }
-    impl std::io::Write for Output<'_> {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if let Some(work) = self.source.codec_work() {
-                self.bytes
-                    .try_reserve_native(work, bytes.len())
-                    .map_err(std::io::Error::other)?;
+    out.try_extend_bytes(bytes).map_err(codec_error)
+}
+fn render_ref_into(
+    store: &mut dyn NodeStore,
+    reference: sc::RefView<'_>,
+    out: &mut CodecVec<u8>,
+) -> Result<(), String> {
+    if let Some(work) = store.codec_work() {
+        struct ScratchOut {
+            bytes: sc::capture_allocation::scratch::ScratchBytes,
+            error: Option<sc::CodecError>,
+        }
+        impl std::io::Write for ScratchOut {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                match self.bytes.try_extend_bytes(bytes) {
+                    Ok(()) => Ok(bytes.len()),
+                    Err(e) => {
+                        self.error = Some(e);
+                        Err(std::io::ErrorKind::Other.into())
+                    }
+                }
             }
-            self.bytes
-                .try_extend_bytes(bytes)
-                .map_err(std::io::Error::other)?;
-            Ok(bytes.len())
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+        let mut scratch = ScratchOut {
+            bytes: work.bytes(),
+            error: None,
+        };
+        let result = store.render_ref(reference, &mut scratch);
+        if let Some(e) = scratch.error {
+            return Err(format!("GenError：小字段渲染失败：{e}"));
         }
+        result.map_err(|e| format!("GenError：小字段渲染失败：{e}"))?;
+        return write_admitted_bytes(store, out, &scratch.bytes);
     }
-    let mut output = Output {
-        bytes: CodecVec::default(),
-        source: store,
-    };
-    serde_json::to_writer(&mut output, &view)
+    let mut buf: Vec<u8> = Vec::new();
+    store
+        .render_ref(reference, &mut buf)
         .map_err(|e| format!("GenError：小字段渲染失败：{e}"))?;
-    TextValue::from_bytes(output.bytes)
+    write_admitted_bytes(store, out, &buf)
 }
-fn projection_field(
+fn lookup_projection_ref(
     store: &mut dyn NodeStore,
     root: &Built,
     path: &[&str],
-) -> Result<JsonOwner, String> {
+) -> Result<super::audit_store::RefValue, String> {
     let mut reference = store.native_built_ref(root).map_err(codec_error)?;
     for field in path {
         reference = store
             .lookup_field_ref(reference.view(), field)
             .map_err(|e| format!("GenError：小路径定位失败：{e}"))?;
     }
-    bj::render_json(store, reference.view())
+    Ok(reference)
 }
-fn catalog_projection_entry(
+fn catalog_projection_payload(
     store: &mut dyn NodeStore,
     object: &ProducedObject,
     requests: &[Built],
-) -> Result<JsonOwner, String> {
+) -> Result<Option<TextValue>, String> {
     let payload = || {
         object.payload().ok_or_else(|| {
             format!(
@@ -1932,58 +1996,51 @@ fn catalog_projection_entry(
             )
         })
     };
-    let projection = if object.kind() == CC004_STEP_KIND {
-        let comparisons = projection_field(store, payload()?, &["comparisons"])?;
-        let fields = [("comparisons", comparisons.view())];
-        json_text(
-            store,
-            JsonView::object_fields(&fields).map_err(codec_error)?,
-        )?
+    if object.kind() == CC004_STEP_KIND {
+        let comparisons = lookup_projection_ref(store, payload()?, &["comparisons"])?;
+        let mut bytes = CodecVec::default();
+        write_admitted_bytes(store, &mut bytes, b"{\"comparisons\":")?;
+        render_ref_into(store, comparisons.view(), &mut bytes)?;
+        write_admitted_bytes(store, &mut bytes, b"}")?;
+        Ok(Some(TextValue::from_bytes(bytes)?))
     } else if object.kind() == CC054_KNOWLEDGE_KIND {
-        let waiting = projection_field(store, payload()?, &["waiting_reasons"])?;
-        let mut request_items = CodecVec::default();
-        for request in requests {
-            let request_id = projection_field(store, request, &["request_id"])?;
-            let reasons = projection_field(store, request, &["reasons"])?;
-            let fields = [
-                ("request_id", request_id.view()),
-                ("reasons", reasons.view()),
-            ];
-            let row = bj::json_from_view_admitted(
-                store,
-                JsonView::object_fields(&fields).map_err(codec_error)?,
-            )?;
-            push_gen(&mut request_items, row, store)?;
+        let waiting = lookup_projection_ref(store, payload()?, &["waiting_reasons"])?;
+        let mut bytes = CodecVec::default();
+        write_admitted_bytes(store, &mut bytes, b"{\"waiting_reasons\":")?;
+        render_ref_into(store, waiting.view(), &mut bytes)?;
+        write_admitted_bytes(store, &mut bytes, b",\"requests\":[")?;
+        for (idx, request) in requests.iter().enumerate() {
+            if idx > 0 {
+                write_admitted_bytes(store, &mut bytes, b",")?;
+            }
+            let req_ref = store.native_built_ref(request).map_err(codec_error)?;
+            let fields = store
+                .lookup_subset_ref(req_ref.view(), &["reasons", "request_id"])
+                .map_err(|e| format!("GenError：小路径定位失败：{e}"))?;
+            let request_id = fields
+                .get("request_id")
+                .ok_or_else(|| "GenError：小路径定位失败：缺字段 request_id".to_string())?;
+            let reasons = fields
+                .get("reasons")
+                .ok_or_else(|| "GenError：小路径定位失败：缺字段 reasons".to_string())?;
+            write_admitted_bytes(store, &mut bytes, b"{\"request_id\":")?;
+            render_ref_into(store, request_id, &mut bytes)?;
+            write_admitted_bytes(store, &mut bytes, b",\"reasons\":")?;
+            render_ref_into(store, reasons, &mut bytes)?;
+            write_admitted_bytes(store, &mut bytes, b"}")?;
         }
-        let items = JsonOwners(&request_items);
-        let fields = [
-            ("waiting_reasons", waiting.view()),
-            ("requests", JsonView::BorrowedArray(&items)),
-        ];
-        json_text(
-            store,
-            JsonView::object_fields(&fields).map_err(codec_error)?,
-        )?
+        write_admitted_bytes(store, &mut bytes, b"]}")?;
+        Ok(Some(TextValue::from_bytes(bytes)?))
     } else if object.kind() == "CC-056.version" {
-        let waiting = projection_field(store, payload()?, &["data", "waiting_reasons"])?;
-        let inner = [("waiting_reasons", waiting.view())];
-        let outer = [(
-            "data",
-            JsonView::object_fields(&inner).map_err(codec_error)?,
-        )];
-        json_text(store, JsonView::object_fields(&outer).map_err(codec_error)?)?
+        let waiting = lookup_projection_ref(store, payload()?, &["data", "waiting_reasons"])?;
+        let mut bytes = CodecVec::default();
+        write_admitted_bytes(store, &mut bytes, b"{\"data\":{\"waiting_reasons\":")?;
+        render_ref_into(store, waiting.view(), &mut bytes)?;
+        write_admitted_bytes(store, &mut bytes, b"}}")?;
+        Ok(Some(TextValue::from_bytes(bytes)?))
     } else {
-        TextValue::Plain(native_text(store, "{}")?)
-    };
-    let fields = [
-        ("object_id", JsonView::String(object.object_id())),
-        ("kind", JsonView::String(object.kind())),
-        ("payload_json", JsonView::String(&projection)),
-    ];
-    bj::json_from_view_admitted(
-        store,
-        JsonView::object_fields(&fields).map_err(codec_error)?,
-    )
+        Ok(None)
+    }
 }
 
 fn step_field(name: &str) -> PathStep {
@@ -2268,6 +2325,19 @@ fn typed_kind(
             object.object_id,
             kind.kind()
         ));
+    }
+    let mut bytes = CodecVec::default();
+    render_ref_into(store, kind.view(), &mut bytes)?;
+    if bytes.len() >= 2
+        && bytes[0] == b'"'
+        && bytes[bytes.len() - 1] == b'"'
+        && !bytes[1..bytes.len() - 1]
+            .iter()
+            .any(|&b| b == b'\\' || b == b'"' || b < 0x20)
+    {
+        if let Ok(text) = std::str::from_utf8(&bytes[1..bytes.len() - 1]) {
+            return native_text(store, text);
+        }
     }
     let value = bj::render_json(store, kind.view())?;
     let text = value
