@@ -1,67 +1,18 @@
-"""#1742 正式审查的自动触发与（可选）合入。常驻入口是 executor serve 的每轮钩子（ServeRound，
-`serve --review-sweep [--review-sweep-auto-merge]`）；本模块的 main 只供手动单跑。
+"""#1742 正式审查的自动触发、对账与原生 auto-merge 撤销。
 
-每轮 tick 列出指向 main 的开放 PR（max_age 内有活动、非草稿、同仓），逐个隔离处理，单个 PR 的异常不影响其他 PR，
-主循环遇到异常也不退出。整轮的输入源（GitHub 开放 PR 列表、本机进程表）读不到时抛 SourceUnreadable，写明是哪个源。
+常驻入口是 executor serve 的每轮钩子（ServeRound）；本模块的 main 供手动运行。
+同仓、非草稿、活动窗内的开放 main PR 按可沿用 PASS、再按 head 提交时间派审。
+同一 PR 同时只派一次；已有发布不重复审，被覆盖报 needs-reconcile，不阻挡其他 PR。
+中断或发布未完成的同一 attempt 只续跑一次；登记前退出的 attempt 退避 10 分钟。
+限流退避只延后新审查与审查续跑，不影响发布续跑、对账与撤销。
 
-审查（按 head 判定，不按 base；main 前进不会把已审完的同一 head 拉回 pending）：
-- 这个 PR 已有审查进程在跑：等待（同一 PR 同时只跑一个，与 head 无关，免得重复派发）；
-- 本 head 上有已发布终态（非 STALE 且有 publication）：完成；
-- 本 head 上有结论但没发布（outcome 已存、publication 缺失）：同一 attempt 续跑一次走受管对账与发布，再不成交操作员；
-- 本 head 上有登记、无结论、进程已不在（中断）：同一 attempt 续跑一次，再不成交操作员；
-- 其余（没有 run，或本 head 上只有 STALE）：派发下一个 attempt；子进程登记前就退出的同一 attempt 退避 10 分钟再派。
-派发先后（launch_order，并发上限内谁先拿名额）：能沿用已发布 PASS 的 head 先，其余按 head 提交的 committer 时间从新到旧，
-head 提交早于 48 小时的垫底；只改先后，不改派不派。合入、追平与兜底撤销仍按 PR 号。
-限流退避：最近 2 个已完结的审查 run 都有 reviewer 以 failure_code=rate_limited 失败时，30 分钟内不派新审查
-（launch、resume-review），每轮记一行 rate-limit-backoff；发布续跑、追平、合入与撤原生 auto-merge 照常。
-派发的子进程绑定决策时的 head：先核对 PR 仍是这个 head，不是就不审（run-review --expect-head）。
-启用合入时，strict 下落后的 PR 先追平、再审新 head（不审一个合入前必然被替换的 head）。
-发起前 base、head 提交须已在宿主对象库（EXTERNAL-REVIEW.md：入口和 reviewer 都不 fetch）；缺失时调用 owner 注入的
-sync(number, base, head)，未注入报 needs-source-sync。
+#2131 R09 切换前无自动合入、无自动追平。兼容 --review-sweep-auto-merge / --auto-merge，
+但只增加只读的三门与改动分类诊断，诊断不授权合入。获准人工合入者按 graph-engineering.md 核验；
+切换后合入只走 R09 受控入口，sweep 不持合入凭据。
 
-合入（--auto-merge，用宿主 gh 凭据；本模块不构造 App 身份，审查身份归 external_review）：不预先挂 auto-merge。
-只有同时满足下列条件才合入，用 REST PUT /pulls/{n}/merge 并带 sha=<该 head>，由 GitHub 服务端拒绝 head 不符（409）：
-- main 的分支保护 strict 开着，且必需检查同时含 deepagents/review 与 ci-ok，两者都绑定了来源 app（没绑定的谁都能发同名 success）；
-- deepagents/review 绑定的是 IDENTITY_CONFIG 配的审查专用 App，且不是执行器 App 5486877（执行器交付时自写
-  deepagents/review=success；绑定它时 draft 一标 ready，同一轮刚派出的正式审查还没发 pending 就会被合入）；
-  不满足或身份文件缺失、读不了时记 auto-merge-unsafe，本轮不合入；
-- 该精确 head 上 deepagents/review、ci-ok、DevSkim 都是 success，且 GitHub 判定可合入（clean/unstable）；
-- 该 head 的完整改动清单可判定且不触及人工确认两类（HUMAN_GATED：实盘下单或资金、密钥或凭证）。
-两类的出处：用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
-唯一的自动合入路径是本模块带 sha 的 REST 合入：仓库设置 allow_auto_merge 已关（GET /repos/{owner}/{repo} 的
-allow_auto_merge=false，2026-11-09 由主控关闭），GitHub 原生 auto-merge 根本挂不上，所以有写权限的人也不能在两轮之间给
-触及两类的 PR 挂原生 auto-merge、等检查转绿由 GitHub 自己合入。sweep 每轮读这个设置：为 true 或读不到时本轮一律不合入、
-不追平，记 native-auto-merge-enabled；撤原生 auto-merge 的逻辑保留，作为纵深防御。
-合入在代码里默认关；只给 --review-sweep 时只派审。#1915 合入后（main 的合入不设人工批准），部署模板加了
---review-sweep-auto-merge；关掉的方法见 EXECUTOR.md「附带正式审查」。
-完整清单：files 接口最多 3000 个且需与 changed_files 相符；否则用本地精确 diff；两者都拿不到报 evidence-insufficient
-（下轮重试），不合入，也不升级成人工确认。
-触及两类的报 needs-human-confirm，不合入、不追平；这类 PR 上若挂着 GitHub 原生 auto-merge 会撤掉。
-证据不全一律按失败关闭（fail closed）：该 PR 的状态、文件清单或检查读不到，main 的必需检查读不到，或处理中出任何异常，
-都不合入、不追平，并撤掉它的原生 auto-merge（状态读不到、不知道挂没挂时也撤）——否则一个读失败的敏感 PR
-会靠原生 auto-merge 在检查转绿后绕过 HUMAN_GATED。
-合入阶段分两段：先把所有 PR 的证据读完、定好动作，再按序执行写（合入、追平、撤 auto-merge）。
-每个 gh 调用都有 GH_TIMEOUT_SECONDS 上限；超时按输入源读不到处理（SourceUnreadable），整轮作废、下轮重试，
-读阶段最多卡一个超时；之后 fail_closed 撤 auto-merge 时最多再卡一个，补对象的 fetch 另有自己的上限，
-所以一轮的耗时有界，不会无限期拖住 executor serve 的派票循环。
-检查结论绑定发布来源：必需检查只认 main 分支保护为它绑定的 app_id（status 按该 App 的 bot 账号、check run 按
-app.id），DevSkim 不是必需检查，只认 GitHub Actions（GATED_APP_IDS）；同名但出自别的 App 的结论一律不算。
-分支保护须 strict 与 enforce_admins 都开、两项必需检查都绑定了 app，否则本轮不合入、不追平。
-分类绑定到读到的那个 head SHA：文件清单接口不按 SHA 取，所以读完清单后再读一次 PR，head 未变才算数；开放 PR 列表、
-实时状态与复核三者的 head 有任何不一致都报 head-moved，不合入、不追平，并撤掉原生 auto-merge（新 head 没分类过）。
-写操作里合入带 sha、追平带 expected_head_sha，由 GitHub 服务端拒绝 head 不符；撤 auto-merge 的接口不收 SHA，
-它只会让 PR 更难合入，任何 head 上撤都安全。
-补对象的 fetch 失败（网络、超时、无权限）记 source-unreadable 并写明读不到的源，这个 PR 本轮不派审、不算通过，
-也不占队首。读阶段超时发生在任何写之前，本轮一个 PR 也不合入、
-不追平；随后对每个本轮没能确认不触及两类、又挂着（或不知道挂没挂）原生 auto-merge 的 PR 尽力撤掉（fail_closed），
-撤销本身也超时就停下、下轮再撤。写本身超时记 write-unknown，余下的写不做。本轮中止前已做的动作随异常带出，照常写日志。补对象的 fetch 另有 FETCH_TIMEOUT_SECONDS，
-一轮里失败一次后其余 PR 不再 fetch。
-追平只给队首（CI 节流：同一时刻只让一个 PR 占一整轮 CI）。队首是按 PR 号排第一个仍可能合入的 PR；冲突（dirty）、本 head
-已有失败的独审结论、审查卡在要操作员处理的状态（STUCK_REVIEW）、不落后却有合入检查失败、或不落后且三项检查全绿
-却仍不可合入（mergeable_state 停在 blocked/unknown 等，例如 main 另有未满足的保护规则）的 PR 不占队首，免得一个卡住的
-PR 挡住整列。队首落后、且本地没有它的在途审查（活进程或本轮刚派出）时追平，用 expected_head_sha 绑定 head（服务端 422
-拒绝不符）；队首不落后（在等审查或 CI）时，其他落后的 PR 一律不追平。在途与否以本地为准，不看 GitHub 上的 pending：
-审查进行中 main 前进时终态判 Stale，GitHub 上会一直停在 pending，以它为准会让追平与重审互等。
+先撤销仓库所有开放 PR 的已知或未知挂载，再诊断和派审；仓库设置非明确关闭时整轮不派审／续发。
+挂载过的 PR 本轮不派审／续发；命中人工确认或读取／核验失败时仍尝试撤销。gh 读超时中止本轮并尝试撤销；
+撤销也超时则记录未确认并中止余下操作，下轮重试。
 """
 from __future__ import annotations
 
@@ -77,60 +28,62 @@ import traceback
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
+from urllib.parse import quote
 
+from . import external_review
 from .external_review import (
     DEFAULT_IDENTITY,
-    IDENTITY_CONFIG,
     STATE_ROOT,
     ExternalReview,
     _git,
     git_environment,
 )
+from .github_app import IdentityError
 from .run import _ps_rows
 from .workunit import REPO
 
 Rows = list[tuple[int, int, str, str]]
 Spawn = Callable[[int, int, str, Path], int]
 Sync = Callable[[int, str, str], None]
-GATE = frozenset({"deepagents/review", "ci-ok"})
 LAUNCH_BACKOFF_SECONDS = 600
 # 限流退避：最近 RATE_LIMIT_RUNS 个已完结的审查 run 都有 reviewer 以 failure_code=rate_limited 失败时，自最后一个完结起
-# RATE_LIMIT_BACKOFF_SECONDS 内不派新审查（不派 launch、不续跑 resume-review）；发布续跑、合入、撤 auto-merge 照常。
+# RATE_LIMIT_BACKOFF_SECONDS 内不派新审查（不派 launch、不续跑 resume-review）；发布续跑、对账、撤 auto-merge 照常。
 RATE_LIMIT_RUNS = 2
 RATE_LIMIT_BACKOFF_SECONDS = 1800
 MIN_LOOP_SECONDS = 180
 # 派发先后：head 提交早于这么久的 PR 排在最后（只在没有更新的 PR 等着时才轮到）。
 STALE_PUSH = timedelta(hours=48)
 MERGE_CHECKS = ("deepagents/review", "ci-ok", "DevSkim")
+GATE = frozenset(MERGE_CHECKS)
 FILES_CAP = 3000
 FETCH_TIMEOUT_SECONDS = 120
-# 不在分支保护里、但合入前也要看的检查：只认这里登记的来源 App（DevSkim 由 GitHub Actions 跑）。
-GATED_APP_IDS = {"DevSkim": 15368}
-# 发 commit status 的 App 在接口里只露出 bot 账号，不露 app_id：按已知 slug 求 bot 账号，并用 GET /apps/{slug}
-# 现场核对 id；不在表里的 App 发的 status 一律不算（失败关闭）。
-APP_SLUGS = {5486877: "newchanlun-deepagents-1742", 5664795: "newchanlun-review-gate", 15368: "github-actions"}
+REVIEW_APP_ID = 5664795
+ACTIONS_APP_ID = 15368
+WORKFLOWS = {"ci-ok": ".github/workflows/ci.yml", "DevSkim": ".github/workflows/devskim.yml"}
+BASE_CHANGE_EVENTS = frozenset({"base_ref_changed", "automatic_base_change_succeeded", "automatic_base_change_failed"})
+REVIEW_STATUS = re.compile(
+    r"run=([a-f0-9-]{36}) b=([a-f0-9]{12}) h=([a-f0-9]{12}) (success|pending|failure|error)"
+    r"(?: reuse=([a-f0-9-]{36}) p=([a-f0-9]{12}))?"
+)
+# Commit Status 只露出 bot 账号；用 GET /apps/{slug} 核数值身份。
+REVIEW_PUBLISHER = (REVIEW_APP_ID, "newchanlun-review-gate")
 GH_TIMEOUT_SECONDS = 60
 # 执行器 App：交付时在冻结 head 上自写 deepagents/review=success（作者侧独审，不是正式非作者双审）。
 EXECUTOR_APP_ID = DEFAULT_IDENTITY["app_id"]
 
 
-def configured_review_app(config: Path = IDENTITY_CONFIG) -> int | None:
-    """审查专用 App 的 app_id（external_review.IDENTITY_CONFIG，非秘密 JSON）。文件不存在时审查沿用执行器 App，
-    读不了或字段不对时不知道是谁：都返回 None，合入按不安全处理。"""
+def configured_publisher(config: Path | None = None) -> tuple[int, str] | None:
+    """和正式发布读取同一身份配置；缺席用执行器 App，坏配置不回退。这里只验证元数据，不读取私钥。"""
     try:
-        app_id = json.loads(config.read_text(encoding="utf-8")).get("app_id")
-    except (OSError, ValueError, AttributeError):
+        identity = external_review.load_identity(config or external_review.IDENTITY_CONFIG, Path("/unused"))
+    except (IdentityError, OSError):
         return None
-    return app_id if type(app_id) is int and app_id > 0 else None
+    return identity.app_id, identity.app_slug
 
 # 人工确认只剩两类：实盘下单或资金、密钥或凭证。出处：用户 2026-11-07、2026-11-08 的裁定，原话留痕在
 #   https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631
-# CI 与分支保护配置（workflows、actions、DevSkim 门脚本、基线与误报清单）不再交人工确认。已接受的风险：改 CI 的 PR
-# 在自己的合并 ref 上运行自己定义的 ci-ok 与 DevSkim，必需检查的 app 绑定挡不住它把这两项改成恒成功或放宽扫描准入，
-# 所以对这类 PR 只剩精确 head 上的双模型非作者独审（deepagents/review）。审查提示词（external_review.PROMPT）是通用
-# 审阅提示，没有专门要求拦截放宽必需检查或 DevSkim 基线的改动；原来按内容判基线放宽的检测随 CI 类一起删掉，没有替代。
-# 这是接受的风险，不是已实现的缓解：要补，须改审查提示词（会改变 REVIEW_CONTRACT，旧结论不能沿用），不在本模块。
+# CI 与分支保护配置不属于两类；来源及合入规程见 graph-engineering.md。
 # 两类的边界按仓库实际入口定（2026-11-07 逐个核对用途），不按名字猜；新增同类入口时更新本表。
 #   实盘下单或资金：X 执行域、E 经济、B 域、唯一生产 launcher（会话命名约定 x_/e_/b_/production_），E/B 经济事实库
 #     （账本 book、allocation、finance……）、trading、funding_record；Python 实盘 runner、执行器与券商/交易所配置
@@ -149,22 +102,28 @@ HUMAN_GATED: dict[str, re.Pattern[str]] = {
         r"|(^|/)(secrets?|credentials?)\.(json|ya?ml|toml|ini)$",
         re.IGNORECASE),
 }
-STUCK_REVIEW = frozenset({"needs-operator", "needs-reconcile", "needs-source-sync", "source-unreadable", "error"})
 # 没有动作的状态，不写日志。review-backoff 由本轮一行 rate-limit-backoff 汇总，不逐个 PR 记。
 QUIET = frozenset({"done", "draft", "stale-pr", "review-backoff"})
 
 
 class EvidenceInsufficient(RuntimeError):
-    """证据不足：清单、检查或必需检查读不全。不合入、不追平、撤掉原生 auto-merge，不升级成人工确认；下轮重试。"""
+    """证据不足：清单、检查或必需检查读不全，撤原生 auto-merge，不升级成人工确认。"""
 
 
 class SourceUnreadable(RuntimeError):
-    """整轮的输入源读不到。本轮不派审、不追平、不合入，下轮重试；source 写明是哪个源。"""
+    """输入源读不到，中止本轮余下派审，下轮重试；source 写明读不到的源。"""
 
     def __init__(self, source: str, error: BaseException):
         super().__init__(f"{source}: {type(error).__name__}: {error}")
         self.source = source
         self.actions: list[dict[str, Any]] = []  # 本轮中止前已经做过的动作，照常写日志
+        self.pr_number: int | None = None
+
+
+def _github_second(stamp: str) -> int:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", stamp):
+        raise EvidenceInsufficient("GitHub 检查时刻不是 UTC 秒")
+    return int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp())
 
 
 def human_gated(files: list[str]) -> dict[str, list[str]]:
@@ -178,23 +137,33 @@ def human_gated(files: list[str]) -> dict[str, list[str]]:
 
 
 class GitHubPort(Protocol):
-    """读写 GitHub 的端口（宿主 gh 凭据）。写操作只在 --auto-merge 时调用。"""
+    """GitHub 端口（宿主 gh 凭据）。唯一的写操作是撤销原生 auto-merge。"""
     def open_pulls(self) -> list[dict[str, Any]]: ...
     def committed_at(self, head: str) -> str: ...
     def pr(self, number: int) -> dict[str, Any]: ...
-    def checks(self, head: str, bindings: dict[str, int]) -> dict[str, str]: ...
-    def required_checks(self) -> dict[str, int]: ...
+    def review_status(self, number: int, state: dict[str, Any], runs: list[dict],
+                      publisher: tuple[int, str]) -> str | None: ...
+    def checks(self, number: int, state: dict[str, Any], bindings: dict[str, int | None],
+               review_runs: list[dict]) -> dict[str, str]: ...
+    def required_checks(self) -> dict[str, int | None]: ...
     def allow_auto_merge(self) -> bool: ...
     def pr_files(self, number: int) -> list[dict[str, Any]]: ...
-    def merge(self, number: int, head: str) -> None: ...
-    def update_branch(self, number: int, head: str) -> None: ...
     def disable_auto_merge(self, number: int) -> None: ...
+
+
+class InspectedPull(NamedTuple):
+    pr: dict[str, Any]
+    entry: dict[str, Any]
+    report: dict[str, Any]
+    can_review: bool
+    armed: bool
+    withdrawal: dict[str, Any]
 
 
 class GhCli:
     def __init__(self, repository: str = REPO, timeout: float = GH_TIMEOUT_SECONDS):
         self.repository, self.timeout = repository, timeout
-        self._bots: dict[int, str | None] = {}
+        self._bots: dict[tuple[int, str], str | None] = {}
         self._committed: dict[str, str] = {}
 
     def committed_at(self, head: str) -> str:
@@ -215,54 +184,230 @@ class GhCli:
     def _json_lines(self, *args: str) -> list[Any]:
         return [json.loads(line) for line in self._gh(*args).splitlines() if line.strip()]
 
+    def _inventory(self, path: str, key: str | None = None, *, capped: bool = False) -> list[dict]:
+        """保留分页外层，核计数和唯一 ID；Actions 带查询条件时最多返回 1,000 条。"""
+        try:
+            pages = json.loads(self._gh("api", "--paginate", "--slurp", path))
+            if not isinstance(pages, list) or not pages:
+                raise ValueError("缺分页响应")
+            items: list[dict] = []
+            for page in pages:
+                part = page if key is None else page[key]
+                if not isinstance(part, list):
+                    raise ValueError("分页不是列表")
+                items.extend(part)
+            if key is not None and any(type(p["total_count"]) is not int or p["total_count"] != len(items) for p in pages):
+                raise ValueError("计数与分页不符")
+            if capped and len(items) >= 1000:
+                raise ValueError("触及 Actions 查询上限")
+            ids = [item["id"] for item in items]
+            if any(type(i) is not int or i <= 0 for i in ids) or len(set(ids)) != len(ids):
+                raise ValueError("ID 缺失或重复，分页不完整")
+            return items
+        except SourceUnreadable:
+            raise
+        except (subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
+            raise EvidenceInsufficient(f"读不全 GitHub 分页：{path.split('?')[0]}（{type(error).__name__}）") from error
+
     def open_pulls(self) -> list[dict[str, Any]]:
-        pulls = self._json_lines("api", "--paginate", f"repos/{self.repository}/pulls?state=open&base=main&per_page=100",
+        pulls = self._json_lines("api", "--paginate", f"repos/{self.repository}/pulls?state=open&per_page=100",
                                  "--jq", ".[] | @json")
         return list({pr["number"]: pr for pr in pulls}.values())  # 翻页期间变化可能重复，按号码去重
 
     def pr(self, number: int) -> dict[str, Any]:
         data = json.loads(self._gh("api", f"repos/{self.repository}/pulls/{number}"))
-        return {"head": data["head"]["sha"], "base": data["base"]["sha"], "changed_files": data["changed_files"],
-                "mergeable_state": data["mergeable_state"], "auto_merge": data["auto_merge"] is not None}
+        repository_id = data["base"]["repo"]["id"]
+        if (data["number"] != number or data["base"]["ref"] != "main" or data["head"]["repo"]["id"] != repository_id
+                or data["state"] != "open" or data["draft"] is not False):
+            raise EvidenceInsufficient("PR 不再是同仓、开放且非 draft 的 main 目标")
+        head, base = data["head"]["sha"], data["base"]["sha"]
+        if not all(re.fullmatch(r"[0-9a-f]{40}", sha or "") for sha in (head, base)):
+            raise EvidenceInsufficient("PR 缺完整 base/head SHA")
+        return {"head": head, "base": base, "head_ref": data["head"]["ref"], "changed_files": data["changed_files"],
+                "mergeable_state": data["mergeable_state"], "auto_merge": data.get("auto_merge", True) is not None,
+                "repository_id": repository_id, "pr_id": data["id"], "created_at": data["created_at"]}
 
-    def _bot(self, app_id: int) -> str | None:
-        """App 发 commit status 时用的 bot 账号；slug 不在表里或 GET /apps/{slug} 的 id 对不上时返回 None。"""
-        if app_id not in self._bots:
-            slug = APP_SLUGS.get(app_id)
-            self._bots[app_id] = (f"{slug}[bot]" if slug is not None
-                                  and json.loads(self._gh("api", f"apps/{slug}")).get("id") == app_id else None)
-        return self._bots[app_id]
+    def _bot(self, publisher: tuple[int, str]) -> str | None:
+        if publisher not in self._bots:
+            app_id, slug = publisher
+            self._bots[publisher] = (f"{slug}[bot]"
+                                     if json.loads(self._gh("api", f"apps/{slug}")).get("id") == app_id else None)
+        return self._bots[publisher]
 
-    def checks(self, head: str, bindings: dict[str, int]) -> dict[str, str]:
-        """该 head 上每个受绑定检查名的最新结论（success / failure / pending），只认 bindings 给出的来源 App；
-        同名但出自别的 App 的 status 或 check run 不算，没有绑定 App 的结论就当没有。"""
-        result: dict[str, str] = {}
-        statuses = self._json_lines("api", "--paginate", f"repos/{self.repository}/commits/{head}/statuses?per_page=100",
-                                    "--jq", ".[] | @json")
-        for item in statuses:  # 列表接口新的在前：每个名字只取绑定 App 发的最新一条
-            name = item["context"]
-            if name in bindings and name not in result and \
-                    (item.get("creator") or {}).get("login") == self._bot(bindings[name]):
-                result[name] = {"success": "success", "pending": "pending"}.get(item["state"], "failure")
-        runs = self._json_lines("api", "--paginate", f"repos/{self.repository}/commits/{head}/check-runs?per_page=100",
-                                "--jq", ".check_runs[] | @json")
-        for run in sorted(runs, key=lambda r: (r.get("started_at") or "", r["id"])):  # 重跑时后者覆盖前者
-            if run["name"] not in bindings or (run.get("app") or {}).get("id") != bindings[run["name"]]:
+    def review_status(self, number: int, state: dict[str, Any], runs: list[dict],
+                      publisher: tuple[int, str]) -> str | None:
+        path = f"repos/{self.repository}/commits/{state['head']}/statuses?per_page=100"
+        statuses = self._json_lines("api", "--paginate", path, "--jq", ".[] | @json")
+        return self._review_check(number, state, statuses, runs, publisher)
+
+    def _review_check(self, number: int, state: dict[str, Any], statuses: list[dict],
+                      review_runs: list[dict], publisher: tuple[int, str] = REVIEW_PUBLISHER) -> str | None:
+        frozen = {"pr_number": number, "repository_id": state["repository_id"], "head_sha": state["head"]}
+        publications = {
+            row["outcome"]["publication"]["id"]: row for row in review_runs
+            if (row["outcome"] or {}).get("publication") and row["outcome"].get("verdict") != "STALE"
+            and all(row["target"].get(k) == v for k, v in frozen.items())
+        }
+        group = []
+        for item in statuses:
+            context = item["context"]
+            if not context.isascii() or context.lower() != "deepagents/review":
                 continue
-            result[run["name"]] = ("pending" if run["status"] != "completed" else
-                                   "success" if run["conclusion"] in ("success", "skipped", "neutral") else "failure")
+            created, updated = (_github_second(item.get(key) or "") for key in ("created_at", "updated_at"))
+            if type(item.get("id")) is not int or item["id"] <= 0 or created > updated:
+                raise EvidenceInsufficient("正式审查状态缺可比顺序")
+            group.append((created, item["id"], item))
+        if not group:
+            return "superseded" if publications else None
+        # 先定序再验作者与发布；任何覆盖都不得回退读取上一条正式状态。
+        _, status_id, item = max(group, key=lambda row: row[:2])
+        row = publications.get(status_id)
+        creator = item.get("creator") or {}
+        bot = self._bot(publisher) if row is not None else None
+        if row is None or not bot or creator.get("login") != bot or creator.get("type") != "Bot":
+            return "superseded" if publications else "pending"
+        registered, outcome = row["target"], row["outcome"]
+        publication = outcome["publication"]
+        match = REVIEW_STATUS.fullmatch(item.get("description") or "")
+        base = registered.get("base_sha") or ""
+        run_id = registered.get("run_id")
+        identity = {**frozen, "base_sha": base, "run_id": run_id}
+        reused = outcome.get("reused_from") or {}
+        if (not match or (match[1], match[2], match[3], match[4]) != (run_id, base[:12], state["head"][:12], item["state"])
+                or outcome.get("run_id") != run_id
+                or any((outcome.get("target") or {}).get(k) != v for k, v in identity.items())
+                or publication.get("state") != item["state"] or publication.get("sha") != state["head"]
+                or publication.get("description") != item["description"] or reused.get("run_id") != match[5]
+                or (match[5] is not None and (registered.get("patch_id") or "")[7:19] != match[6])):
+            return "superseded"
+        if item["state"] in ("failure", "error"):
+            return "failure"
+        if base == state["base"] and item["state"] == "success" and outcome.get("verdict") == "PASS":
+            return "success"
+        return "pending"  # 同 PR/head 的合法旧 base 发布仍属于该 PR，不能算当前 base 的通过。
+
+    def _target_history(self, number: int, state: dict[str, Any]) -> None:
+        """按同仓 head ref 查全部 PR（包括已关闭）；现算的 run.pull_requests 不能证明历史目标。"""
+        repo, ref = self.repository, state["head_ref"]
+        owner = repo.split("/")[0]
+        prefix = f"repos/{repo}"
+        pulls = self._inventory(f"{prefix}/pulls?head={owner}:{quote(ref, safe='')}&state=all&per_page=100")
+        targets = [pr for pr in pulls if pr["number"] == number]
+        if (len(targets) != 1 or targets[0]["id"] != state["pr_id"]
+                or targets[0]["state"] != "open" or targets[0]["draft"] is not False
+                or (targets[0]["base"]["sha"], targets[0]["head"]["sha"]) != (state["base"], state["head"])):
+            raise EvidenceInsufficient("同源 PR 分页缺目标 PR，或其 base/head 已漂移")
+        repository_id = state["repository_id"]
+        for pr in pulls:
+            if (pr["base"]["ref"] != "main" or pr["base"]["repo"]["id"] != repository_id
+                    or pr["head"]["repo"]["id"] != repository_id or pr["head"]["ref"] != ref):
+                raise EvidenceInsufficient(f"同源 PR #{pr['number']} 未始终指向本仓 main")
+            events = self._inventory(f"{prefix}/issues/{pr['number']}/events?per_page=100")
+            if any(event["event"] in BASE_CHANGE_EVENTS for event in events):
+                raise EvidenceInsufficient(f"同源 PR #{pr['number']} 有改投目标的历史事件")
+
+    def _run_target(self, number: int, state: dict[str, Any], workflow: str, run: dict) -> bool:
+        if run["event"] != "pull_request" or run["path"] != workflow:
+            return False
+        repository_id = state["repository_id"]
+        if run["repository"]["id"] != repository_id or run["head_sha"] != state["head"]:
+            raise EvidenceInsufficient("GitHub Actions run 的仓库或 head 不符")
+        head_repo = run.get("head_repository") or {}
+        if ((head_repo.get("id") is not None and head_repo["id"] != repository_id)
+                or (run.get("head_branch") is not None and run["head_branch"] != state["head_ref"])):
+            return False  # SHA 可跨分支共享；已证无关的 run 不要求其查询时 PR 关联仍在。
+        prs = run["pull_requests"]
+        if not prs:
+            raise EvidenceInsufficient("GitHub Actions run 缺服务端 PR 关联")
+        if not any(pr["id"] == state["pr_id"] or pr["number"] == number for pr in prs):
+            return False
+        pr = prs[0]
+        if (len(prs) != 1 or (pr["id"], pr["number"]) != (state["pr_id"], number)
+                or pr["base"]["ref"] != "main" or pr["base"]["sha"] != state["base"]
+                or pr["head"]["sha"] != state["head"] or pr["head"]["ref"] != state["head_ref"]
+                or run["head_branch"] != state["head_ref"] or run["head_repository"]["id"] != repository_id
+                or any(pr[end]["repo"]["id"] != repository_id for end in ("base", "head"))):
+            raise EvidenceInsufficient("GitHub Actions run 的 PR、目标或 head 不唯一或不符")
+        if _github_second(run["created_at"]) < _github_second(state["created_at"]):
+            raise EvidenceInsufficient("GitHub Actions run 早于当前 PR")
+        return True
+
+    def _actions_check(self, number: int, state: dict[str, Any], name: str) -> str:
+        prefix = f"repos/{self.repository}"
+        workflow = WORKFLOWS[name]
+        runs = self._inventory(
+            f"{prefix}/actions/workflows/{workflow.rsplit('/', 1)[-1]}/runs"
+            f"?event=pull_request&head_sha={state['head']}&per_page=100", "workflow_runs", capped=True)
+        applicable = [run for run in runs if self._run_target(number, state, workflow, run)]
+        if not applicable or any(run["status"] != "completed" for run in applicable):
+            return "pending"
+        # 重跑不生成新 run；较大的 Check Run ID 不能把较早创建的 run 变成最新 run。
+        latest = max(applicable, key=lambda run: (_github_second(run["created_at"]), run["id"]))
+        run_id = latest["id"]
+        run = json.loads(self._gh("api", f"{prefix}/actions/runs/{run_id}"))
+        if (not self._run_target(number, state, workflow, run)
+                or any(run[k] != latest[k] for k in ("id", "workflow_id", "check_suite_id", "created_at"))):
+            raise EvidenceInsufficient("GitHub Actions run 原件与库存不符")
+        attempt = run["run_attempt"]
+        if type(attempt) is not int or attempt <= 0:
+            raise EvidenceInsufficient("GitHub Actions run 缺有效 attempt")
+        if run["status"] != "completed" or attempt != latest["run_attempt"]:
+            return "pending"
+        if run["conclusion"] != "success" or latest["conclusion"] != "success":
+            return "failure"
+        jobs = self._inventory(f"{prefix}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100", "jobs")
+        matches = [job for job in jobs if job["name"] == name]
+        if len(matches) != 1:
+            raise EvidenceInsufficient(f"{name} 缺唯一的适用作业")
+        job = matches[0]
+        link = re.fullmatch(rf"https://api\.github\.com/{re.escape(prefix)}/check-runs/([1-9][0-9]*)",
+                            job.get("check_run_url") or "", re.IGNORECASE)
+        if (link is None or job["run_id"] != run_id or job["run_attempt"] != attempt
+                or job["head_sha"] != state["head"]):
+            raise EvidenceInsufficient("GitHub Actions job 与选定 run、attempt 或 head 不符")
+        check_id = int(link[1])
+        check = json.loads(self._gh("api", f"{prefix}/check-runs/{check_id}"))
+        if (check["id"] != check_id or check["name"] != name or check["head_sha"] != state["head"]
+                or check["check_suite"]["id"] != run["check_suite_id"]
+                or (check.get("app") or {}).get("id") != ACTIONS_APP_ID):
+            raise EvidenceInsufficient("GitHub Actions job 与绑定 App 的 Check Run 不符")
+        if job["status"] != "completed" or check["status"] != "completed":
+            return "pending"
+        if job["conclusion"] != "success" or check["conclusion"] != "success":
+            return "failure"
+        return "success"
+
+    def checks(self, number: int, state: dict[str, Any], bindings: dict[str, int | None],
+               review_runs: list[dict]) -> dict[str, str]:
+        """只读诊断。Actions 的查询时关联不证明触发身份，结果不能用于签发或合入。"""
+        result: dict[str, str] = {}
+        if bindings.get("deepagents/review") == REVIEW_APP_ID:
+            review = self.review_status(number, state, review_runs, REVIEW_PUBLISHER)
+            if review is not None:
+                result["deepagents/review"] = review
+        if result.get("deepagents/review") == "superseded" or state.get("mergeable_state") == "behind":
+            return result  # 覆盖先交对账；旧 base 不查 Actions。
+        actions = [name for name in WORKFLOWS if bindings.get(name) == ACTIONS_APP_ID]
+        if actions:
+            self._target_history(number, state)
+        for name in actions:
+            result[name] = self._actions_check(number, state, name)
         return result
 
-    def required_checks(self) -> dict[str, int]:
-        """main 上可信的必需检查及其绑定的来源 app_id。strict（要求 PR 先与 base 追平）或 enforce_admins 关着就
-        一个都不算：前者会拿旧 base 上的结论合入，后者让管理员身份（宿主 gh 可能就是）绕过保护。没绑定来源 app
-        的检查，任何有 statuses:write 的人都能发一条同名 success，也不算。"""
+    def required_checks(self) -> dict[str, int | None]:
+        """strict 与 enforce_admins 同开时读取必检；未绑 App 的已配置检查保留键，值为 None。"""
         rules = json.loads(self._gh("api", f"repos/{self.repository}/branches/main/protection"))
         checks = rules.get("required_status_checks") or {}
         if checks.get("strict") is not True or (rules.get("enforce_admins") or {}).get("enabled") is not True:
             return {}
-        return {c["context"]: c["app_id"] for c in checks.get("checks", [])
-                if type(c.get("app_id")) is int and c["app_id"] > 0}  # bool 是 int 的子类，排除
+        bindings: dict[str, int | None] = {}
+        for check in checks.get("checks", []):
+            name, app = check["context"], check.get("app_id")
+            bound = app if type(app) is int and app > 0 else None
+            bindings[name] = bound if bindings.get(name, bound) == bound else None
+        for context in checks.get("contexts", []):
+            bindings.setdefault(context, None)
+        return bindings
 
     def allow_auto_merge(self) -> bool:
         """仓库设置：是否允许挂 GitHub 原生 auto-merge。只认明确的 false；字段缺失或不是布尔值都按开着算。"""
@@ -272,16 +417,6 @@ class GhCli:
     def pr_files(self, number: int) -> list[dict[str, Any]]:
         return self._json_lines("api", "--paginate", f"repos/{self.repository}/pulls/{number}/files?per_page=100",
                                 "--jq", ".[] | {filename, previous_filename, status, changes} | @json")
-
-    def merge(self, number: int, head: str) -> None:
-        # REST 文档：sha 是「PR head 必须与之匹配才允许合入」，不符返回 409。
-        self._gh("api", "-X", "PUT", f"repos/{self.repository}/pulls/{number}/merge",
-                 "-f", f"sha={head}", "-f", "merge_method=merge")
-
-    def update_branch(self, number: int, head: str) -> None:
-        # REST 文档：expected_head_sha 与 PR head 不符返回 422。
-        self._gh("api", "-X", "PUT", f"repos/{self.repository}/pulls/{number}/update-branch",
-                 "-f", f"expected_head_sha={head}")
 
     def disable_auto_merge(self, number: int) -> None:
         self._gh("pr", "merge", str(number), "-R", self.repository, "--disable-auto")
@@ -311,9 +446,9 @@ class Sweep:
                  state_root: Path = STATE_ROOT, max_running: int = 2, rows: Callable[[], Rows] = _ps_rows,
                  sync: Sync | None = None, auto_merge: bool = False, max_age: timedelta = timedelta(hours=24),
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                 review_app: Callable[[], int | None] = configured_review_app):
+                 publisher: Callable[[], tuple[int, str] | None] = configured_publisher):
         self.github, self.lane, self.spawn, self.rows, self.sync = github, lane, spawn, rows, sync
-        self.review_app = review_app
+        self.publisher = publisher
         self.folder = state_root / "sweep"
         self._sync_failed = False
         self._backoff: dict[str, Any] | None = None
@@ -332,29 +467,31 @@ class Sweep:
             return "stale-pr"
         return None
 
-    def launch_order(self, pulls: list[dict[str, Any]], busy: set[int]) -> list[dict[str, Any]]:
+    def launch_order(self, pulls: list[dict[str, Any]], busy: set[int], read_failed: set[int]) -> list[dict[str, Any]]:
         """审查派发的先后（并发上限内谁先拿到名额）。只改先后，不改每个 PR 派不派、怎么审。
         1. 当前 head 能沿用同 patch_id/policy/contract 的已发布 PASS 的（ExternalReview.would_reuse，约 1 分钟、不调模型）；
         2. 其余按 head 提交的 committer 时间从新到旧；
         3. head 提交早于 STALE_PUSH（48 小时）或时间读不到的排最后，组内同样从新到旧。
         同组同时间按 PR 号升序。不进活动窗的 PR 本轮跳过，不读接口，排在末尾；已在审的 PR 不探沿用。
-        排在后面的不会被饿死：前面的 PR 已完成、在等追平、在退避或要操作员处理时都不占名额，名额空着就轮到它。"""
+        排在后面的不会被饿死：前面的 PR 已完成、在退避或要操作员处理时都不占名额，名额空着就轮到它。"""
         def key(pr: dict[str, Any]) -> tuple[int, float, int]:
             number = pr["number"]
-            if self._eligible(pr):
-                return 3, 0.0, number
             try:
+                if self._eligible(pr):
+                    return 3, 0.0, number
                 pushed = datetime.fromisoformat(self.github.committed_at(pr["head"]["sha"]).replace("Z", "+00:00"))
-            except SourceUnreadable:  # gh 超时：与其他读接口一样整轮作废
+                if number not in busy and self.lane.would_reuse({
+                        "repository_id": pr["base"]["repo"]["id"], "pr_number": number,
+                        "base_repository_id": pr["base"]["repo"]["id"], "base_ref": pr["base"]["ref"],
+                        "base_sha": pr["base"]["sha"], "head_repository_id": pr["head"]["repo"]["id"],
+                        "head_ref": pr["head"]["ref"], "head_sha": pr["head"]["sha"]}):
+                    return 0, -pushed.timestamp(), number
+            except SourceUnreadable as error:
+                error.pr_number = number
                 raise
-            except Exception:  # 时间读不到只影响先后：按最旧一组排，照样会轮到
+            except Exception:  # 排序证据失败不决定派不派，但原生 auto-merge 按未知处理。
+                read_failed.add(number)
                 return 2, 0.0, number
-            if number not in busy and self.lane.would_reuse({
-                    "repository_id": pr["base"]["repo"]["id"], "pr_number": number,
-                    "base_repository_id": pr["base"]["repo"]["id"], "base_ref": pr["base"]["ref"],
-                    "base_sha": pr["base"]["sha"], "head_repository_id": pr["head"]["repo"]["id"],
-                    "head_ref": pr["head"]["ref"], "head_sha": pr["head"]["sha"]}):
-                return 0, -pushed.timestamp(), number
             return (2 if pushed < self.now() - STALE_PUSH else 1), -pushed.timestamp(), number
         return sorted(pulls, key=key)
 
@@ -416,7 +553,7 @@ class Sweep:
         marker.write_text(str(time.time()))
         return f"resume-{action}", {"pid": self._launch(number, head, attempt), "attempt": attempt}
 
-    def decide(self, pr: dict[str, Any], busy: set[int], running: int, behind: bool) -> tuple[str, dict | None]:
+    def decide(self, pr: dict[str, Any], busy: set[int], running: int) -> tuple[str, dict | None]:
         number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
         if number in busy:
             return "running", None
@@ -431,8 +568,6 @@ class Sweep:
             if row["target"].get("base_sha") != base:
                 return "needs-reconcile", None
             return self._resume_once(number, head, row["target"]["attempt"], "publish")
-        if behind:  # 先追平再审：不审一个合入前必然被替换的 head
-            return "behind-awaiting-update", None
         if self._backoff is not None:  # 限流退避：不派新审查（含续跑审查），本轮汇总一行日志
             return "review-backoff", None
         if not self._has_commits(base, head):
@@ -466,87 +601,182 @@ class Sweep:
         return "launch", {"pid": self._launch(number, head, attempt), "attempt": attempt}
 
     def tick(self) -> list[dict[str, Any]]:
-        try:
-            rows = self.rows()
-        except Exception as error:  # 不知道谁在审就不能派审：整轮作废
-            raise SourceUnreadable("host process table", error) from error
-        busy = reviewing(rows)  # 单 PR 去重：已在审的 PR 不再派
-        running = reviewer_processes(rows)  # 并发上限：按进程数，不按 PR 数
-        # 追平只看本地真实在途（活进程或本轮刚派出），不信 GitHub 上的 pending：审查进行中 main 前进时终态判 Stale，
-        # GitHub 上该 head 会一直停在 pending；若以它为准，decide 等追平、合入等审查，两边互等。中断后残留的
-        # 无结论 run 审的是旧 base，追平后自然作废，也不挡追平。
-        reviewing_now = set(busy)
-        try:
-            pulls = sorted(self.open_pulls(), key=lambda pr: pr["number"])
-        except Exception as error:
-            raise SourceUnreadable("github open pulls", error) from error
-        self._sync_failed = False
-        self._backoff = self.rate_limit_backoff()
         actions: list[dict[str, Any]] = []
-        states: dict[int, dict[str, Any]] = {}
-        unreadable: set[int] = set()
-        review_actions: dict[int, str] = {}
-        clean: set[int] = set()       # 本轮已确认不触及两类的 PR
-        withdrawn: set[int] = set()   # 本轮已撤掉原生 auto-merge 的 PR
+        if self.auto_merge:
+            actions.append({"action": "auto-merge-disabled-pre-cutover",
+                            "reason": "切换前停用自动合入与追平；#2131 R09 冻结、排空、发布互斥及触发时 PR 归属上线后，合入只走统一入口"})
         try:
-            for pr in self.launch_order(pulls, busy):  # 审查按 launch_order；合入、追平、兜底撤销仍按 PR 号
-                entry: dict[str, Any] = {"pr": pr["number"], "head": pr["head"]["sha"]}
+            all_pulls = sorted(self.open_pulls(), key=lambda pr: pr["number"])
+        except Exception as error:
+            failure = SourceUnreadable("github open pulls", error)
+            failure.actions = actions
+            raise failure from error
+        remaining = {pr["number"]: pr for pr in all_pulls}
+        self._sync_failed = False
+        timeout_in_withdrawal = False
+        affected: int | None = None
+        withdrawals: dict[int, dict[str, Any]] = {}
+        inspected: list[InspectedPull] = []
+
+        def withdrawal_reports() -> list[dict[str, Any]]:
+            return [{"pr": pr["number"], "head": pr["head"]["sha"], "action": "native-auto-merge-withdrawal",
+                     **withdrawals[pr["number"]]} for pr in all_pulls if pr["number"] in withdrawals]
+
+        def withdraw(entry: dict[str, Any], report: dict[str, Any], armed: bool) -> dict[str, Any]:
+            nonlocal timeout_in_withdrawal
+            try:
+                return self._withdraw(entry["pr"], armed)
+            except SourceUnreadable as error:
+                timeout_in_withdrawal = True
+                actions.append({**entry, **report, "auto_merge_withdrawn": False, "withdraw_error": str(error)})
+                raise
+
+        try:
+            native = self._native_enabled(actions)
+            # 先处理全仓挂载（包括 draft、外仓及非 main PR）；缺字段不等于未挂载。
+            for pr in sorted(all_pulls, key=lambda pr: "auto_merge" not in pr):
+                if pr.get("auto_merge", True) is not None:
+                    number = pr["number"]
+                    entry = {"pr": number, "head": pr["head"]["sha"]}
+                    withdrawals[number] = withdraw(entry, {"action": "native-auto-merge-withdrawal"}, True)
+
+            if native:
+                return actions + withdrawal_reports()
+            pulls = [pr for pr in all_pulls if pr["base"]["ref"] == "main"]
+            remaining = {pr["number"]: pr for pr in pulls}
+            try:
+                rows = self.rows()
+            except Exception as error:
+                raise SourceUnreadable("host process table", error) from error
+            busy, running = reviewing(rows), reviewer_processes(rows)
+            self._backoff = self.rate_limit_backoff()
+            held: list[int] = []
+            publisher = self.publisher()
+            bindings, protection_unreadable = self._diagnostic_bindings(
+                actions, publisher) if self.auto_merge else ({}, False)
+            read_failed: set[int] = set()
+            for pr in self.launch_order(pulls, busy, read_failed):
+                number, head = pr["number"], pr["head"]["sha"]
+                entry = {"pr": number, "head": head}
+                affected = number
+                mounted = number in withdrawals
+                armed = protection_unreadable or number in read_failed
                 try:
                     skip = self._eligible(pr)
-                    if skip:  # 闲置超过活动窗的 PR 整个跳过：不读接口、不追平（不在闲置分支上压合并提交、触发整套 CI）
-                        actions.append({**entry, "action": skip})
-                        continue
-                    behind = False
-                    if self.auto_merge:
-                        try:
-                            states[pr["number"]] = self.github.pr(pr["number"])
-                        except SourceUnreadable:
-                            raise
-                        except Exception:  # 状态读不到：不派审，合入阶段按失败关闭处理（撤原生 auto-merge）
-                            unreadable.add(pr["number"])
-                            raise
-                        behind = states[pr["number"]]["mergeable_state"] == "behind"
-                    action, record = self.decide(pr, busy, running, behind)
-                    started = action in ("launch", "resume-review", "resume-publish")
-                    running += started
-                    if started:
-                        reviewing_now.add(pr["number"])
-                    actions.append({**entry, "action": action, **(record or {})})
-                except SourceUnreadable:  # gh 超时：整轮作废
+                    if skip:
+                        report: dict[str, Any] = {"action": skip}
+                    else:
+                        state = self.github.pr(number)
+                        mounted = mounted or state.get("auto_merge") is not False
+                        report = self._inspect(pr, state, bindings, publisher)
+                        mounted = report.pop("mounted", False) or mounted
+                        armed = report.pop("armed") or armed
+                except SourceUnreadable:
                     raise
-                except Exception as error:  # 单个 PR 隔离：记下，继续处理其他 PR
-                    action = "error"
-                    actions.append({**entry, "action": action, "reason": f"{type(error).__name__}: {error}"})
-                review_actions[pr["number"]] = action
-            if self._backoff is not None:
-                actions.append({**self._backoff,
-                                "held": [n for n, a in review_actions.items() if a == "review-backoff"]})
-            if self.auto_merge:
-                self.merge_actions(pulls, states, reviewing_now, review_actions, unreadable,
-                                   out=actions, clean=clean, withdrawn=withdrawn)
+                except Exception as error:
+                    armed = True
+                    kind = "evidence-insufficient" if isinstance(error, EvidenceInsufficient) else "error"
+                    report = {"action": kind, "reason": str(error)}
+                can_review = report.pop("can_review", report["action"] in (
+                    "check-report", "review-inspected", "needs-human-confirm"))
+                armed = mounted or armed
+                if number in withdrawals:
+                    withdrawal = withdrawals.pop(number)
+                else:
+                    withdrawal = withdraw(entry, report, armed)
+                inspected.append(InspectedPull(pr, entry, report, can_review and not mounted, armed, withdrawal))
+                remaining.pop(number)
         except SourceUnreadable as error:
-            # 超时（或整轮输入源读不到）：本轮不再合入、不再追平；凡不能确认不触及两类的 PR 都撤原生 auto-merge，
-            # 否则它会在检查转绿后由 GitHub 自己合入、绕过 HUMAN_GATED。已做的动作随异常带出，照常写日志。
-            if self.auto_merge:
-                actions += self.fail_closed(pulls, states, clean, withdrawn)
+            actions.extend({**entry, **report, **withdrawal} for _, entry, report, _, _, withdrawal in inspected
+                           if report["action"] != "review-inspected" or withdrawal)
+            actions.extend(withdrawal_reports())
+            actions.extend(error.actions)
+            if not timeout_in_withdrawal:
+                # 初读未挂载不排除超时后的挂载；本轮已成功撤除的无需重复调用。
+                self._fail_closed({n: pr for n, pr in remaining.items()
+                                   if not withdrawals.get(n, {}).get("auto_merge_withdrawn")},
+                                  actions, error.pr_number or affected)
             error.actions = actions
             raise
+        actions.extend(withdrawal_reports())  # 非 main PR 只撤销，不进入诊断或派审。
+        # 完成所有 PR 的检查及撤销后才派审／续发；撤过挂载的 PR 要等下一轮确认。
+        for pr, entry, report, can_review, armed, withdrawal in inspected:
+            number = entry["pr"]
+            try:
+                if can_review and withdrawal.get("auto_merge_withdrawn") is not False:
+                    try:
+                        action, details = self.decide(pr, busy, running)
+                    except SourceUnreadable:
+                        raise
+                    except Exception as error:
+                        action, details = "error", {"reason": f"{type(error).__name__}: {error}"}
+                    if action == "review-backoff":
+                        held.append(number)
+                    running += action in ("launch", "resume-review", "resume-publish")
+                    actions.append({**entry, "action": action, **(details or {})})
+                    if action in ("error", "source-unreadable") and not armed:
+                        withdrawal = withdraw(entry, report, True)
+                if report["action"] != "review-inspected" or withdrawal:
+                    actions.append({**entry, **report, **withdrawal})
+            except SourceUnreadable as error:
+                if not timeout_in_withdrawal:
+                    self._fail_closed({number: pr}, actions, number)
+                error.actions = actions
+                raise
+        if self._backoff is not None:
+            actions.append({**self._backoff, "held": held})
         return actions
 
-    def _review_binding_unsafe(self, bound: int) -> str | None:
-        """必需检查 deepagents/review 须绑定审查专用 App（IDENTITY_CONFIG 配的那个），且它不是执行器 App。
-        绑定执行器 App 时，执行器交付时自写的 success 就能满足必需检查：draft 一标 ready，sweep 可能在同一轮
-        刚派出正式审查、还没发 pending 时就合入。"""
+    def _native_enabled(self, actions: list[dict[str, Any]]) -> bool:
         try:
-            reviewer = self.review_app()
-        except Exception:  # 读不了审查身份：不知道绑定对不对，按不安全处理
-            reviewer = None
+            native = self.github.allow_auto_merge() is not False
+            reason = "仓库允许原生 auto-merge 或设置未知"
+        except SourceUnreadable as error:
+            actions.append({"action": "native-auto-merge-enabled", "reason": str(error)})
+            raise
+        except Exception as error:
+            native, reason = True, f"读取仓库设置 allow_auto_merge 失败：{type(error).__name__}: {error}"
+        if native:
+            actions.append({"action": "native-auto-merge-enabled", "reason": reason})
+        return native
+
+    def _diagnostic_bindings(self, actions: list[dict[str, Any]],
+                             publisher: tuple[int, str] | None) -> tuple[dict[str, int | None], bool]:
+        try:
+            bindings, unsafe = self._merge_bindings(publisher)
+        except SourceUnreadable:
+            raise
+        except Exception as error:
+            actions.append({"action": "evidence-insufficient", "reason": f"读取 main 必需检查失败：{error}"})
+            return {}, True
+        if unsafe:
+            actions.append({"action": "merge-protection-mismatch", "reason": unsafe})
+        return bindings, False
+
+    def _review_binding_unsafe(self, bound: int | None, publisher: tuple[int, str] | None) -> str | None:
+        """必需检查 deepagents/review 须绑定审查专用 App（IDENTITY_CONFIG 配的那个），且它不是执行器 App。
+        绑定执行器 App 时，其交付自写的 success 就能冒充正式双审。"""
+        reviewer = publisher[0] if publisher else None
         if bound == EXECUTOR_APP_ID:
             return f"必需检查 deepagents/review 绑定执行器 App {bound}：执行器交付时自写的 success 会被当成正式审查，不合入"
-        if reviewer is None or bound != reviewer:
+        if reviewer == EXECUTOR_APP_ID:
+            return f"正式审查使用执行器 App {reviewer} 回退身份，只可对账；合入门要求专用审查 App {REVIEW_APP_ID}"
+        if bound != REVIEW_APP_ID or bound != reviewer:
             return (f"必需检查 deepagents/review 绑定 App {bound}，与审查身份文件配的审查 App {reviewer} 不符"
                     "（或身份文件缺失、读不了），不合入")
         return None
+
+    def _merge_bindings(self, publisher: tuple[int, str] | None) -> tuple[dict[str, int | None], str | None]:
+        required = self.github.required_checks()
+        missing = GATE - required.keys()
+        unsafe = self._review_binding_unsafe(required.get("deepagents/review"), publisher)
+        if unsafe:
+            required.pop("deepagents/review", None)
+        if missing:
+            return required, f"main 须 strict、enforce_admins 且必检齐全；缺 {sorted(missing)}"
+        if unsafe is None and any(required[name] != ACTIONS_APP_ID for name in WORKFLOWS):
+            unsafe = "ci-ok 与 DevSkim 均须绑定 GitHub Actions App 15368"
+        return required, unsafe
 
     def complete_files(self, number: int, state: dict[str, Any]) -> list[str]:
         """该 head 的完整改动路径（含改名前路径）；读不全时用本地精确 diff，仍不行就证据不足。"""
@@ -567,58 +797,76 @@ class Sweep:
                                        "本地也缺对象") from None
         return sorted(p for p in raw.decode().split("\0") if p)
 
-    def _plan_one(self, pr: dict[str, Any], state: dict[str, Any], gate_ok: bool, head_free: bool,
-                  reviewing_now: bool = False, review_action: str | None = None,
-                  bindings: dict[str, int] | None = None) -> tuple[dict[str, Any], bool, str | None]:
-        """只读、不写：返回（动作，是否占队首，要做的写：merge / update / disable / None）。
-        只有 head_free（前面没有 PR 占队首）且本 PR 仍可能合入时才可能追平。"""
-        number, head = pr["number"], pr["head"]["sha"]
-        if state["head"] != head:  # 列表上的 head 与实时状态不符：新 head 没分类过，挂着的原生 auto-merge 撤掉
-            return ({"action": "head-moved", "listed": head, "now": state["head"]}, False,
-                    "disable" if state["auto_merge"] else None)
-        files = self.complete_files(number, state)  # 证据不足抛出，由 merge_actions 失败关闭
-        # 文件清单接口不按 SHA 取：读完后再读一次 PR，head 仍是读之前那个才算这份清单属于它（分类绑定到这个 SHA）。
+    def _inspect(self, pr: dict[str, Any], state: dict[str, Any],
+                 bindings: dict[str, int | None], publisher: tuple[int, str] | None) -> dict[str, Any]:
+        """核当前身份、人工确认类别与正式发布。诊断不产生合入或追平计划。"""
+        number, head, base = pr["number"], pr["head"]["sha"], pr["base"]["sha"]
+        if state["head"] != head:
+            return {"action": "head-moved", "now": state["head"], "armed": True}
+        if state["base"] != base:
+            return {"action": "base-moved", "armed": True}
+        mounted = state.get("auto_merge") is not False
+        runs = self.lane.status(number)
+        # 对账按实际发布者，独立于保护绑定和文件分类。
+        published = any(row["target"].get("head_sha") == head and (row["outcome"] or {}).get("publication")
+                        and row["outcome"].get("verdict") != "STALE" for row in runs)
+        if published and publisher is None:
+            raise EvidenceInsufficient("无法识别正式审查的发布身份")
+        try:
+            review = self.github.review_status(number, state, runs, publisher) if published and publisher else None
+        except SourceUnreadable:
+            raise
+        except Exception as error:
+            raise EvidenceInsufficient(f"读取 {head[:12]} 的正式发布失败：{error}") from error
+        reconcile = {"action": "needs-reconcile", "review": "superseded", "queue_head": False, "armed": True,
+                     "reason": "正式状态已被取代，须核对后为当前 PR/base/head 重新审查"}
+        try:
+            files = self.complete_files(number, state)
+        except SourceUnreadable as error:
+            if review == "superseded":
+                error.actions.append({"pr": number, "head": head, **reconcile, "file_evidence_error": str(error)})
+            raise
+        except Exception as error:
+            if review == "superseded":
+                return {**reconcile, "file_evidence_error": str(error)}
+            return {"action": "evidence-insufficient", "reason": str(error), "armed": True,
+                    "can_review": isinstance(error, EvidenceInsufficient)}
         try:
             again = self.github.pr(number)
         except SourceUnreadable:
             raise
         except Exception as error:
-            raise EvidenceInsufficient(f"复核 head 失败：{type(error).__name__}: {error}") from None
+            raise EvidenceInsufficient(f"复核 head 失败：{error}") from error
         if again["head"] != head:
-            return ({"action": "head-moved", "classified": head, "now": again["head"]}, False,
-                    "disable" if state["auto_merge"] or again["auto_merge"] else None)
+            return {"action": "head-moved", "classified": head, "now": again["head"], "armed": True}
+        if again["base"] != base:
+            return {"action": "base-moved", "armed": True}
+        if again["changed_files"] != state["changed_files"]:
+            raise EvidenceInsufficient("复核时改动文件数变化")
+        mounted = mounted or again.get("auto_merge") is not False
         gated = human_gated(files)
+        if review == "superseded":
+            return reconcile
         if gated:
-            return ({"action": "needs-human-confirm", "gated": gated}, False,
-                    "disable" if state["auto_merge"] or again["auto_merge"] else None)
-        try:
-            checks = self.github.checks(head, bindings or {})
-        except SourceUnreadable:
-            raise
-        except Exception as error:
-            raise EvidenceInsufficient(f"读取 {head[:12]} 的检查失败：{type(error).__name__}: {error}") from None
-        review = checks.get("deepagents/review")
-        behind = state["mergeable_state"] == "behind"
-        all_green = all(checks.get(name) == "success" for name in MERGE_CHECKS)
-        # 本 head 已发布失败结论（BLOCK/error）时追平只会换来注定被拦的重审；落后时其余检查失败可能是旧 base 造成的，
-        # 追平给一次新 CI；不落后时检查失败要作者处理；不落后、三项全绿却不可合入（blocked/unknown 等）的也不占队首。
-        candidate = (review != "failure" and state["mergeable_state"] != "dirty" and review_action not in STUCK_REVIEW
-                     and (behind or not any(checks.get(name) == "failure" for name in MERGE_CHECKS))
-                     and (behind or not all_green or state["mergeable_state"] in ("clean", "unstable")))
-        is_head = candidate and head_free
-        if behind:
-            if is_head and not reviewing_now:  # 本地有在途审查时不追平
-                return {"action": "update-branch"}, True, "update"
-            return {"action": "behind-waiting", "review": review, "reviewing": reviewing_now,
-                    "queue_head": is_head}, candidate, None
-        if gate_ok and state["mergeable_state"] in ("clean", "unstable") and all_green:
-            return {"action": "merged"}, candidate, "merge"
-        return {"action": "waiting", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
-                "mergeable_state": state["mergeable_state"], "queue_head": is_head,
-                **({} if gate_ok else {"gate": "ci-ok 未设为必需检查"})}, candidate, None
+            return {"action": "needs-human-confirm", "gated": gated, "armed": True, "mounted": mounted}
+        if self.auto_merge:
+            try:
+                # 已对账的结果只有来自专用 App 且保护绑定正确时才可出现在三门诊断。
+                diagnostic = {k: v for k, v in bindings.items() if k != "deepagents/review" or not published}
+                checks = self.github.checks(number, again, diagnostic, runs)
+                if published and review is not None and "deepagents/review" in bindings:
+                    checks["deepagents/review"] = review
+            except SourceUnreadable:
+                raise
+            except Exception as error:
+                return {"action": "evidence-insufficient", "reason": f"读取 {head[:12]} 的检查失败：{error}",
+                        "armed": True, "can_review": True, "mounted": mounted}
+            return {"action": "check-report", "checks": {name: checks.get(name) for name in MERGE_CHECKS},
+                    "mergeable_state": again["mergeable_state"], "scope": "diagnostic-only",
+                    "armed": mounted, "mounted": mounted}
+        return {"action": "review-inspected", "armed": mounted, "mounted": mounted}
 
     def _withdraw(self, number: int, armed: bool) -> dict[str, Any]:
-        """失败关闭：撤掉原生 auto-merge。armed 为真（挂着或不知道挂没挂）才撤；撤失败如实记下，不影响其他 PR。"""
         if not armed:
             return {}
         try:
@@ -629,19 +877,11 @@ class Sweep:
             return {"auto_merge_withdrawn": False, "withdraw_error": f"{type(error).__name__}: {error}"}
         return {"auto_merge_withdrawn": True}
 
-    def fail_closed(self, pulls: list[dict[str, Any]], states: dict[int, dict[str, Any]], clean: set[int],
-                    withdrawn: set[int]) -> list[dict[str, Any]]:
-        """本轮中途超时后的兜底：对每个仍在活动窗内、本轮没能确认不触及两类、且挂着（或不知道挂没挂）原生
-        auto-merge 的 PR 尽力撤掉，每个一行日志。撤销本身也超时就停下（GitHub 不通，后面的照样会超时），下轮重试。"""
-        actions: list[dict[str, Any]] = []
-        for pr in pulls:
-            number = pr["number"]
-            if number in clean or number in withdrawn or self._eligible(pr):
-                continue
-            state = states.get(number)
-            armed = bool(state["auto_merge"]) if state else pr.get("auto_merge", True) is not None
-            if not armed:
-                continue
+    def _fail_closed(self, remaining: dict[int, dict[str, Any]], actions: list[dict[str, Any]],
+                     affected: int | None) -> None:
+        for number in sorted(remaining, key=lambda n: (
+                n != affected, remaining[n].get("auto_merge", True) is None, "auto_merge" not in remaining[n], n)):
+            pr = remaining[number]
             entry = {"pr": number, "head": pr["head"]["sha"], "action": "fail-closed-withdraw"}
             try:
                 actions.append({**entry, **self._withdraw(number, True)})
@@ -649,112 +889,12 @@ class Sweep:
                 actions.append({**entry, "auto_merge_withdrawn": False, "withdraw_error": str(error)})
                 actions.append({"action": "fail-closed-aborted", "reason": "撤销也超时，余下的下轮再撤"})
                 break
-        return actions
-
-    def merge_actions(self, pulls: list[dict[str, Any]], states: dict[int, dict[str, Any]],
-                      reviewing_now: set[int] | frozenset[int] = frozenset(),
-                      review_actions: dict[int, str] | None = None,
-                      unreadable: set[int] | frozenset[int] = frozenset(), *,
-                      out: list[dict[str, Any]] | None = None, clean: set[int] | None = None,
-                      withdrawn: set[int] | None = None) -> list[dict[str, Any]]:
-        """两段：先把每个 PR 的证据读完并定好动作（只读），全部读完才按序执行写（合入、追平、撤 auto-merge）。
-        读阶段任何超时都在写之前抛出，本轮一个 PR 也不合入、不追平。动作逐条追加到 out，超时时已做的也不丢。"""
-        actions = [] if out is None else out
-        clean = set() if clean is None else clean
-        withdrawn = set() if withdrawn is None else withdrawn
-        review_actions = review_actions or {}
-        evidence_ok = True
-        required: dict[str, int] = {}
-        try:
-            required = self.github.required_checks()
-            gate_ok = GATE <= set(required)
-        except SourceUnreadable:
-            raise
-        except Exception as error:  # 不合入、不追平，但照常逐个 PR 判人工确认类并撤原生 auto-merge
-            gate_ok = evidence_ok = False
-            actions.append({"action": "evidence-insufficient", "reason": f"读取 main 必需检查失败：{error}"})
-        # 合入看的每项检查都绑定来源 App：必需检查用分支保护的绑定，其余用 GATED_APP_IDS
-        bindings: dict[str, int] = {}
-        for name in MERGE_CHECKS:
-            app = required.get(name, GATED_APP_IDS.get(name))
-            if app is not None:
-                bindings[name] = app
-        try:
-            native = self.github.allow_auto_merge()
-        except SourceUnreadable:
-            raise
-        except Exception as error:
-            native, why = True, f"读取仓库设置 allow_auto_merge 失败：{type(error).__name__}: {error}"
-        else:
-            why = "仓库设置 allow_auto_merge=true：原生 auto-merge 可在两轮之间被挂上，绕过人工确认两类"
-        if native:  # 本轮不合入、不追平；撤原生 auto-merge 照常做
-            gate_ok = evidence_ok = False
-            actions.append({"action": "native-auto-merge-enabled", "reason": why})
-        if evidence_ok and not gate_ok:
-            actions.append({"action": "auto-merge-unsafe",
-                            "reason": f"main 须 strict、enforce_admins 且必需检查含绑定来源 app 的 {sorted(GATE)}，不合入"})
-        elif gate_ok:
-            unsafe = self._review_binding_unsafe(required["deepagents/review"])
-            if unsafe:  # 执行器自写的 success 会满足必需检查，正式审查可能还没跑完就合入：本轮不合入
-                gate_ok = False
-                actions.append({"action": "auto-merge-unsafe", "reason": unsafe})
-        plan: list[tuple[dict[str, Any], dict[str, Any], str | None, bool]] = []
-        head_free = True
-        for pr in pulls:  # 与 tick 同序（PR 号升序）：队首是第一个仍可能合入的 PR
-            number = pr["number"]
-            entry = {"pr": number, "head": pr["head"]["sha"]}
-            if number in unreadable:  # 状态读不到，不知道挂没挂原生 auto-merge：照撤
-                plan.append((entry, {"action": "evidence-insufficient", "reason": "读取 PR 状态失败"}, "disable", True))
-                continue
-            if number not in states:
-                continue
-            armed = states[number].get("auto_merge") is not False
-            claimed = False
-            write: str | None
-            try:
-                result, claimed, write = self._plan_one(pr, states[number], gate_ok, head_free and evidence_ok,
-                                                        number in reviewing_now, review_actions.get(number), bindings)
-                if result["action"] not in ("head-moved", "needs-human-confirm"):
-                    clean.add(number)
-            except SourceUnreadable:
-                raise
-            except Exception as error:  # 单个 PR 隔离；不明即不合入，并撤原生 auto-merge（失败关闭）
-                kind = "evidence-insufficient" if isinstance(error, EvidenceInsufficient) else "error"
-                reason = str(error) if kind == "evidence-insufficient" else f"{type(error).__name__}: {error}"
-                result, write = {"action": kind, "reason": reason}, ("disable" if armed else None)
-            head_free = head_free and not claimed
-            plan.append((entry, result, write, armed))
-        for entry, result, write, armed in plan:
-            number, head = entry["pr"], entry["head"]
-            try:
-                if write == "merge":
-                    self.github.merge(number, head)
-                elif write == "update":
-                    self.github.update_branch(number, head)
-                elif write == "disable":
-                    result = {**result, **self._withdraw(number, True)}
-                    if result.get("auto_merge_withdrawn"):
-                        withdrawn.add(number)
-            except SourceUnreadable as error:  # 写超时：结果不明，本轮余下的写不再做
-                actions.append({**entry, "action": "write-unknown", "write": write, "reason": str(error)})
-                raise
-            except Exception as error:  # 写失败：不明即撤原生 auto-merge
-                result = {"action": "error", "reason": f"{type(error).__name__}: {error}"}
-                if write != "disable":
-                    try:
-                        result.update(self._withdraw(number, armed))
-                    except SourceUnreadable as timeout:  # 撤销也超时：这一行先记下再整轮作废
-                        actions.append({**entry, **result, "auto_merge_withdrawn": False,
-                                        "withdraw_error": str(timeout)})
-                        raise
-            actions.append({**entry, **result})
-        return actions
 
 
 def report(actions: list[dict[str, Any]], prefix: str = "") -> None:
-    """每个动作一行 JSON；没有动作的状态（QUIET）不写。"""
+    """每个动作一行 JSON；无动作的状态不写，但同条的撤销结果必须留存。"""
     for action in actions:
-        if action.get("action") not in QUIET:
+        if action.get("action") not in QUIET or "auto_merge_withdrawn" in action:
             print(prefix + json.dumps(action, ensure_ascii=False), flush=True)
 
 
@@ -849,7 +989,6 @@ def run_review(argv: list[str], github: GitHubPort | None = None) -> int:
     if (github or GhCli()).pr(args.pr)["head"] != args.expect_head:
         print(json.dumps({"pr": args.pr, "action": "head-moved-not-reviewed", "expected": args.expect_head}))
         return 3
-    from . import external_review
     return external_review.main(["review-pr", "--pr", str(args.pr), "--attempt", str(args.attempt),
                                  "--private-key", str(args.private_key)])
 
@@ -864,7 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--loop", type=float, default=0,
                         help=f"0 只跑一轮；循环时间隔至少 {MIN_LOOP_SECONDS:g} 秒（每轮每个 PR 约 4 次读接口，受 GitHub 核心限额约束）")
     parser.add_argument("--auto-merge", action="store_true",
-                        help="默认关。用宿主 gh 凭据追平队首与合入（须 ci-ok 为必需检查；人工确认两类除外）")
+                        help="旧参数，仅开启只读检查与分类诊断；不合入、不追平")
     args = parser.parse_args(argv)
     if not math.isfinite(args.loop) or not (args.loop == 0 or args.loop >= MIN_LOOP_SECONDS):  # 挡住负数、nan、inf
         parser.error(f"--loop 须为 0 或至少 {MIN_LOOP_SECONDS:g} 秒")

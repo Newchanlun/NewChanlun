@@ -16,7 +16,7 @@
  *   3. 实装票全关 + 图关判据满足 → 自动起草图关 comment + close map。
  *
  * 本引擎不裁决策票，也不处理纯决策图；决策票由 decision-claimer 起草并经非作者独审裁定。
- * 本引擎不碰 main：main 的合入不设人工批准，由分支保护的 deepagents/review 与 ci-ok 必需检查把关，满足后代理合入；
+ * 本引擎不碰 main：合入按 .sandcastle/docs/graph-engineering.md「main 的合入」分阶段核验 deepagents/review、ci-ok、DevSkim；
  * spec 与 P 类决策改为起草 + 非作者独审 PASS 由代理裁定（#1909）。
  *
  * #1084 追加（2026-08-19 打回复核）——常驻控制面成为活机制：
@@ -1418,7 +1418,7 @@ function actCloseGraph(a: Extract<Action, { kind: "close_graph" }>, _cfg: Engine
   lines.push(`- **实装票全关**：${impl.map((c) => `[#${c.number}](${issueUrl(c.number)})`).join(" / ") || "（无）"}`);
   lines.push(`- **残雾去向核实**：${fog.length === 0 ? "无残留（Not yet specified 已清空或全部有去向）" : `⚠ 仍有 ${fog.length} 条（不应发生）`}`);
   lines.push("");
-  lines.push("（本评论由 wayfinder_engine 自动起草；本引擎不碰 main，合入由分支保护的 deepagents/review 与 ci-ok 把关。）");
+  lines.push("（本评论由 wayfinder_engine 自动起草；本引擎不碰 main，合入按 [graph-engineering.md「main 的合入」](https://github.com/Newchanlun/NewChanlun/blob/main/.sandcastle/docs/graph-engineering.md#五个面) 分阶段核验 deepagents/review、ci-ok、DevSkim。）");
 
   const comment = lines.join("\n");
   // spec 非持久：实装落地即关。

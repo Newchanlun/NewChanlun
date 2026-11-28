@@ -35,7 +35,7 @@ sandcastle 自动从 `.sandcastle/.env` 与 `process.env` 解析环境变量注�
 
 - **形态**：`gh` CLI 的 OAuth token，`repo` 全 scope（#1005 关票）。
 - **为什么是 repo 全 scope**：sandcastle 官方文档/envExample 只写细粒度 PAT「Issues RW + Metadata R」，但上游 issue #937 证实推分支、开 PR 还需 **Contents RW + Pull requests RW**；申领时按后者放全（#1005 权限修正）。本仓直接取 `gh` OAuth token，免人工申领 PAT，天然覆盖。
-- **能力 vs 纪律的落差（如实标注）**：token 技术上具备本仓全部读写能力（push、合 PR、关票均可为）；「工蜂不关票、不 push、不合 main」是 **prompt 层硬性规则**，不是权限位强制。合入 main 的硬约束是 main 分支保护（必需检查 `deepagents/review` 与 `ci-ok`、strict 追平、管理员同受约束），它挡的是没过检查的合入，不区分是谁合入。信任模型是「凭据够宽让流程跑得动，约束靠流程兜住」。
+- **能力 vs 纪律的落差（如实标注）**：token 有 repo 全 scope；「工蜂不关票、不 push、不合 main」是 **prompt 层硬性规则**，不靠 token scope 强制。GitHub 分支保护及 strict 是底线，不是合入授权。按 [graph-engineering.md](docs/graph-engineering.md)「main 的合入」 分阶段执行：切换前分支保护的两项绿灯不能替代精确 head 的三门核验（`deepagents/review`、`ci-ok`、`DevSkim`）；人工合入须核原始 `success`。#2131 切换后只走 R09 受控入口，分支保护／规则集限制 `main` 写入与合入，并决定哪些 App 的结果可满足必检；普通写入者和管理员不得绕过，但绑定必检 App 不阻止其他主体发布同名 Commit Status。仓库级 `statuses:write`（含等效权限）须按 R09 单独盘点，冻结或禁用全部写入路径，并证明在途状态请求已在服务端终结。
 - **附带注入**：蜂群场景另注入 `GH_REPO=xy7365527-lang/NewChanlun`（clone 场景 origin 是本地路径，`gh` 靠它认仓，#1009）。
 
 ## 3. 沙盒网络面

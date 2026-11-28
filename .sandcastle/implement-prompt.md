@@ -26,7 +26,7 @@
 ## 硬性规则
 
 - 只做这一张票；做不完或做不了都如实说。
-- **不关 issue、不 merge、不 push、不动 main**——验收与开 PR 在编排层，合入 main 由分支保护的 `deepagents/review` 与 `ci-ok` 必需检查把关。
+- **不关 issue、不 merge、不 push、不动 main**——验收与开 PR 在编排层，合入 main 按 [graph-engineering.md](docs/graph-engineering.md)「main 的合入」 分阶段执行。
 - 被卡住（缺上下文/测试修不好/外部依赖）：`gh issue comment {{ISSUE_NUMBER}}` 留卡点说明，然后给完成信号收工，不硬闯。
 - 密钥永不写入任何文件。
 - 本机禁 cargo / rustc（见 Verify）；本管线的 Rust 验证走 nc-remote 远端或编排层 CI（全仓口径见 AGENTS.md「底线」：CI、Boat 或远端环境）。
