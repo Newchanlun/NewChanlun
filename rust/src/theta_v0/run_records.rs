@@ -21,6 +21,8 @@
 //! 里没有 profile ⟹ 两个槽位都报。其余记录各占一个槽位。所有缺口一次收齐到 [`RunPolicyError`]，
 //! 调用方停止、不产读数；本模块**没有**备用值，也不回退旧常数。
 
+use std::sync::OnceLock;
+
 use serde_json::Value;
 
 use super::policy_records::{
@@ -279,9 +281,63 @@ fn venue_header(id: &'static str, text: &str) -> Result<VenueHeader, PolicyError
     })
 }
 
+#[inline]
+fn same_static_str(a: &str, b: &'static str) -> bool {
+    a.as_ptr() == b.as_ptr() && a.len() == b.len()
+}
+
+fn cached_diagnostic_fixture_venue() -> &'static Result<VenueProfile, RunPolicyError> {
+    static CACHE: OnceLock<Result<VenueProfile, RunPolicyError>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        parse_venue_profile_uncached(
+            VENUE_PROFILE_DIAGNOSTIC_FIXTURE_ID,
+            Some(VENUE_PROFILE_DIAGNOSTIC_FIXTURE_JSON),
+        )
+    })
+}
+
+fn cached_p0_venue() -> &'static Result<VenueProfile, RunPolicyError> {
+    static CACHE: OnceLock<Result<VenueProfile, RunPolicyError>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        parse_venue_profile_uncached(VENUE_PROFILE_P0_ID, Some(VENUE_PROFILE_P0_JSON))
+    })
+}
+
+fn cached_synthetic_tb02a_venue() -> &'static Result<VenueProfile, RunPolicyError> {
+    static CACHE: OnceLock<Result<VenueProfile, RunPolicyError>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        parse_venue_profile_uncached(
+            VENUE_PROFILE_SYNTHETIC_TB02A_ID,
+            Some(VENUE_PROFILE_SYNTHETIC_TB02A_JSON),
+        )
+    })
+}
+
 /// 解析一份场所 profile。缺 `tick_size` 记在 `venue_profile` 槽，缺成本项记在 `cost_inputs` 槽，
 /// 一次收齐全部缺口。
 pub fn parse_venue_profile(
+    id: &'static str,
+    text: Option<&str>,
+) -> Result<VenueProfile, RunPolicyError> {
+    if let Some(s) = text {
+        if id == VENUE_PROFILE_DIAGNOSTIC_FIXTURE_ID
+            && same_static_str(s, VENUE_PROFILE_DIAGNOSTIC_FIXTURE_JSON)
+        {
+            return cached_diagnostic_fixture_venue().clone();
+        }
+        if id == VENUE_PROFILE_P0_ID && same_static_str(s, VENUE_PROFILE_P0_JSON) {
+            return cached_p0_venue().clone();
+        }
+        if id == VENUE_PROFILE_SYNTHETIC_TB02A_ID
+            && same_static_str(s, VENUE_PROFILE_SYNTHETIC_TB02A_JSON)
+        {
+            return cached_synthetic_tb02a_venue().clone();
+        }
+    }
+    parse_venue_profile_uncached(id, text)
+}
+
+fn parse_venue_profile_uncached(
     id: &'static str,
     text: Option<&str>,
 ) -> Result<VenueProfile, RunPolicyError> {
@@ -350,8 +406,20 @@ pub fn parse_venue_profile(
     }
 }
 
+fn cached_active_theta_risk() -> &'static Result<ThetaRisk, PolicyError> {
+    static CACHE: OnceLock<Result<ThetaRisk, PolicyError>> = OnceLock::new();
+    CACHE.get_or_init(|| parse_theta_risk_uncached(Some(ACTIVE_THETA_RISK_JSON)))
+}
+
 /// 解析 Θ_risk 记录。
 pub fn parse_theta_risk(text: Option<&str>) -> Result<ThetaRisk, PolicyError> {
+    if text.is_some_and(|s| same_static_str(s, ACTIVE_THETA_RISK_JSON)) {
+        return cached_active_theta_risk().clone();
+    }
+    parse_theta_risk_uncached(text)
+}
+
+fn parse_theta_risk_uncached(text: Option<&str>) -> Result<ThetaRisk, PolicyError> {
     let id = THETA_RISK_ID;
     let (record, fields) = pr::parse_header(id, text)?;
     let f = |name: &str| pr::read_f64(id, &fields, name);
@@ -389,8 +457,20 @@ pub fn parse_theta_risk(text: Option<&str>) -> Result<ThetaRisk, PolicyError> {
     })
 }
 
+fn cached_active_data_profile() -> &'static Result<DataProfile, PolicyError> {
+    static CACHE: OnceLock<Result<DataProfile, PolicyError>> = OnceLock::new();
+    CACHE.get_or_init(|| parse_data_profile_uncached(Some(ACTIVE_DATA_PROFILE_JSON)))
+}
+
 /// 解析数据 profile 记录。
 pub fn parse_data_profile(text: Option<&str>) -> Result<DataProfile, PolicyError> {
+    if text.is_some_and(|s| same_static_str(s, ACTIVE_DATA_PROFILE_JSON)) {
+        return cached_active_data_profile().clone();
+    }
+    parse_data_profile_uncached(text)
+}
+
+fn parse_data_profile_uncached(text: Option<&str>) -> Result<DataProfile, PolicyError> {
     let id = DATA_PROFILE_ID;
     let (record, fields) = pr::parse_header(id, text)?;
     let bad_tick_max_dev = positive(
@@ -406,10 +486,19 @@ pub fn parse_data_profile(text: Option<&str>) -> Result<DataProfile, PolicyError
 
 /// 诊断夹具场所 profile（`admissible: false`）。
 pub fn diagnostic_fixture_venue() -> Result<VenueProfile, RunPolicyError> {
-    parse_venue_profile(
-        VENUE_PROFILE_DIAGNOSTIC_FIXTURE_ID,
-        Some(VENUE_PROFILE_DIAGNOSTIC_FIXTURE_JSON),
-    )
+    cached_diagnostic_fixture_venue().clone()
+}
+
+fn cached_production_venue_headers(
+) -> &'static [(&'static str, &'static str, Result<VenueHeader, PolicyError>)] {
+    static CACHE: OnceLock<Vec<(&'static str, &'static str, Result<VenueHeader, PolicyError>)>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| {
+        PRODUCTION_VENUE_PROFILES
+            .iter()
+            .map(|&(id, text)| (id, text, venue_header(id, text)))
+            .collect()
+    })
 }
 
 /// 按记录头某字段在生产表里找场所 profile；找不到 ⟹ `venue_profile` 与 `cost_inputs` 两槽都报缺记录。
@@ -417,7 +506,37 @@ fn production_venue_where(
     usage: VenueUsage,
     matches: impl Fn(&str, Option<&str>) -> bool,
 ) -> Result<VenueProfile, RunPolicyError> {
-    production_venue_from_records(PRODUCTION_VENUE_PROFILES, usage, matches)
+    for (id, text, header) in cached_production_venue_headers() {
+        match header {
+            Ok(header) => {
+                if !matches(&header.profile_id, header.symbol.as_deref()) {
+                    continue;
+                }
+                if header.usage != usage {
+                    let mut err = RunPolicyError::default();
+                    err.add(
+                        &[SLOT_VENUE_PROFILE],
+                        pr::invalid(
+                            id,
+                            "usage",
+                            format!(
+                                "usage 不符：记录 usage={}，本入口只接受 usage={usage}",
+                                header.usage
+                            ),
+                        ),
+                    );
+                    return Err(err);
+                }
+                return parse_venue_profile(id, Some(text));
+            }
+            Err(error) => {
+                let mut err = RunPolicyError::default();
+                err.add(&[SLOT_VENUE_PROFILE, SLOT_COST_INPUTS], error.clone());
+                return Err(err);
+            }
+        }
+    }
+    Err(no_venue_profile())
 }
 
 /// 从具名生产记录表选择场所。匹配表的记录头损坏是 `InvalidPolicy`，不得吞成“没有记录”。
@@ -494,12 +613,12 @@ pub fn production_venue_for_s_writer(profile_id: &str) -> Result<VenueProfile, R
 
 /// 当前生效的 Θ_risk 记录。
 pub fn active_theta_risk() -> Result<ThetaRisk, PolicyError> {
-    parse_theta_risk(Some(ACTIVE_THETA_RISK_JSON))
+    cached_active_theta_risk().clone()
 }
 
 /// 当前生效的数据 profile 记录。
 pub fn active_data_profile() -> Result<DataProfile, PolicyError> {
-    parse_data_profile(Some(ACTIVE_DATA_PROFILE_JSON))
+    cached_active_data_profile().clone()
 }
 
 /// 一次运行所需的全部记录（场所 profile 由调用方给出，其余取当前生效版本）。
@@ -514,6 +633,49 @@ pub struct RunRecordSet {
     pub parse: super::config::ParseConfig,
 }
 
+#[derive(Clone)]
+struct ActiveStaticRecords {
+    tower: pr::TowerLevelBudget,
+    level: super::config::LevelConfig,
+    macd: super::config::MacdConfig,
+    parse: super::config::ParseConfig,
+}
+
+fn cached_active_static_records() -> &'static Result<ActiveStaticRecords, RunPolicyError> {
+    static CACHE: OnceLock<Result<ActiveStaticRecords, RunPolicyError>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut err = RunPolicyError::default();
+        let tower = err.take(
+            SLOT_TOWER_LEVEL_BUDGET,
+            pr::parse_tower_level_budget(Some(ACTIVE_TOWER_LEVEL_BUDGET_JSON)),
+        );
+        let tower_base = err.take(SLOT_TOWER_BASE, pr::active_tower_base());
+        let level = match (tower, tower_base) {
+            (Some(budget), Some(base)) => {
+                err.take(SLOT_TOWER_BASE, pr::try_level_config_from(budget, base, 3))
+            }
+            _ => None,
+        };
+        let macd = err.take(
+            SLOT_MACD_FORCE,
+            pr::parse_macd_force(Some(ACTIVE_MACD_FORCE_JSON)),
+        );
+        let parse = err.take(
+            SLOT_PARSE_RECORDS,
+            super::config::ParseConfig::from_active_records(),
+        );
+        match (tower, level, macd, parse) {
+            (Some(tower), Some(level), Some(macd), Some(parse)) => Ok(ActiveStaticRecords {
+                tower,
+                level,
+                macd,
+                parse,
+            }),
+            _ => Err(err),
+        }
+    })
+}
+
 /// 收齐一次运行的全部记录；任何缺口都进同一个 [`RunPolicyError`]。
 pub fn collect_run_records(
     venue: Result<VenueProfile, RunPolicyError>,
@@ -524,42 +686,22 @@ pub fn collect_run_records(
     let venue = venue.map_err(|e| err.merge(e)).ok();
     let risk = err.take(SLOT_THETA_RISK, parse_theta_risk(risk_text));
     let data = err.take(SLOT_DATA_PROFILE, parse_data_profile(data_text));
-    let tower = err.take(
-        SLOT_TOWER_LEVEL_BUDGET,
-        pr::parse_tower_level_budget(Some(ACTIVE_TOWER_LEVEL_BUDGET_JSON)),
-    );
-    let tower_base = err.take(SLOT_TOWER_BASE, pr::active_tower_base());
-    let level = match (tower, tower_base) {
-        (Some(budget), Some(base)) => {
-            err.take(SLOT_TOWER_BASE, pr::try_level_config_from(budget, base, 3))
+    let active = match cached_active_static_records() {
+        Ok(active) => Some(active),
+        Err(active_err) => {
+            err.merge(active_err.clone());
+            None
         }
-        _ => None,
     };
-    let macd = err.take(
-        SLOT_MACD_FORCE,
-        pr::parse_macd_force(Some(ACTIVE_MACD_FORCE_JSON)),
-    );
-    let parse = err.take(
-        SLOT_PARSE_RECORDS,
-        super::config::ParseConfig::from_active_records(),
-    );
-    match (venue, risk, data, tower, level, macd, parse) {
-        (
-            Some(venue),
-            Some(risk),
-            Some(data),
-            Some(tower),
-            Some(level),
-            Some(macd),
-            Some(parse),
-        ) => Ok(RunRecordSet {
+    match (venue, risk, data, active) {
+        (Some(venue), Some(risk), Some(data), Some(active)) => Ok(RunRecordSet {
             venue,
             risk,
             data,
-            tower,
-            level,
-            macd,
-            parse,
+            tower: active.tower.clone(),
+            level: active.level.clone(),
+            macd: active.macd.clone(),
+            parse: active.parse.clone(),
         }),
         _ => Err(err),
     }
