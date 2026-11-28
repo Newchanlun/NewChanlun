@@ -1,11 +1,12 @@
 import json
 import re
+import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import MODELS, git
+from conftest import MODELS, Env, git
 from test_boat import adapter
 
 from pilot1742.domain import DEEPAGENTS_OUTPUT_PROTOCOL, parse_sha
@@ -15,40 +16,71 @@ RUNTIME = ("boat-worker.mts", "codex-child.ts", "docker-isolation.mts", "accepta
            "git-environment.ts", "main-model.mts")
 
 
-@pytest.mark.parametrize("model", ["gpt-6.1-sol", "kimi-k3.1-pro"])
-@pytest.mark.parametrize("protocol", [None, DEEPAGENTS_OUTPUT_PROTOCOL])
-@pytest.mark.parametrize(("scheduler", "missing_record"), [(False, False), (True, False), (True, True)])
-def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, scheduler, missing_record, protocol, model):
-    paths = ["package.json", "package-lock.json", ".sandcastle/deepagents-pilot/pilot1742/boat_remote.py"]
-    paths.extend(".sandcastle/" + name for name in RUNTIME)
-    if scheduler:
-        paths.extend((".sandcastle/scheduler-config.mts", ".sandcastle/scheduler-config.json"))
-    for name in paths:
-        target = env.source / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes((ROOT / name).read_bytes() if scheduler or not name.endswith((".mts", ".ts"))
-                           else b"export {};\n")
-    if missing_record:
-        (env.source / ".sandcastle/scheduler-config.json").unlink()
-    project_skill = env.source / ".agents/skills/fixture/SKILL.md"
-    project_skill.parent.mkdir(parents=True)
-    project_skill.write_text("fixture")
-    git(env.source, "add", ".")
-    git(env.source, "commit", "-qm", "frozen runtime")
-    env.base = parse_sha(git(env.source, "rev-parse", "HEAD"))
-    if scheduler:
-        (env.source / ".sandcastle/scheduler-config.json").write_text("{}")
-    else:
-        (env.source / ".sandcastle/scheduler-config.mts").write_text("throw new Error('not frozen');")
-    pstack = tmp_path / "pstack"
+@pytest.fixture(scope="module")
+def _runtime_seeds(tmp_path_factory):
+    root = tmp_path_factory.mktemp("boat_runtime_seeds")
+    pstack = root / "pstack"
     skill = pstack / "installed/skills/a/SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("fixture")
     (pstack / "aliases.json").write_text("{}")
     (pstack / "upstream").mkdir()
     (pstack / "upstream/LICENSE").write_text("fixture")
-    rules = tmp_path / "models.md"
+    rules = root / "models.md"
     rules.write_text("fixture")
+
+    seeds = {}
+    for scheduler, missing_record in ((False, False), (True, False), (True, True)):
+        case_dir = root / f"s{int(scheduler)}_m{int(missing_record)}"
+        case_dir.mkdir()
+        seed_env = Env(case_dir)
+        paths = ["package.json", "package-lock.json", ".sandcastle/deepagents-pilot/pilot1742/boat_remote.py"]
+        paths.extend(".sandcastle/" + name for name in RUNTIME)
+        if scheduler:
+            paths.extend((".sandcastle/scheduler-config.mts", ".sandcastle/scheduler-config.json"))
+        for name in paths:
+            target = seed_env.source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / name).read_bytes() if scheduler or not name.endswith((".mts", ".ts"))
+                               else b"export {};\n")
+        if missing_record:
+            (seed_env.source / ".sandcastle/scheduler-config.json").unlink()
+        project_skill = seed_env.source / ".agents/skills/fixture/SKILL.md"
+        project_skill.parent.mkdir(parents=True)
+        project_skill.write_text("fixture")
+        git(seed_env.source, "add", ".")
+        git(seed_env.source, "commit", "-qm", "frozen runtime")
+        base = parse_sha(git(seed_env.source, "rev-parse", "HEAD"))
+        if scheduler:
+            (seed_env.source / ".sandcastle/scheduler-config.json").write_text("{}")
+        else:
+            (seed_env.source / ".sandcastle/scheduler-config.mts").write_text("throw new Error('not frozen');")
+        expected_runtime = {
+            name: git(seed_env.source, "show", f"{base}:.sandcastle/{name}") + "\n"
+            for name in RUNTIME
+        }
+        expected_scheduler = (
+            json.loads(git(seed_env.source, "show", f"{base}:.sandcastle/scheduler-config.json"))
+            if scheduler and not missing_record
+            else None
+        )
+        seeds[(scheduler, missing_record)] = (seed_env.source, base, expected_runtime, expected_scheduler)
+    return pstack, rules, seeds
+
+
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "kimi-k3.1-pro"])
+@pytest.mark.parametrize("protocol", [None, DEEPAGENTS_OUTPUT_PROTOCOL])
+@pytest.mark.parametrize(("scheduler", "missing_record"), [(False, False), (True, False), (True, True)])
+def test_frozen_runtime_package_keeps_its_import_closure(_runtime_seeds, tmp_path, scheduler, missing_record, protocol, model):
+    pstack, rules, seeds = _runtime_seeds
+    seed_source, base, expected_runtime, expected_scheduler = seeds[(scheduler, missing_record)]
+    env = Env.__new__(Env)
+    env.home = tmp_path / "home"
+    env.home.mkdir()
+    env.source = tmp_path / "source"
+    shutil.copytree(seed_source, env.source)
+    env.base = base
+    env.control({})
     run, engine, key, binding = adapter(env, models=MODELS.replace("gpt-6.1-sol", model))
     engine.config = replace(engine.config, pstack_source=str(pstack), model_rules=str(rules))
     prompt = run.dir / "prompt.md"
@@ -71,7 +103,7 @@ def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, schedule
         assert request["prompt"] == "fixture"
         runtime = package / "runtime/.sandcastle"
         for name in RUNTIME:
-            assert (runtime / name).read_text() == git(env.source, "show", f"{env.base}:.sandcastle/{name}") + "\n"
+            assert (runtime / name).read_text() == expected_runtime[name]
         for module in runtime.iterdir():
             if module.suffix not in (".ts", ".mts"):
                 continue
@@ -84,8 +116,7 @@ def test_frozen_runtime_package_keeps_its_import_closure(env, tmp_path, schedule
                  'console.log(JSON.stringify(readSchedulerConfig(undefined, {}).values));'],
                 cwd=runtime, capture_output=True, text=True, timeout=10)
             assert result.returncode == 0, result.stderr
-            expected = json.loads(git(env.source, "show", f"{env.base}:.sandcastle/scheduler-config.json"))
-            assert json.loads(result.stdout) == expected["values"]
+            assert json.loads(result.stdout) == expected_scheduler["values"]
         else:
             assert not (runtime / "scheduler-config.mts").exists()
             assert not (runtime / "scheduler-config.json").exists()
