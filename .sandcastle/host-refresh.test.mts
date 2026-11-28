@@ -3,10 +3,10 @@
  * `git merge --ff-only` 在 HEAD 领先时返回 0，所以 claim-loop 与 arch_hotzone 都要显式数领先提交。
  * 跑法：npx tsx --test .sandcastle/host-refresh.test.mts
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { refreshHostMain } from "./claim-loop.mts";
@@ -21,8 +21,10 @@ function commit(cwd: string, msg: string): void {
 }
 
 /** bare origin + host 克隆；host 本地多 ahead 个提交，origin 多 behind 个提交（两者都 >0 = 分叉）。 */
-function fixture(ahead: number, behind: number): { root: string; host: string; seed: string } {
-  const root = mkdtempSync(join(tmpdir(), "host-refresh-"));
+let baseSeed: { root: string; origin: string; seed: string; host: string } | undefined;
+function getBaseSeed() {
+  if (baseSeed) return baseSeed;
+  const root = mkdtempSync(join(tmpdir(), "host-refresh-seed-"));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
   const host = join(root, "host");
@@ -31,9 +33,26 @@ function fixture(ahead: number, behind: number): { root: string; host: string; s
   commit(seed, "base");
   git(seed, "push", "-q", origin, "main");
   git(root, "clone", "-q", origin, host);
+  baseSeed = { root, origin, seed, host };
+  return baseSeed;
+}
+after(() => { if (baseSeed) rmSync(baseSeed.root, { recursive: true, force: true }); });
+
+function fixture(ahead: number, behind: number): { root: string; host: string; seed: string } {
+  const base = getBaseSeed();
+  const root = mkdtempSync(join(tmpdir(), "host-refresh-"));
+  const origin = join(root, "origin.git");
+  const seed = join(root, "seed");
+  const host = join(root, "host");
+  cpSync(base.origin, origin, { recursive: true });
+  cpSync(base.seed, seed, { recursive: true });
+  cpSync(base.host, host, { recursive: true });
+  git(host, "remote", "set-url", "origin", origin);
   for (let i = 0; i < ahead; i++) commit(host, `deploy${i}`);
-  for (let i = 0; i < behind; i++) commit(seed, `upstream${i}`);
-  git(seed, "push", "-q", origin, "main");
+  if (behind > 0) {
+    for (let i = 0; i < behind; i++) commit(seed, `upstream${i}`);
+    git(seed, "push", "-q", origin, "main");
+  }
   return { root, host, seed };
 }
 
