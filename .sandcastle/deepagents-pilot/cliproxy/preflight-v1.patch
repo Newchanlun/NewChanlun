@@ -8482,10 +8482,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..2f6129a 100644
+index e69de29..22f9e08 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,14226 @@
+@@ -0,0 +1,14793 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -10411,6 +10411,7 @@ index e69de29..2f6129a 100644
 +
 +func isValidCompletedToolItem(itemType, callID, name, serverLabel string, argsIsStr, inputIsStr, codeIsStr, hasValidAction, hasValidQueries, hasValidResult bool) bool {
 +	switch itemType {
++	// Supported tool call item types (each strictly validated):
 +	case "function_call":
 +		return callID != "" && strings.TrimSpace(callID) == callID &&
 +			name != "" && strings.TrimSpace(name) == name &&
@@ -10431,8 +10432,17 @@ index e69de29..2f6129a 100644
 +		return codeIsStr
 +	case "image_generation_call":
 +		return hasValidResult
-+	default:
++	// Explicitly allowed non-tool non-message item types:
++	case "reasoning":
 +		return true
++	case "mcp_approval_request":
++		return name != "" && strings.TrimSpace(name) == name &&
++			serverLabel != "" && strings.TrimSpace(serverLabel) == serverLabel &&
++			argsIsStr
++	default:
++		// Fail closed on any unvalidated or unknown tool/item type (e.g. local_shell_call,
++		// shell_call, computer_call, apply_patch_call).
++		return false
 +	}
 +}
 +
@@ -17510,8 +17520,16 @@ index e69de29..2f6129a 100644
 +	}
 +	bState := bucketStateFor(true)
 +	bState.mu.Lock()
++	_, names, truncated, err := countRootBucketEntriesStatus(rootLease.dir, true)
++	if truncated {
++		bState.mu.Unlock()
++		if reclaimOversizedRootBatch(rootLease.dir, root) == 0 {
++			return 0, 0
++		}
++		bState.mu.Lock()
++		_, names, _, err = countRootBucketEntriesStatus(rootLease.dir, true)
++	}
 +	defer bState.mu.Unlock()
-+	_, names, err := countRootBucketEntries(rootLease.dir, true)
 +	if err != nil || len(names) == 0 {
 +		return 0, 0
 +	}
@@ -18793,15 +18811,13 @@ index e69de29..2f6129a 100644
 +}
 +
 +const maxStagingCreateRetries = 8
++const stagingKeyTempName = "staging-key.tmp"
++const stagingKeyWirePrefix = `{"schema":"cliproxy-staging-key-v1","key":"`
 +
 +var (
-+	stagingFilePattern        = regexp.MustCompile(`^(?:pending|pending-marker|pending-key)-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
 +	signedStagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker)-[0-9]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}$`)
-+	stagingDirPattern         = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
 +	signedStagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}$`)
-+	stageSealDirPattern       = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
 +	signedStageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}$`)
-+	reclaimDirPattern         = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}(?:-[0-9a-f]{32})?$`)
 +	signedReclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}-[0-9a-f]{32}$`)
 +	stagingOrphanAge          = 5 * time.Minute
 +
@@ -18877,10 +18893,45 @@ index e69de29..2f6129a 100644
 +	if strings.HasPrefix(name, "pending-marker-") {
 +		return verifyStagingEntryName(key, "cliproxy-staging-file-v1\x00", "pending-marker", name)
 +	}
-+	if strings.HasPrefix(name, "pending-") && !strings.HasPrefix(name, "pending-key-") {
++	if strings.HasPrefix(name, "pending-") {
 +		return verifyStagingEntryName(key, "cliproxy-staging-file-v1\x00", "pending", name)
 +	}
 +	return false
++}
++
++func isRecoverableStagingKeyTemp(raw []byte) bool {
++	if len(raw) == 0 {
++		return true
++	}
++	var sk stagingKeyFile
++	if decodeExactReceiptJSON(raw, stagingKeyJSONKeys, &sk) == nil && sk.Schema == stagingKeySchema && isSHA256Hex(sk.Key) {
++		return true
++	}
++	prefixBytes := []byte(stagingKeyWirePrefix)
++	if len(raw) <= len(prefixBytes) {
++		return bytes.HasPrefix(prefixBytes, raw)
++	}
++	if !bytes.HasPrefix(raw, prefixBytes) {
++		return false
++	}
++	rest := raw[len(prefixBytes):]
++	if len(rest) > 65 {
++		return false
++	}
++	hexLen := len(rest)
++	if hexLen == 65 {
++		if rest[64] != '"' {
++			return false
++		}
++		hexLen = 64
++	}
++	for i := 0; i < hexLen; i++ {
++		c := rest[i]
++		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
++			return false
++		}
++	}
++	return true
 +}
 +
 +func ensureStagingKeyLocked(rootHandle, stagingRoot *os.Root, root string) error {
@@ -18893,6 +18944,20 @@ index e69de29..2f6129a 100644
 +		}
 +		return nil
 +	} else if !errors.Is(err, os.ErrNotExist) {
++		return ErrUnavailable
++	}
++	// Recover any single-slot interrupted staging-key.tmp left by a prior crash before .staging-key
++	// was atomically published. Foreign or corrupted content fails closed and is preserved untouched.
++	if _, lerr := stagingRoot.Lstat(stagingKeyTempName); lerr == nil {
++		raw, fDev, fIno, fHasID, ok := readPrivateRegularFileInSubdirAllowEmpty(stagingRoot, stagingKeyTempName, 1024)
++		if !ok || !isRecoverableStagingKeyTemp(raw) {
++			return ErrUnavailable
++		}
++		if !removeVerifiedFileInSubdirMode(stagingRoot, stagingKeyTempName, fDev, fIno, fHasID, sha256Hex(string(raw)), 1024, true) {
++			return ErrUnavailable
++		}
++		_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
++	} else if !errors.Is(lerr, os.ErrNotExist) {
 +		return ErrUnavailable
 +	}
 +	var rawKey [32]byte
@@ -18916,20 +18981,31 @@ index e69de29..2f6129a 100644
 +		return ErrUnavailable
 +	}
 +	defer stagingDirFD.Close()
-+	tmp, f, releaseTmp, err := createStagingFile(rootHandle, stagingRoot, root, "pending-key")
-+	if err != nil {
-+		return err
++
++	stagingQuotaMu.Lock()
++	if qErr := ensureStagingQuotaLocked(rootHandle, stagingRoot, root); qErr != nil {
++		stagingQuotaMu.Unlock()
++		return qErr
 +	}
-+	defer releaseTmp()
++	trackStagingEntry(root, stagingKeyTempName)
++	f, oerr := stagingRoot.OpenFile(stagingKeyTempName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if oerr != nil {
++		untrackStagingEntry(root, stagingKeyTempName)
++		stagingQuotaMu.Unlock()
++		return ErrUnavailable
++	}
++	stagingQuotaMu.Unlock()
++	defer untrackStagingEntry(root, stagingKeyTempName)
++
 +	_, errW := f.Write(data)
 +	errS := f.Sync()
 +	errC := f.Close()
 +	if errW != nil || errS != nil || errC != nil {
-+		_ = stagingRoot.Remove(tmp)
++		_ = stagingRoot.Remove(stagingKeyTempName)
 +		return ErrUnavailable
 +	}
-+	if renErr := renameatNoReplacePinned(stagingDirFD, tmp, rootDirFD, ".staging-key"); renErr != nil {
-+		_ = stagingRoot.Remove(tmp)
++	if renErr := renameatNoReplacePinned(stagingDirFD, stagingKeyTempName, rootDirFD, ".staging-key"); renErr != nil {
++		_ = stagingRoot.Remove(stagingKeyTempName)
 +		if os.IsExist(renErr) {
 +			if _, ok := readStagingKey(rootHandle); ok {
 +				return nil
@@ -18937,7 +19013,11 @@ index e69de29..2f6129a 100644
 +		}
 +		return ErrUnavailable
 +	}
-+	return syncPinnedDir(rootHandle, root)
++	if err := syncPinnedDir(rootHandle, root); err != nil {
++		return err
++	}
++	_ = syncPinnedDir(stagingRoot, filepath.Join(root, ".staging"))
++	return nil
 +}
 +
 +func stagingEntryKey(root, name string) string {
@@ -19057,13 +19137,9 @@ index e69de29..2f6129a 100644
 +}
 +
 +func createStagingFile(rootHandle, stagingRoot *os.Root, root, prefix string) (string, *os.File, func(), error) {
-+	var stagingKey []byte
-+	if prefix != "pending-key" {
-+		var okKey bool
-+		stagingKey, okKey = readStagingKey(rootHandle)
-+		if !okKey {
-+			return "", nil, nil, ErrUnavailable
-+		}
++	stagingKey, okKey := readStagingKey(rootHandle)
++	if !okKey {
++		return "", nil, nil, ErrUnavailable
 +	}
 +	return createStagingFileWithGen(rootHandle, stagingRoot, root, func() (string, error) {
 +		tok, err := randomStagingToken()
@@ -19071,10 +19147,7 @@ index e69de29..2f6129a 100644
 +			return "", err
 +		}
 +		base := fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok)
-+		if len(stagingKey) == 32 {
-+			return signStagingFileName(stagingKey, base), nil
-+		}
-+		return base, nil
++		return signStagingFileName(stagingKey, base), nil
 +	})
 +}
 +
@@ -19193,11 +19266,358 @@ index e69de29..2f6129a 100644
 +	return raw, dev, ino, hasID, true
 +}
 +
++func isJSONHexByte(b byte) bool {
++	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
++}
++
++func isValidTruncatedUTF8Tail(b []byte) bool {
++	if len(b) == 0 || len(b) > 3 {
++		return false
++	}
++	b0 := b[0]
++	switch {
++	case b0 >= 0xC2 && b0 <= 0xDF:
++		return len(b) == 1
++	case b0 == 0xE0:
++		return len(b) == 1 || (len(b) == 2 && b[1] >= 0xA0 && b[1] <= 0xBF)
++	case (b0 >= 0xE1 && b0 <= 0xEC) || (b0 >= 0xEE && b0 <= 0xEF):
++		return len(b) == 1 || (len(b) == 2 && b[1] >= 0x80 && b[1] <= 0xBF)
++	case b0 == 0xED:
++		return len(b) == 1 || (len(b) == 2 && b[1] >= 0x80 && b[1] <= 0x9F)
++	case b0 == 0xF0:
++		if len(b) == 1 {
++			return true
++		}
++		if b[1] < 0x90 || b[1] > 0xBF {
++			return false
++		}
++		return len(b) == 2 || (len(b) == 3 && b[2] >= 0x80 && b[2] <= 0xBF)
++	case b0 >= 0xF1 && b0 <= 0xF3:
++		if len(b) == 1 {
++			return true
++		}
++		if b[1] < 0x80 || b[1] > 0xBF {
++			return false
++		}
++		return len(b) == 2 || (len(b) == 3 && b[2] >= 0x80 && b[2] <= 0xBF)
++	case b0 == 0xF4:
++		if len(b) == 1 {
++			return true
++		}
++		if b[1] < 0x80 || b[1] > 0x8F {
++			return false
++		}
++		return len(b) == 2 || (len(b) == 3 && b[2] >= 0x80 && b[2] <= 0xBF)
++	default:
++		return false
++	}
++}
++
++// isTruncatedJSONObjectPrefix returns true ONLY when raw is either empty (0 bytes) or a
++// syntactically valid RFC 8259 proper prefix of a JSON object that ended at unexpected EOF
++// before the root '}' closed. Complete JSON objects, trailing bytes after '}', and mid-stream
++// syntax errors (such as `{"a":]` or `{"a" 1`) all return false so corrupt files are preserved.
 +func isTruncatedJSONObjectPrefix(raw []byte) bool {
 +	if len(raw) == 0 {
 +		return true
 +	}
-+	return raw[0] == '{' && !json.Valid(raw)
++	if raw[0] != '{' {
++		return false
++	}
++	const (
++		stObjKeyOrEnd = iota
++		stObjKey
++		stObjColon
++		stObjVal
++		stObjCommaOrEnd
++		stArrValOrEnd
++		stArrVal
++		stArrCommaOrEnd
++		stDone
++	)
++	const maxTruncatedJSONDepth = 64
++	var stack [maxTruncatedJSONDepth]byte
++	stack[0] = '{'
++	depth := 1
++	state := stObjKeyOrEnd
++	i := 1
++
++	afterValue := func() {
++		if depth == 0 {
++			state = stDone
++		} else if stack[depth-1] == '{' {
++			state = stObjCommaOrEnd
++		} else {
++			state = stArrCommaOrEnd
++		}
++	}
++
++	parseString := func() (complete, ok bool) {
++		i++ // skip opening '"'
++		for i < len(raw) {
++			b := raw[i]
++			if b == '"' {
++				i++
++				return true, true
++			}
++			if b == '\\' {
++				i++
++				if i == len(raw) {
++					return false, true
++				}
++				switch raw[i] {
++				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
++					i++
++				case 'u':
++					i++
++					for k := 0; k < 4; k++ {
++						if i == len(raw) {
++							return false, true
++						}
++						if !isJSONHexByte(raw[i]) {
++							return false, false
++						}
++						i++
++					}
++				default:
++					return false, false
++				}
++				continue
++			}
++			if b < 0x20 {
++				return false, false
++			}
++			if b < 0x80 {
++				i++
++				continue
++			}
++			r, sz := utf8.DecodeRune(raw[i:])
++			if r != utf8.RuneError || sz > 1 {
++				i += sz
++				continue
++			}
++			if isValidTruncatedUTF8Tail(raw[i:]) {
++				return false, true
++			}
++			return false, false
++		}
++		return false, true
++	}
++
++	parseLiteral := func(lit string) (complete, ok bool) {
++		for k := 0; k < len(lit); k++ {
++			if i == len(raw) {
++				return false, true
++			}
++			if raw[i] != lit[k] {
++				return false, false
++			}
++			i++
++		}
++		return true, true
++	}
++
++	parseNumber := func() (complete, ok bool) {
++		if raw[i] == '-' {
++			i++
++			if i == len(raw) {
++				return false, true
++			}
++		}
++		if raw[i] == '0' {
++			i++
++			if i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
++				return false, false
++			}
++		} else if raw[i] >= '1' && raw[i] <= '9' {
++			i++
++			for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
++				i++
++			}
++		} else {
++			return false, false
++		}
++		if i < len(raw) && raw[i] == '.' {
++			i++
++			if i == len(raw) {
++				return false, true
++			}
++			if raw[i] < '0' || raw[i] > '9' {
++				return false, false
++			}
++			for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
++				i++
++			}
++		}
++		if i < len(raw) && (raw[i] == 'e' || raw[i] == 'E') {
++			i++
++			if i == len(raw) {
++				return false, true
++			}
++			if raw[i] == '+' || raw[i] == '-' {
++				i++
++				if i == len(raw) {
++					return false, true
++				}
++			}
++			if raw[i] < '0' || raw[i] > '9' {
++				return false, false
++			}
++			for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
++				i++
++			}
++		}
++		if i == len(raw) {
++			return false, true
++		}
++		return true, true
++	}
++
++	for {
++		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\n' || raw[i] == '\r') {
++			i++
++		}
++		if state == stDone {
++			return false
++		}
++		if i == len(raw) {
++			return true
++		}
++		b := raw[i]
++		switch state {
++		case stObjKeyOrEnd:
++			if b == '}' {
++				depth--
++				i++
++				afterValue()
++			} else if b == '"' {
++				complete, ok := parseString()
++				if !ok {
++					return false
++				}
++				if !complete {
++					return true
++				}
++				state = stObjColon
++			} else {
++				return false
++			}
++		case stObjKey:
++			if b != '"' {
++				return false
++			}
++			complete, ok := parseString()
++			if !ok {
++				return false
++			}
++			if !complete {
++				return true
++			}
++			state = stObjColon
++		case stObjColon:
++			if b != ':' {
++				return false
++			}
++			i++
++			state = stObjVal
++		case stObjCommaOrEnd:
++			if b == ',' {
++				i++
++				state = stObjKey
++			} else if b == '}' {
++				depth--
++				i++
++				afterValue()
++			} else {
++				return false
++			}
++		case stArrCommaOrEnd:
++			if b == ',' {
++				i++
++				state = stArrVal
++			} else if b == ']' {
++				depth--
++				i++
++				afterValue()
++			} else {
++				return false
++			}
++		case stArrValOrEnd:
++			if b == ']' {
++				depth--
++				i++
++				afterValue()
++				continue
++			}
++			fallthrough
++		case stObjVal, stArrVal:
++			switch {
++			case b == '{':
++				if depth >= maxTruncatedJSONDepth {
++					return false
++				}
++				stack[depth] = '{'
++				depth++
++				i++
++				state = stObjKeyOrEnd
++			case b == '[':
++				if depth >= maxTruncatedJSONDepth {
++					return false
++				}
++				stack[depth] = '['
++				depth++
++				i++
++				state = stArrValOrEnd
++			case b == '"':
++				complete, ok := parseString()
++				if !ok {
++					return false
++				}
++				if !complete {
++					return true
++				}
++				afterValue()
++			case b == 't':
++				complete, ok := parseLiteral("true")
++				if !ok {
++					return false
++				}
++				if !complete {
++					return true
++				}
++				afterValue()
++			case b == 'f':
++				complete, ok := parseLiteral("false")
++				if !ok {
++					return false
++				}
++				if !complete {
++					return true
++				}
++				afterValue()
++			case b == 'n':
++				complete, ok := parseLiteral("null")
++				if !ok {
++					return false
++				}
++				if !complete {
++					return true
++				}
++				afterValue()
++			case b == '-' || (b >= '0' && b <= '9'):
++				complete, ok := parseNumber()
++				if !ok {
++					return false
++				}
++				if !complete {
++					return true
++				}
++				afterValue()
++			default:
++				return false
++			}
++		}
++	}
 +}
 +
 +func removeVerifiedFileInSubdirMode(subRoot *os.Root, childName string, dev, ino uint64, hasID bool, expectSHA string, maxBytes int64, allowEmpty bool) bool {
@@ -19249,17 +19669,6 @@ index e69de29..2f6129a 100644
 +}
 +
 +func verifyStagingRegularFile(stagingRoot *os.Root, name string) (verifiedLeafChild, bool) {
-+	if strings.HasPrefix(name, "pending-key-") {
-+		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(stagingRoot, name, 1024)
-+		if !ok {
-+			return verifiedLeafChild{}, false
-+		}
-+		var sk stagingKeyFile
-+		if decodeExactReceiptJSON(raw, stagingKeyJSONKeys, &sk) == nil && sk.Schema == stagingKeySchema && isSHA256Hex(sk.Key) {
-+			return verifiedLeafChild{name: name, dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, true
-+		}
-+		return verifiedLeafChild{}, false
-+	}
 +	if strings.HasPrefix(name, "pending-marker-") {
 +		raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(stagingRoot, name, 4096)
 +		if !ok {
@@ -19481,6 +19890,9 @@ index e69de29..2f6129a 100644
 +}
 +
 +func cleanOrphanStageSealDir(rootHandle, stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID, signedOwner bool) bool {
++	if !signedOwner {
++		return false
++	}
 +	children, truncated, err := readDirCapped(subRoot, maxProducerLeafFiles)
 +	if err != nil || truncated {
 +		return false
@@ -19618,6 +20030,9 @@ index e69de29..2f6129a 100644
 +}
 +
 +func cleanOrphanReclaimDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID, signedOwner bool) bool {
++	if !signedOwner {
++		return false
++	}
 +	children, truncated, err := readDirCapped(subRoot, maxProducerLeafFiles)
 +	if err != nil || truncated {
 +		return false
@@ -19875,13 +20290,17 @@ index e69de29..2f6129a 100644
 +		return 0
 +	}
 +	stagingKey, hasStagingKey := readStagingKey(rootHandle)
++	if !hasStagingKey {
++		// Without this root's private .staging-key, no entry in .staging can prove producer ownership.
++		return 0
++	}
 +	now := time.Now()
 +	removed := 0
 +	for _, name := range names {
 +		if isStagingEntryActive(root, name) {
 +			continue
 +		}
-+		if stagingFilePattern.MatchString(name) {
++		if signedStagingFilePattern.MatchString(name) {
 +			fi, lerr := stagingRoot.Lstat(name)
 +			if lerr != nil || !fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
 +				continue
@@ -19889,18 +20308,12 @@ index e69de29..2f6129a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
-+			hasTag := signedStagingFilePattern.MatchString(name)
-+			signedOwner := hasTag && hasStagingKey && verifyStagingFileName(stagingKey, name)
-+			if hasTag && !signedOwner {
-+				// Signed-format name whose HMAC does not match this root's .staging-key
-+				// (e.g. from another receipt root) MUST NOT fall back to content-only deletion.
++			if !verifyStagingFileName(stagingKey, name) {
 +				continue
 +			}
 +			maxB := int64(maxReviewReceiptBytes)
 +			if strings.HasPrefix(name, "pending-marker-") {
 +				maxB = 4096
-+			} else if strings.HasPrefix(name, "pending-key-") {
-+				maxB = 1024
 +			}
 +			ch, ok := verifyStagingRegularFile(stagingRoot, name)
 +			if ok {
@@ -19909,15 +20322,13 @@ index e69de29..2f6129a 100644
 +				}
 +				continue
 +			}
-+			if signedOwner {
-+				raw, fDev, fIno, fHasID, okP := readPrivateRegularFileInSubdirAllowEmpty(stagingRoot, name, maxB)
-+				if okP && isTruncatedJSONObjectPrefix(raw) && removeVerifiedFileInSubdirMode(stagingRoot, name, fDev, fIno, fHasID, sha256Hex(string(raw)), maxB, true) {
-+					removed++
-+				}
++			raw, fDev, fIno, fHasID, okP := readPrivateRegularFileInSubdirAllowEmpty(stagingRoot, name, maxB)
++			if okP && isTruncatedJSONObjectPrefix(raw) && removeVerifiedFileInSubdirMode(stagingRoot, name, fDev, fIno, fHasID, sha256Hex(string(raw)), maxB, true) {
++				removed++
 +			}
 +			continue
 +		}
-+		if stagingDirPattern.MatchString(name) {
++		if signedStagingDirPattern.MatchString(name) {
 +			fi, lerr := stagingRoot.Lstat(name)
 +			if lerr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
 +				continue
@@ -19925,9 +20336,7 @@ index e69de29..2f6129a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
-+			hasTag := signedStagingDirPattern.MatchString(name)
-+			signedOwner := hasTag && hasStagingKey && verifyStagingDirName(stagingKey, "stage-dir", name)
-+			if hasTag && !signedOwner {
++			if !verifyStagingDirName(stagingKey, "stage-dir", name) {
 +				continue
 +			}
 +			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
@@ -19941,7 +20350,7 @@ index e69de29..2f6129a 100644
 +				continue
 +			}
 +			if len(children) == 0 {
-+				if signedOwner && removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
++				if removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
 +					removed++
 +				} else {
 +					_ = subRoot.Close()
@@ -19958,22 +20367,19 @@ index e69de29..2f6129a 100644
 +					_ = subRoot.Close()
 +					continue
 +				}
-+			} else if signedOwner {
++			} else {
 +				raw, pDev, pIno, pHasID, okP := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "producer.json", 4096)
 +				if !okP || !isTruncatedJSONObjectPrefix(raw) || !removeVerifiedFileInSubdirMode(subRoot, "producer.json", pDev, pIno, pHasID, sha256Hex(string(raw)), 4096, true) {
 +					_ = subRoot.Close()
 +					continue
 +				}
-+			} else {
-+				_ = subRoot.Close()
-+				continue
 +			}
 +			if removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID) {
 +				removed++
 +			}
 +			continue
 +		}
-+		if stageSealDirPattern.MatchString(name) {
++		if signedStageSealDirPattern.MatchString(name) {
 +			fi, lerr := stagingRoot.Lstat(name)
 +			if lerr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
 +				continue
@@ -19981,9 +20387,7 @@ index e69de29..2f6129a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
-+			hasTag := signedStageSealDirPattern.MatchString(name)
-+			signedOwner := hasTag && hasStagingKey && verifyStagingDirName(stagingKey, "stage-seal", name)
-+			if hasTag && !signedOwner {
++			if !verifyStagingDirName(stagingKey, "stage-seal", name) {
 +				continue
 +			}
 +			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
@@ -19991,14 +20395,14 @@ index e69de29..2f6129a 100644
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			if cleanOrphanStageSealDir(rootHandle, stagingRoot, name, subRoot, subDev, subIno, hasSubID, signedOwner) {
++			if cleanOrphanStageSealDir(rootHandle, stagingRoot, name, subRoot, subDev, subIno, hasSubID, true) {
 +				removed++
 +			} else {
 +				_ = subRoot.Close()
 +			}
 +			continue
 +		}
-+		if reclaimDirPattern.MatchString(name) {
++		if signedReclaimDirPattern.MatchString(name) {
 +			fi, lerr := stagingRoot.Lstat(name)
 +			if lerr != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(fi) {
 +				continue
@@ -20006,9 +20410,7 @@ index e69de29..2f6129a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
-+			hasTag := signedReclaimDirPattern.MatchString(name)
-+			signedOwner := hasTag && hasStagingKey && verifyStagingDirName(stagingKey, "reclaim", name)
-+			if hasTag && !signedOwner {
++			if !verifyStagingDirName(stagingKey, "reclaim", name) {
 +				continue
 +			}
 +			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
@@ -20016,7 +20418,7 @@ index e69de29..2f6129a 100644
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			if cleanOrphanReclaimDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID, signedOwner) {
++			if cleanOrphanReclaimDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID, true) {
 +				removed++
 +			} else {
 +				_ = subRoot.Close()
@@ -20374,10 +20776,19 @@ index e69de29..2f6129a 100644
 +	return limit
 +}
 +
-+func countRootBucketEntries(rootHandle *os.Root, reviewBucket bool) (int, []string, error) {
++var (
++	oversizedRootSweepMu   sync.Mutex
++	oversizedRootCursors   = make(map[string]*stagingSweepCursor)
++	maxOversizedRootChunks = 4
++)
++
++func countRootBucketEntriesStatus(rootHandle *os.Root, reviewBucket bool) (int, []string, bool, error) {
 +	entries, truncated, err := readDirCapped(rootHandle, effectiveRootDirScanLimit())
-+	if err != nil || truncated {
-+		return 0, nil, ErrUnavailable
++	if err != nil {
++		return 0, nil, false, ErrUnavailable
++	}
++	if truncated {
++		return 0, nil, true, ErrUnavailable
 +	}
 +	names := make([]string, 0, len(entries))
 +	for _, ent := range entries {
@@ -20390,7 +20801,135 @@ index e69de29..2f6129a 100644
 +		}
 +		names = append(names, name)
 +	}
-+	return len(names), names, nil
++	return len(names), names, false, nil
++}
++
++func countRootBucketEntries(rootHandle *os.Root, reviewBucket bool) (int, []string, error) {
++	count, names, _, err := countRootBucketEntriesStatus(rootHandle, reviewBucket)
++	return count, names, err
++}
++
++// reclaimOversizedRootBatch performs one strictly bounded, cursor-resumable migration reclaim pass
++// when a reused legacy <receipt-root> exceeds effectiveRootDirScanLimit (e.g. >4160 expired preflight
++// directories from an uncapped older version). Callers MUST NOT hold either bucket mutex when calling
++// this helper so it can safely reclaim expired verified directories from both buckets without risking
++// lock-order cycles or unbounded directory allocations.
++func reclaimOversizedRootBatch(rootHandle *os.Root, root string) int {
++	if rootHandle == nil {
++		return 0
++	}
++	var rootDev, rootIno uint64
++	var hasRootID bool
++	if rf, rerr := rootHandle.Open("."); rerr == nil {
++		if rfi, serr := rf.Stat(); serr == nil {
++			rootDev, rootIno, hasRootID = statDevIno(rfi)
++		}
++		_ = rf.Close()
++	}
++	oversizedRootSweepMu.Lock()
++	cur := oversizedRootCursors[root]
++	if cur != nil {
++		delete(oversizedRootCursors, root)
++	}
++	oversizedRootSweepMu.Unlock()
++
++	var df *os.File
++	if cur != nil && cur.dir != nil {
++		if !hasRootID || !cur.hasID || (cur.dev == rootDev && cur.ino == rootIno) {
++			df = cur.dir
++		} else {
++			_ = cur.dir.Close()
++		}
++	}
++	if df == nil {
++		opened, err := rootHandle.Open(".")
++		if err != nil {
++			return 0
++		}
++		df = opened
++	}
++	chunkSize := maxReclaimInspectPerCall
++	if chunkSize <= 0 {
++		chunkSize = 64
++	}
++	totalReclaimed := 0
++	keepCursor := false
++	for step := 0; step < maxOversizedRootChunks; step++ {
++		names, readErr := df.Readdirnames(chunkSize)
++		keepCursor = readErr == nil && len(names) == chunkSize
++		if len(names) == 0 {
++			break
++		}
++		pfNames := make([]string, 0, len(names))
++		revNames := make([]string, 0, len(names))
++		for _, name := range names {
++			if name == ".writer.lock" || name == ".staging" || name == ".staging-key" {
++				continue
++			}
++			if isReviewBucketName(name) {
++				revNames = append(revNames, name)
++			} else {
++				pfNames = append(pfNames, name)
++			}
++		}
++		remBudget := chunkSize - totalReclaimed
++		if remBudget <= 0 {
++			break
++		}
++		if len(pfNames) > 0 {
++			pfState := bucketStateFor(false)
++			pfState.mu.Lock()
++			r, _ := reclaimExpiredBucketEntries(rootHandle, root, pfNames, false, remBudget, 0, nil)
++			pfState.mu.Unlock()
++			totalReclaimed += r
++			remBudget -= r
++		}
++		if len(revNames) > 0 && remBudget > 0 {
++			revState := bucketStateFor(true)
++			revState.mu.Lock()
++			r, _ := reclaimExpiredBucketEntries(rootHandle, root, revNames, true, remBudget, 0, nil)
++			revState.mu.Unlock()
++			totalReclaimed += r
++		}
++		if totalReclaimed > 0 || !keepCursor {
++			break
++		}
++	}
++	if keepCursor {
++		var evictDir *os.File
++		oversizedRootSweepMu.Lock()
++		if _, exists := oversizedRootCursors[root]; exists {
++			evictDir = df
++		} else {
++			if len(oversizedRootCursors) >= maxStagingSweepHandles {
++				var oldestKey string
++				var oldestTime time.Time
++				for k, c := range oversizedRootCursors {
++					if oldestKey == "" || c.touched.Before(oldestTime) {
++						oldestKey, oldestTime = k, c.touched
++					}
++				}
++				if oldestKey != "" {
++					evictDir = oversizedRootCursors[oldestKey].dir
++					delete(oversizedRootCursors, oldestKey)
++				}
++			}
++			oversizedRootCursors[root] = &stagingSweepCursor{
++				dir:     df,
++				dev:     rootDev,
++				ino:     rootIno,
++				hasID:   hasRootID,
++				touched: time.Now(),
++			}
++		}
++		oversizedRootSweepMu.Unlock()
++		if evictDir != nil {
++			_ = evictDir.Close()
++		}
++	} else {
++		_ = df.Close()
++	}
++	return totalReclaimed
 +}
 +
 +// removeVerifiedLeafSubdir atomically quarantines a verified, expired bucket directory out of
@@ -20919,7 +21458,35 @@ index e69de29..2f6129a 100644
 +		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
 +	}
-+	existingCount, names, countErr := countRootBucketEntries(rootHandle, reviewBucket)
++	existingCount, names, truncated, countErr := countRootBucketEntriesStatus(rootHandle, reviewBucket)
++	if truncated {
++		bState.mu.Unlock()
++		if reclaimOversizedRootBatch(rootHandle, root) == 0 {
++			return nil, nil, false, 0, 0, false, "", ErrUnavailable
++		}
++		bState.mu.Lock()
++		_, statErr2 := rootHandle.Lstat(name)
++		if statErr2 == nil {
++			bState.mu.Unlock()
++			if !allowExisting {
++				return nil, nil, false, 0, 0, false, "", os.ErrExist
++			}
++			subRoot, subFI, checkErr := openVerifiedSubdir(rootHandle, name)
++			if checkErr != nil {
++				return nil, nil, false, 0, 0, false, "", ErrUnavailable
++			}
++			if err := syncPinnedDir(rootHandle, root); err != nil {
++				_ = subRoot.Close()
++				return nil, nil, false, 0, 0, false, "", err
++			}
++			return subRoot, subFI, false, 0, 0, false, "", nil
++		}
++		if !os.IsNotExist(statErr2) {
++			bState.mu.Unlock()
++			return nil, nil, false, 0, 0, false, "", ErrUnavailable
++		}
++		existingCount, names, _, countErr = countRootBucketEntriesStatus(rootHandle, reviewBucket)
++	}
 +	if countErr != nil {
 +		bState.mu.Unlock()
 +		return nil, nil, false, 0, 0, false, "", ErrUnavailable
@@ -22713,10 +23280,10 @@ index e69de29..2f6129a 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..52e1bd8 100644
+index e69de29..ef005de 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,17936 @@
+@@ -0,0 +1,18391 @@
 +package preflightreceipt
 +
 +import (
@@ -26102,7 +26669,7 @@ index e69de29..52e1bd8 100644
 +	// 5. mcp_approval_request clears unphased preamble in BOTH response.completed and output_item.done (Astra P1 #1, R9).
 +	lAppr1 := "review-d1111111-2222-4333-8444-555555555509"
 +	sAppr1 := "019d0000-0000-7000-8000-888888888109"
-+	sseApprCompleted := "data: " + `{"type":"response.completed","response":{"id":"resp_ap1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Requesting MCP approval..."}]},{"type":"mcp_approval_request","id":"mcpr_1"}]}}` + "\n\n"
++	sseApprCompleted := "data: " + `{"type":"response.completed","response":{"id":"resp_ap1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Requesting MCP approval..."}]},{"type":"mcp_approval_request","id":"mcpr_1","name":"run_check","server_label":"ci","arguments":"{}"}]}}` + "\n\n"
 +	if st := runSSE(t, lAppr1, sAppr1, sseApprCompleted); st != SealOK {
 +		t.Fatalf("preamble+mcp_approval_request completed seal = %v, want SealOK", st)
 +	}
@@ -26114,7 +26681,7 @@ index e69de29..52e1bd8 100644
 +	sAppr2 := "019d0000-0000-7000-8000-888888888110"
 +	sseApprStreamed := "data: " + `{"type":"response.created","response":{"id":"resp_ap2","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
 +		"data: " + `{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Waiting for approval"}]}}` + "\n\n" +
-+		"data: " + `{"type":"response.output_item.done","item":{"type":"mcp_approval_request","id":"mcpr_2"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","item":{"type":"mcp_approval_request","id":"mcpr_2","name":"run_check","server_label":"ci","arguments":"{}"}}` + "\n\n" +
 +		"data: " + `{"type":"response.completed","response":{"id":"resp_ap2","status":"completed","model":"gpt-6.2-sol","output":[]}}` + "\n\n"
 +	if st := runSSE(t, lAppr2, sAppr2, sseApprStreamed); st != SealOK {
 +		t.Fatalf("preamble+mcp_approval_request streamed seal = %v, want SealOK", st)
@@ -30033,26 +30600,55 @@ index e69de29..52e1bd8 100644
 +}
 +
 +func TestReviewReceiptOrphanStagingSweptOnLockAcquireRestart(t *testing.T) {
-+	// Sol P2 #3 + Astra P2 #4 (R41) + Astra P1 #2 (R42): after a proxy crash/restart (even with PID reuse),
-+	// freshly acquiring .writer.lock sweeps ONLY content-verified producer artifacts inside .staging
-+	// (pending-*, pending-marker-*, stage-dir-*, stage-seal-*, reclaim-*), while preserving any
-+	// foreign or non-producer file UNTOUCHED even if it shares a matching pending-* filename.
++	// Sol P2 #3 + Astra P2 #4 (R41) + Astra P1 #2 (R42) + Sol P2 #1 (R92): after a proxy crash/restart
++	// (even with PID reuse), freshly acquiring the root lock sweeps ONLY HMAC-authenticated and
++	// content-verified producer artifacts inside .staging, while preserving any unsigned file/dir
++	// (even with valid JSON), foreign file, or contradicting/mismatched directory UNTOUCHED.
 +	root := filepath.Join(t.TempDir(), "staging-restart-sweep")
 +	if err := ensurePrivateRoot(root); err != nil {
 +		t.Fatal(err)
 +	}
-+	stagingDir := filepath.Join(root, ".staging")
-+	if err := os.Mkdir(stagingDir, 0700); err != nil {
++	initLease, err := acquirePrivateRootLease(root)
++	if err != nil {
 +		t.Fatal(err)
 +	}
++	initStaging, err := ensureStagingDir(initLease.dir, root)
++	if err != nil {
++		initLease.Close()
++		t.Fatal(err)
++	}
++	key, ok := readStagingKey(initLease.dir)
++	_ = initStaging.Close()
++	initLease.Close()
++	if !ok {
++		t.Fatalf("readStagingKey failed")
++	}
++	// Evict rootLocks so the next acquirePrivateRootLease runs the cold-restart sweep.
++	rootLockMu.Lock()
++	if h := rootLocks[root]; h != nil {
++		delete(rootLocks, root)
++		h.refs--
++		if h.refs == 0 {
++			_ = h.file.Close()
++			if h.dir != nil {
++				_ = h.dir.Close()
++			}
++			if h.parentFD != nil {
++				_ = h.parentFD.Close()
++			}
++		}
++	}
++	rootLockMu.Unlock()
++
++	stagingDir := filepath.Join(root, ".staging")
 +	nowNS := time.Now().UnixNano()
 +	orphanLaunch := "review-c0000000-2222-4333-8444-555555555501"
 +	orphanSession := "019d0000-0000-7000-8000-cccccccccc01"
 +	rid := sha256Hex("resp_orphan_stage")
 +	outSHA := sha256Hex("VERDICT: PASS")
 +
-+	// 1. Valid producer staging artifacts -> MUST be reclaimed on fresh lock acquire.
-+	orphanPendingRec := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1-abcdef0123456781", os.Getpid()))
++	// 1. HMAC-signed valid producer staging artifacts -> MUST be reclaimed on fresh lock acquire.
++	orphanPendingRec := filepath.Join(stagingDir, signStagingFileName(key, fmt.Sprintf("pending-%d-1-abcdef0123456781", os.Getpid())))
 +	recBytes, _ := json.Marshal(ReviewReceipt{
 +		Schema: ReviewSchema, Launch: orphanLaunch, Session: orphanSession,
 +		Started: nowNS, Finished: nowNS, SealedAt: 0, Complete: true, Sealed: false, Tainted: false,
@@ -30062,19 +30658,19 @@ index e69de29..52e1bd8 100644
 +	if err := os.WriteFile(orphanPendingRec, recBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	orphanMarkerFile := filepath.Join(stagingDir, fmt.Sprintf("pending-marker-%d-2-abcdef0123456782", os.Getpid()))
++	orphanMarkerFile := filepath.Join(stagingDir, signStagingFileName(key, fmt.Sprintf("pending-marker-%d-2-abcdef0123456782", os.Getpid())))
 +	mBytes, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: orphanLaunch, Started: nowNS})
 +	if err := os.WriteFile(orphanMarkerFile, mBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	orphanDirMarked := filepath.Join(stagingDir, fmt.Sprintf("stage-dir-%d-3-abcdef0123456783", os.Getpid()))
++	orphanDirMarked := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("stage-dir-%d-3-abcdef0123456783", os.Getpid())))
 +	if err := os.Mkdir(orphanDirMarked, 0700); err != nil {
 +		t.Fatal(err)
 +	}
 +	if err := os.WriteFile(filepath.Join(orphanDirMarked, "producer.json"), mBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	orphanSealDir := filepath.Join(stagingDir, fmt.Sprintf("stage-seal-%d-4-abcdef0123456784", os.Getpid()))
++	orphanSealDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("stage-seal-%d-4-abcdef0123456784", os.Getpid())))
 +	if err := os.Mkdir(orphanSealDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30094,7 +30690,7 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	// Mid-reclaim interrupted quarantine dir (seal.sha256 already removed, sealed receipt + marker left).
-+	orphanReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-5-abcdef0123456785", os.Getpid()))
++	orphanReclaimDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("reclaim-%d-5-abcdef0123456785", os.Getpid())))
 +	if err := os.Mkdir(orphanReclaimDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30105,8 +30701,8 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +
-+	// 2. Same-UID non-producer files AND contradicting stage-seal-* (Astra P2 #4 R43) -> MUST be preserved!
-+	nonProducerMatchingName := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-9-abcdef0123456789", os.Getpid()))
++	// 2. Same-UID non-producer files AND signed contradicting/mismatched dirs -> MUST be preserved!
++	nonProducerMatchingName := filepath.Join(stagingDir, signStagingFileName(key, fmt.Sprintf("pending-%d-9-abcdef0123456789", os.Getpid())))
 +	nonProducerLegacyName := filepath.Join(stagingDir, fmt.Sprintf("pending-%d-1", os.Getpid()))
 +	foreignStagingFile := filepath.Join(stagingDir, "keep-foreign.txt")
 +	if err := os.WriteFile(nonProducerMatchingName, []byte("same-uid-user-data"), 0600); err != nil {
@@ -30119,7 +30715,7 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	// Contradicting stage-seal-*: seal.pending.json disagrees with seal.sha256 even though seal.sha256
-+	// matches <root>/<orphanLaunch>/receipt.json -> MUST NOT be deleted.
++	// matches <root>/<orphanLaunch>/receipt.json -> MUST NOT be deleted even when HMAC-signed.
 +	liveLaunchDir := filepath.Join(root, orphanLaunch)
 +	if err := os.Mkdir(liveLaunchDir, 0700); err != nil {
 +		t.Fatal(err)
@@ -30127,7 +30723,7 @@ index e69de29..52e1bd8 100644
 +	if err := os.WriteFile(filepath.Join(liveLaunchDir, "receipt.json"), sealedBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	contradictSealDir := filepath.Join(stagingDir, fmt.Sprintf("stage-seal-%d-8-abcdef0123456788", os.Getpid()))
++	contradictSealDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("stage-seal-%d-8-abcdef0123456788", os.Getpid())))
 +	if err := os.Mkdir(contradictSealDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30147,9 +30743,9 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	// Sol P1 #1 + Astra P2 #2 (R44): stage-seal-* with mismatched launch between producer.json and seal.pending.json
-+	// MUST be preserved regardless of ReadDir(-1) enumeration order.
++	// MUST be preserved regardless of ReadDir(-1) enumeration order, even when HMAC-signed.
 +	otherLaunch := "review-c0000000-2222-4333-8444-555555555599"
-+	mismatchStageSealDir := filepath.Join(stagingDir, fmt.Sprintf("stage-seal-%d-7-abcdef0123456787", os.Getpid()))
++	mismatchStageSealDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("stage-seal-%d-7-abcdef0123456787", os.Getpid())))
 +	if err := os.Mkdir(mismatchStageSealDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30164,8 +30760,8 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	// Sol P1 #1 + Astra P2 #3 (R44): reclaim-* with mismatched owner between producer.json and receipt.json,
-+	// OR contradicting seal.pending.json + receipt.json, MUST be preserved untouched.
-+	mismatchReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-6-abcdef0123456786", os.Getpid()))
++	// OR contradicting seal.pending.json + receipt.json, MUST be preserved untouched even when HMAC-signed.
++	mismatchReclaimDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("reclaim-%d-6-abcdef0123456786", os.Getpid())))
 +	if err := os.Mkdir(mismatchReclaimDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30175,7 +30771,7 @@ index e69de29..52e1bd8 100644
 +	if err := os.WriteFile(filepath.Join(mismatchReclaimDir, "receipt.json"), sealedBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	contradictReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-5-abcdef0123456795", os.Getpid()))
++	contradictReclaimDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("reclaim-%d-5-abcdef0123456795", os.Getpid())))
 +	if err := os.Mkdir(contradictReclaimDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30192,16 +30788,15 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	// Astra P2 #4 (R45): reclaim-* containing seal.pending.json without BOTH producer.json AND
-+	// matching unsealed receipt.json is unreachable from inspectProducerReceiptSubdir + safe deletion order
-+	// (seal.sha256 -> seal.pending.json -> receipt.json -> producer.json) and MUST be preserved untouched.
-+	pendingOnlyReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-4-abcdef0123456794", os.Getpid()))
++	// matching unsealed receipt.json MUST be preserved untouched even when HMAC-signed.
++	pendingOnlyReclaimDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("reclaim-%d-4-abcdef0123456794", os.Getpid())))
 +	if err := os.Mkdir(pendingOnlyReclaimDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
 +	if err := os.WriteFile(filepath.Join(pendingOnlyReclaimDir, "seal.pending.json"), sealedBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	pendingMarkerOnlyReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-3-abcdef0123456793", os.Getpid()))
++	pendingMarkerOnlyReclaimDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("reclaim-%d-3-abcdef0123456793", os.Getpid())))
 +	if err := os.Mkdir(pendingMarkerOnlyReclaimDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30211,7 +30806,7 @@ index e69de29..52e1bd8 100644
 +	if err := os.WriteFile(filepath.Join(pendingMarkerOnlyReclaimDir, "seal.pending.json"), sealedBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	pendingReceiptNoMarkerReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-2-abcdef0123456792", os.Getpid()))
++	pendingReceiptNoMarkerReclaimDir := filepath.Join(stagingDir, signStagingDirName(key, fmt.Sprintf("reclaim-%d-2-abcdef0123456792", os.Getpid())))
 +	if err := os.Mkdir(pendingReceiptNoMarkerReclaimDir, 0700); err != nil {
 +		t.Fatal(err)
 +	}
@@ -30221,7 +30816,7 @@ index e69de29..52e1bd8 100644
 +	if err := os.WriteFile(filepath.Join(pendingReceiptNoMarkerReclaimDir, "seal.pending.json"), sealedBytes, 0600); err != nil {
 +		t.Fatal(err)
 +	}
-+	// Sol P2 #1 + Astra P2 #3 (R47): an empty private directory matching reclaim-* has zero
++	// Sol P2 #1 + Astra P2 #3 (R47): an unsigned empty private directory matching reclaim-* has zero
 +	// producer ownership evidence and MUST be preserved untouched on restart sweep.
 +	emptyReclaimDir := filepath.Join(stagingDir, fmt.Sprintf("reclaim-%d-1-abcdef0123456791", os.Getpid()))
 +	if err := os.Mkdir(emptyReclaimDir, 0700); err != nil {
@@ -33892,14 +34487,18 @@ index e69de29..52e1bd8 100644
 +	if err != nil {
 +		t.Fatal(err)
 +	}
++	key, okKey := readStagingKey(lease.dir)
 +	_ = stagingRoot.Close()
++	if !okKey {
++		t.Fatalf("readStagingKey failed")
++	}
 +
 +	ancient := time.Now().Add(-2 * time.Hour)
 +	stagingPath := filepath.Join(root, ".staging")
 +	// Mix 4 fresh (non-deleted!) staging files and 4 aged orphan staging files so bounded
 +	// Readdirnames(3) MUST resume via its open directory cursor to reach every aged orphan.
 +	for i := 0; i < 8; i++ {
-+		name := fmt.Sprintf("pending-1-%d-%016x", i+1, i+1)
++		name := signStagingFileName(key, fmt.Sprintf("pending-1-%d-%016x", i+1, i+1))
 +		p := filepath.Join(stagingPath, name)
 +		ts := ancient
 +		if i < 4 {
@@ -33928,9 +34527,17 @@ index e69de29..52e1bd8 100644
 +	if totalRemoved != 4 {
 +		t.Fatalf("bounded cursor sweep removed %d aged staging files, want 4", totalRemoved)
 +	}
-+	// Run one more call if needed to ensure EOF closes the cursor handle cleanly.
-+	_ = sweepOrphanStagingInRoot(lease.dir, root, false)
-+	_ = sweepOrphanStagingInRoot(lease.dir, root, false)
++	// Drain the active pass to EOF (bounded by remaining entries / budget) so the cursor closes cleanly
++	// regardless of filesystem directory enumeration order.
++	for step := 0; step < 3; step++ {
++		stagingSweepMu.Lock()
++		_, stillOpen := stagingSweepCursors[root]
++		stagingSweepMu.Unlock()
++		if !stillOpen {
++			break
++		}
++		_ = sweepOrphanStagingInRoot(lease.dir, root, false)
++	}
 +	rem, err := os.ReadDir(stagingPath)
 +	if err != nil {
 +		t.Fatal(err)
@@ -34479,7 +35086,11 @@ index e69de29..52e1bd8 100644
 +	pendingPayload := []byte(`{"schema":"cliproxy-review-v1","launch":"` + launch + `","sealed":true}`)
 +	expectedSHA := sha256Hex(string(pendingPayload))
 +
-+	stageSealName := "stage-seal-99999-1-0000000000000001"
++	stagingKey, okKey := readStagingKey(lease.dir)
++	if !okKey {
++		t.Fatalf("readStagingKey failed")
++	}
++	stageSealName := signStagingDirName(stagingKey, "stage-seal-99999-1-0000000000000001")
 +	stageSealPath := filepath.Join(root, ".staging", stageSealName)
 +	if err := os.Mkdir(stageSealPath, 0700); err != nil {
 +		t.Fatal(err)
@@ -35823,7 +36434,7 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	sDev, sIno, hasSID := statDevIno(subRevFI)
-+	if cleanOrphanReclaimDir(stagingRoot, revReclaimName, subRev, sDev, sIno, hasSID, false) {
++	if cleanOrphanReclaimDir(stagingRoot, revReclaimName, subRev, sDev, sIno, hasSID, true) {
 +		t.Fatalf("cleanOrphanReclaimDir deleted formal review reclaim dir missing producer.json")
 +	}
 +	_ = subRev.Close()
@@ -35849,7 +36460,7 @@ index e69de29..52e1bd8 100644
 +		t.Fatal(err)
 +	}
 +	pDev, pIno, hasPID := statDevIno(subPreFI)
-+	if !cleanOrphanReclaimDir(stagingRoot, preReclaimName, subPre, pDev, pIno, hasPID, false) {
++	if !cleanOrphanReclaimDir(stagingRoot, preReclaimName, subPre, pDev, pIno, hasPID, true) {
 +		t.Fatalf("cleanOrphanReclaimDir failed to clean valid legacy preflight reclaim dir without producer.json")
 +	}
 +	_ = subPre.Close()
@@ -36198,7 +36809,7 @@ index e69de29..52e1bd8 100644
 +		return sr, dev, ino, hasID
 +	}
 +	sr1, dev1, ino1, ok1 := openReclaim(reclaimMismatch)
-+	if cleanOrphanReclaimDir(stagingRoot, reclaimMismatch, sr1, dev1, ino1, ok1, false) {
++	if cleanOrphanReclaimDir(stagingRoot, reclaimMismatch, sr1, dev1, ino1, ok1, true) {
 +		t.Fatalf("cleanOrphanReclaimDir deleted legacy preflight reclaim dir with mismatched started_ns")
 +	}
 +	_ = sr1.Close()
@@ -36207,12 +36818,12 @@ index e69de29..52e1bd8 100644
 +	}
 +
 +	sr2, dev2, ino2, ok2 := openReclaim(reclaimMatch)
-+	if !cleanOrphanReclaimDir(stagingRoot, reclaimMatch, sr2, dev2, ino2, ok2, false) {
++	if !cleanOrphanReclaimDir(stagingRoot, reclaimMatch, sr2, dev2, ino2, ok2, true) {
 +		_ = sr2.Close()
 +		t.Fatalf("cleanOrphanReclaimDir failed on matching legacy preflight reclaim dir")
 +	}
 +	sr3, dev3, ino3, ok3 := openReclaim(reclaimReceiptOnly)
-+	if !cleanOrphanReclaimDir(stagingRoot, reclaimReceiptOnly, sr3, dev3, ino3, ok3, false) {
++	if !cleanOrphanReclaimDir(stagingRoot, reclaimReceiptOnly, sr3, dev3, ino3, ok3, true) {
 +		_ = sr3.Close()
 +		t.Fatalf("cleanOrphanReclaimDir failed on receipt-only legacy preflight reclaim dir")
 +	}
@@ -40650,6 +41261,417 @@ index e69de29..52e1bd8 100644
 +	for _, preserved := range []string{badStageSealPath, otherSignedFilePath, otherSignedDirPath} {
 +		if _, err := os.Lstat(preserved); err != nil {
 +			t.Fatalf("mismatched or wrong-root-HMAC staging entry %s was deleted instead of preserved: %v", preserved, err)
++		}
++	}
++}
++
++func TestR92UnknownToolTypesRejectedStrictPrefixAndUnsignedStagingPreserved(t *testing.T) {
++	// 1. Astra P1 (PR #2280 R92): unvalidated/unknown tool item types (e.g. local_shell_call,
++	//    shell_call, computer_call, apply_patch_call) AND malformed mcp_approval_request MUST be
++	//    rejected in BOTH response.completed and response.output_item.done, even when followed by
++	//    a valid final_answer message.
++	rootTool := filepath.Join(t.TempDir(), "r92-unknown-tool")
++	runSSE := func(launch, sess, payload string) SealStatus {
++		t.Helper()
++		ctx, c, err := BeginReview(context.Background(), rootTool, launch, sess, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview(%s): %v", launch, err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("Start(%s): %v", launch, err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("Do(%s): %v", launch, err)
++		}
++		_, _ = io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, []byte(payload))
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		st, _ := SealReviewWithDigest(rootTool, launch, sess)
++		return st
++	}
++	badItems := []struct {
++		name string
++		item string
++	}{
++		{"local_shell_call_empty", `{"type":"local_shell_call","id":"lsc_1"}`},
++		{"shell_call_empty", `{"type":"shell_call","id":"sc_1"}`},
++		{"computer_call_empty", `{"type":"computer_call","id":"cc_1"}`},
++		{"apply_patch_call_empty", `{"type":"apply_patch_call","id":"apc_1"}`},
++		{"mcp_approval_missing_fields", `{"type":"mcp_approval_request","id":"mcpr_bad"}`},
++		{"unknown_type", `{"type":"unvalidated_future_tool","id":"uft_1"}`},
++	}
++	for i, tc := range badItems {
++		lComp := fmt.Sprintf("review-e9010101-2222-4333-8444-5555555501%02d", i)
++		sComp := fmt.Sprintf("019d0000-0000-7000-8000-00000000e1%02d", i)
++		sseComp := "event: response.completed\ndata: " +
++			fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_badc_%d","status":"completed","model":"gpt-6.2-sol","output":[`, i) +
++			tc.item + `,{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++		if st := runSSE(lComp, sComp, sseComp); st != SealRejected {
++			t.Fatalf("case %s (completed): SealReviewWithDigest = %v, want SealRejected", tc.name, st)
++		}
++
++		lDone := fmt.Sprintf("review-e9010101-2222-4333-8444-5555555502%02d", i)
++		sDone := fmt.Sprintf("019d0000-0000-7000-8000-00000000e2%02d", i)
++		sseDone := "event: response.created\ndata: " + fmt.Sprintf(`{"type":"response.created","response":{"id":"resp_badd_%d","status":"in_progress","model":"gpt-6.2-sol"}}`, i) + "\n\n" +
++			"event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","output_index":0,"item":` + tc.item + `}` + "\n\n" +
++			"event: response.output_item.done\ndata: " + `{"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++			"event: response.completed\ndata: " + fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_badd_%d","status":"completed","model":"gpt-6.2-sol","output":[]}}`, i) + "\n\n"
++		if st := runSSE(lDone, sDone, sseDone); st != SealRejected {
++			t.Fatalf("case %s (output_item.done): SealReviewWithDigest = %v, want SealRejected", tc.name, st)
++		}
++	}
++	// Reasoning non-tool item + final_answer still succeeds.
++	sseReasoning := "event: response.completed\ndata: " +
++		`{"type":"response.completed","response":{"id":"resp_reason_ok","status":"completed","model":"gpt-6.2-sol","output":[{"type":"reasoning","id":"rs_1"},{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE("review-e9010101-2222-4333-8444-555555550300", "019d0000-0000-7000-8000-00000000e300", sseReasoning); st != SealOK {
++		t.Fatalf("reasoning + final_answer: SealReviewWithDigest = %v, want SealOK", st)
++	}
++
++	// 2. Astra P2 #3 (PR #2280 R92): strict RFC 8259 isTruncatedJSONObjectPrefix rejects mid-stream
++	//    syntax errors and complete/trailing JSON while accepting genuine unexpected-EOF prefixes.
++	validTruncs := [][]byte{
++		nil,
++		[]byte(`{`),
++		[]byte(`{"schema":"cliproxy`),
++		[]byte(`{"schema":"cliproxy-review-v1","started_ns":1795`),
++		[]byte(`{"a":true,"b":fa`),
++		[]byte(`{"a":[1,2,nul`),
++		[]byte(`{"a":"hello\`),
++		[]byte(`{"a":"\u00a`),
++		[]byte(`{"a":1.`),
++		[]byte(`{"a":1e+`),
++		[]byte(`{"a":-`),
++		append([]byte(`{"a":"`), 0xE4, 0xB8), // first 2 bytes of UTF-8 '中'
++	}
++	for _, raw := range validTruncs {
++		if !isTruncatedJSONObjectPrefix(raw) {
++			t.Fatalf("isTruncatedJSONObjectPrefix(%q) = false, want true", raw)
++		}
++	}
++	invalidNotTruncs := [][]byte{
++		[]byte(`{"a":1}`),           // complete JSON
++		[]byte(`{"a":1}junk`),       // trailing garbage
++		[]byte(`{"a": ]`),           // mid-stream syntax error
++		[]byte(`{"a" 1`),            // missing colon
++		[]byte(`{"a":1,,`),          // double comma
++		[]byte(`{1:2}`),             // non-string key
++		[]byte(`{"a":01`),           // leading zero number
++		[]byte(`{"a":1.2.3`),        // double dot
++		[]byte(`{"a":trux`),         // bad literal
++		[]byte(`{"a":"\q`),          // illegal escape
++		[]byte(`{"a":"\u00zz`),      // non-hex unicode escape
++		[]byte("{\"a\":\"\x01"),     // unescaped control char
++		append([]byte(`{"a":"`), 0xFF, 'a'),
++		[]byte(`not-json`),
++		[]byte(`[1,2`),
++	}
++	for _, raw := range invalidNotTruncs {
++		if isTruncatedJSONObjectPrefix(raw) {
++			t.Fatalf("isTruncatedJSONObjectPrefix(%q) = true, want false", raw)
++		}
++	}
++
++	// 3. Sol P2 #1 + Astra P2 #3 end-to-end restart sweep:
++	//    - Unsigned pending-*, pending-marker-*, stage-dir-*, stage-seal-*, reclaim-* with VALID JSON -> PRESERVED!
++	//    - Signed pending-* / stage-dir-* with mid-stream syntax error (`{"a": ]`) -> PRESERVED!
++	//    - Signed pending-* with genuine EOF truncation (`{"schema":"cliproxy`) -> RECLAIMED!
++	rootSweep := filepath.Join(t.TempDir(), "r92-unsigned-and-corrupt")
++	if err := ensurePrivateRoot(rootSweep); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(rootSweep)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stagingRoot, err := ensureStagingDir(lease.dir, rootSweep)
++	if err != nil {
++		lease.Close()
++		t.Fatal(err)
++	}
++	key, ok := readStagingKey(lease.dir)
++	_ = stagingRoot.Close()
++	lease.Close()
++	if !ok {
++		t.Fatalf("readStagingKey failed")
++	}
++	stagingPath := filepath.Join(rootSweep, ".staging")
++	nowNS := time.Now().UnixNano()
++	lID := "review-e9020202-2222-4333-8444-555555555501"
++	sID := "019d0000-0000-7000-8000-00000000e902"
++	recRaw, _ := json.Marshal(ReviewReceipt{
++		Schema: ReviewSchema, Launch: lID, Session: sID,
++		Started: nowNS, Finished: nowNS, SealedAt: nowNS, Complete: true, Sealed: true,
++		Requests: 1, Routes: []string{"codex:gpt-6.2-sol@chatgpt.com"},
++		ResponseIDSHAs: []string{sha256Hex("r1")}, LastResponseID: sha256Hex("r1"), LastOutputSHA256: sha256Hex("ok"),
++	})
++	mRaw, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: lID, Started: nowNS})
++
++	uPending := filepath.Join(stagingPath, fmt.Sprintf("pending-%d-1-1111111111111111", os.Getpid()))
++	uMarker := filepath.Join(stagingPath, fmt.Sprintf("pending-marker-%d-2-2222222222222222", os.Getpid()))
++	uStageDir := filepath.Join(stagingPath, fmt.Sprintf("stage-dir-%d-3-3333333333333333", os.Getpid()))
++	uStageSeal := filepath.Join(stagingPath, fmt.Sprintf("stage-seal-%d-4-4444444444444444", os.Getpid()))
++	uReclaim := filepath.Join(stagingPath, fmt.Sprintf("reclaim-%d-5-5555555555555555", os.Getpid()))
++	if err := os.WriteFile(uPending, recRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(uMarker, mRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(uStageDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(uStageDir, "producer.json"), mRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(uStageSeal, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(uStageSeal, "producer.json"), mRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(uStageSeal, "seal.pending.json"), recRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(uStageSeal, "seal.sha256"), []byte(sha256Hex(string(recRaw))), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(uReclaim, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(uReclaim, "producer.json"), mRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(uReclaim, "receipt.json"), recRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	signedCorruptFile := filepath.Join(stagingPath, signStagingFileName(key, fmt.Sprintf("pending-%d-6-6666666666666666", os.Getpid())))
++	if err := os.WriteFile(signedCorruptFile, []byte(`{"schema": ]`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	signedCorruptDir := filepath.Join(stagingPath, signStagingDirName(key, fmt.Sprintf("stage-dir-%d-7-7777777777777777", os.Getpid())))
++	if err := os.Mkdir(signedCorruptDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(signedCorruptDir, "producer.json"), []byte(`{"schema" "bad"`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	signedTruncFile := filepath.Join(stagingPath, signStagingFileName(key, fmt.Sprintf("pending-%d-8-8888888888888888", os.Getpid())))
++	if err := os.WriteFile(signedTruncFile, []byte(`{"schema":"cliproxy`), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	evictRootLock := func(r string) {
++		rootLockMu.Lock()
++		if h := rootLocks[r]; h != nil {
++			delete(rootLocks, r)
++			h.refs--
++			if h.refs == 0 {
++				_ = h.file.Close()
++				if h.dir != nil {
++					_ = h.dir.Close()
++				}
++				if h.parentFD != nil {
++					_ = h.parentFD.Close()
++				}
++			}
++		}
++		rootLockMu.Unlock()
++	}
++	evictRootLock(rootSweep)
++	lease2, err := acquirePrivateRootLease(rootSweep)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lease2.Close()
++
++	if _, err := os.Lstat(signedTruncFile); !os.IsNotExist(err) {
++		t.Fatalf("signed truncated pending file survived restart sweep: %v", err)
++	}
++	for _, preserved := range []string{uPending, uMarker, uStageDir, uStageSeal, uReclaim, signedCorruptFile, signedCorruptDir} {
++		if _, err := os.Lstat(preserved); err != nil {
++			t.Fatalf("unsigned or mid-syntax-corrupt staging entry %s was deleted instead of preserved: %v", preserved, err)
++		}
++	}
++}
++
++func TestR92StagingKeyInitCrashRecoveryAndOversizedLegacyRootDrain(t *testing.T) {
++	// 1. Sol P2 #2 (PR #2280 R92): interrupted .staging-key init leaves at most single fixed slot
++	//    .staging/staging-key.tmp; 0-byte, partial wire prefix, and complete valid stagingKeyFile
++	//    are ALL cleanly recovered even at maxStagingEntries=1, while foreign/corrupt staging-key.tmp
++	//    fails closed and is preserved untouched.
++	oldMaxStaging := maxStagingEntries
++	maxStagingEntries = 1
++	defer func() { maxStagingEntries = oldMaxStaging }()
++
++	recoverableCases := []struct {
++		name string
++		raw  []byte
++	}{
++		{"empty", nil},
++		{"partial_schema", []byte(`{"schema":"cliproxy-staging`)},
++		{"partial_hex", []byte(`{"schema":"cliproxy-staging-key-v1","key":"0123abcd`)},
++		{"complete_valid", []byte(`{"schema":"cliproxy-staging-key-v1","key":"` + strings.Repeat("ab", 32) + `"}`)},
++	}
++	for _, tc := range recoverableCases {
++		r := filepath.Join(t.TempDir(), "key-init-"+tc.name)
++		if err := ensurePrivateRoot(r); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Mkdir(filepath.Join(r, ".staging"), 0700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(filepath.Join(r, ".staging", stagingKeyTempName), tc.raw, 0600); err != nil {
++			t.Fatal(err)
++		}
++		lease, err := acquirePrivateRootLease(r)
++		if err != nil {
++			t.Fatalf("case %s acquirePrivateRootLease: %v", tc.name, err)
++		}
++		st, err := ensureStagingDir(lease.dir, r)
++		if err != nil {
++			lease.Close()
++			t.Fatalf("case %s ensureStagingDir failed on interrupted staging-key.tmp: %v", tc.name, err)
++		}
++		key, ok := readStagingKey(lease.dir)
++		_ = st.Close()
++		lease.Close()
++		if !ok || len(key) != 32 {
++			t.Fatalf("case %s .staging-key not published cleanly", tc.name)
++		}
++		if _, err := os.Lstat(filepath.Join(r, ".staging", stagingKeyTempName)); !os.IsNotExist(err) {
++			t.Fatalf("case %s staging-key.tmp was not cleaned/renamed: %v", tc.name, err)
++		}
++	}
++
++	unrecoverableCases := []struct {
++		name string
++		raw  []byte
++	}{
++		{"bad_hex", []byte(`{"schema":"cliproxy-staging-key-v1","key":"ZZZZ`)},
++		{"foreign_json", []byte(`{"other":1}`)},
++		{"plain_text", []byte(`user-notes`)},
++	}
++	for _, tc := range unrecoverableCases {
++		r := filepath.Join(t.TempDir(), "key-init-bad-"+tc.name)
++		if err := ensurePrivateRoot(r); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Mkdir(filepath.Join(r, ".staging"), 0700); err != nil {
++			t.Fatal(err)
++		}
++		tmpPath := filepath.Join(r, ".staging", stagingKeyTempName)
++		if err := os.WriteFile(tmpPath, tc.raw, 0600); err != nil {
++			t.Fatal(err)
++		}
++		lease, err := acquirePrivateRootLease(r)
++		if err != nil {
++			t.Fatal(err)
++		}
++		st, err := ensureStagingDir(lease.dir, r)
++		if err == nil {
++			_ = st.Close()
++			lease.Close()
++			t.Fatalf("case %s unexpectedly succeeded with corrupt/foreign staging-key.tmp", tc.name)
++		}
++		lease.Close()
++		if got, rerr := os.ReadFile(tmpPath); rerr != nil || !bytes.Equal(got, tc.raw) {
++			t.Fatalf("case %s corrupt/foreign staging-key.tmp was modified/deleted: err=%v got=%q", tc.name, rerr, got)
++		}
++	}
++	maxStagingEntries = oldMaxStaging
++
++	// 2. Astra P2 #2 (PR #2280 R92): oversized legacy <receipt-root> exceeding effectiveRootDirScanLimit
++	//    with expired valid preflight directories MUST perform bounded migration reclaim so BOTH
++	//    an empty formal review bucket AND new preflight reservations recover cleanly, whereas an
++	//    oversized root filled with foreign directories fails closed while preserving them all.
++	oldRootLimit := maxRootDirScanEntries
++	oldPfCap := maxPreflightDiskEntries
++	oldRevCap := maxReviewDiskEntries
++	maxRootDirScanEntries = 6
++	maxPreflightDiskEntries = 4
++	maxReviewDiskEntries = 4
++	defer func() {
++		maxRootDirScanEntries = oldRootLimit
++		maxPreflightDiskEntries = oldPfCap
++		maxReviewDiskEntries = oldRevCap
++	}()
++
++	rootOver := filepath.Join(t.TempDir(), "r92-oversized-legacy")
++	if err := ensurePrivateRoot(rootOver); err != nil {
++		t.Fatal(err)
++	}
++	ancient := time.Now().Add(-2 * time.Hour)
++	// Create 80 expired legacy preflight dirs (> maxReclaimInspectPerCall=64 and > maxRootDirScanEntries=6)
++	// so recovery exercises bounded multi-pass cursor drain across retries.
++	for i := 0; i < 80; i++ {
++		sess := fmt.Sprintf("preflight-e9030303-2222-4333-8444-55555555%04d", i)
++		dir := filepath.Join(rootOver, sess)
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++		raw, _ := json.Marshal(Receipt{
++			Schema: Schema, Session: sess, Started: ancient.UnixNano(), Finished: ancient.UnixNano(),
++			Complete: true, Routes: []string{"claude@api.anthropic.com"},
++		})
++		if err := os.WriteFile(filepath.Join(dir, "receipt.json"), raw, 0600); err != nil {
++			t.Fatal(err)
++		}
++		_ = os.Chtimes(filepath.Join(dir, "receipt.json"), ancient, ancient)
++		_ = os.Chtimes(dir, ancient, ancient)
++	}
++
++	// Empty formal review bucket recovers via bounded incremental reclaim (max 64 per call -> succeeds within 3 calls).
++	revLaunch := "review-e9030303-2222-4333-8444-555555559901"
++	var res *ReviewReservation
++	var rerr error
++	for attempt := 0; attempt < 4; attempt++ {
++		res, rerr = ReserveReview(rootOver, revLaunch)
++		if rerr == nil {
++			break
++		}
++	}
++	if rerr != nil || res == nil {
++		t.Fatalf("ReserveReview on oversized legacy preflight root failed after bounded drain retries: %v", rerr)
++	}
++	res.Release()
++
++	// New preflight session also succeeds after draining below preflight cap.
++	pfSess := "preflight-e9030303-2222-4333-8444-555555559902"
++	if err := reservePrivateDir(filepath.Join(rootOver, pfSess), false); err != nil {
++		t.Fatalf("preflight reservePrivateDir after legacy drain failed: %v", err)
++	}
++
++	// Oversized root filled with foreign dirs MUST fail closed and preserve every foreign dir untouched.
++	rootForeign := filepath.Join(t.TempDir(), "r92-oversized-foreign")
++	if err := ensurePrivateRoot(rootForeign); err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 8; i++ {
++		d := filepath.Join(rootForeign, fmt.Sprintf("foreign-keep-%02d", i))
++		if err := os.Mkdir(d, 0700); err != nil {
++			t.Fatal(err)
++		}
++		_ = os.Chtimes(d, ancient, ancient)
++	}
++	if resF, ferr := ReserveReview(rootForeign, "review-e9030303-2222-4333-8444-555555559903"); !errors.Is(ferr, ErrUnavailable) || resF != nil {
++		if resF != nil {
++			resF.Release()
++		}
++		t.Fatalf("ReserveReview on oversized foreign root = (%v, %v), want (nil, ErrUnavailable)", resF, ferr)
++	}
++	for i := 0; i < 8; i++ {
++		if _, serr := os.Stat(filepath.Join(rootForeign, fmt.Sprintf("foreign-keep-%02d", i))); serr != nil {
++			t.Fatalf("foreign dir %02d was deleted from oversized root: %v", i, serr)
 +		}
 +	}
 +}
