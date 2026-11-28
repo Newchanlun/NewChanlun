@@ -15,7 +15,7 @@ NewChanlun 是以缠论为核心的量化交易系统。四大支柱与里程碑
 ## 合入与人工确认
 
 - 普通 T/P 决策与 SPEC 均经起草、非作者独审 PASS 后由代理裁定并记账。BLOCK 返修，缺有效独审不放行，不设人工批准门。
-- 合入 main 按 [graph-engineering.md](.sandcastle/docs/graph-engineering.md)「main 的合入」分阶段执行：切换前，获准人工入口与 `executor serve` 的过渡期 `review_sweep` 按同一规程核验。PR 须追平 main（strict），管理员不得绕过分支保护；同一 PR 的精确 `head` 上三项均须为原始 `success`。`deepagents/review` 按 R09 定序后核审查专用 App（`5664795`），凭正式登记及发布原件核对当前 PR 与完整 `(base, head)`；`ci-ok` 和 `DevSkim` 须绑定 GitHub Actions App（`15368`）、预期工作流、本仓目标 PR 的 `pull_request` 事件及精确 `head`，且须 `status=completed`，拒绝 `skipped`、`neutral`。GitHub 服务端 UTC 秒须严格晚于正式审查状态的创建／更新秒和两项 CI 的适用完成秒。两种入口的合入请求均须绑定核验过的完整 `head`（REST `sha=<head>`；人工可用 `--match-head-commit <head>`），因 `head` 漂移被拒则中止并从头核验。sweep 不合入触及两类人工确认的 PR。#2131 切换后，所有合入 main 的请求只走 [ADR 0064](docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md) R09 的唯一受控入口。工蜂与执行器派票 run 只开 PR。draft 须验收后标 ready for review，才进入 sweep。
+- 合入 main 按 [graph-engineering.md](.sandcastle/docs/graph-engineering.md)「main 的合入」分阶段执行。切换前 `review_sweep` 只派正式审查、报告诊断与对账、撤 GitHub 原生 `auto_merge`；即便部署模板传入 `--review-sweep-auto-merge` 也停用自动合入和追平，零合入 PUT。切换前所有合入由获准人工合入者核精确 head 三门原始 `success`（含 `DevSkim`）、来源归属、保护与服务端跨秒，显式绑定完整 `sha=<head>`（`--match-head-commit`）；该路径没有并发冻结，依赖 `main` 三门保护、`strict`、`enforce_admins` 和绑定 head。#2131 切换后所有 main 合入只走 [ADR 0064](docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md) R09 的唯一受控入口，须核触发时不可变服务端 PR 归属、冻结／排空、状态发布互斥、同锁改动分类及版本绑定用户授权。工蜂和执行器派票 run 只开 PR，draft 须验收后标 ready for review 才进入 sweep。
 - 人工确认仅保留实盘下单与资金、密钥与凭证，硬门签署见 graph-engineering「2. 考古」。代理可改 CI 和分支保护配置并报告，但不得放宽必需检查、取消 strict 或绕过保护。
 
 ## 底线
