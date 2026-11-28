@@ -134,45 +134,72 @@ fn tb1604_signed_record_reaches_parse_config_and_facts() {
 #[test]
 fn tb1604_tail_window_ge3_equals_unbounded_and_tw1_is_marked() {
     let unbounded = with_tail(0);
-    let mut marked = 0usize;
-    let mut differed = 0usize;
-    let mut trace_only = [0usize; 2];
-    for (i, ss) in corpus().iter().enumerate() {
-        let (s0, p0, f0) = segment::divide_segments_with_facts(ss, &unbounded);
-        assert!(
-            f0.tail_window_bound.is_none(),
-            "#{i}: 不设上限时不得有尾窗标记"
-        );
-        let f0 = semantic(f0);
-        for (k, tw) in [3u32, 7].into_iter().enumerate() {
-            let (s, p, f) = segment::divide_segments_with_facts(ss, &with_tail(tw));
-            assert_eq!((&s, p), (&s0, p0), "#{i}: tw={tw} 段与尾部须与 ∞ 逐位相同");
-            let (d, trace) = json_diff(&semantic(f), &f0);
-            assert!(d.is_empty(), "#{i}: tw={tw} 段事实与 ∞ 不同：{d:?}");
-            trace_only[k] += usize::from(trace > 0);
-        }
-        let pc1 = with_tail(1);
-        let (s1, p1, f1) = segment::divide_segments_with_facts(ss, &pc1);
-        let bound = f1.tail_window_bound.as_ref().map(|b| b.seg_start);
-        if let Some(b) = f1.tail_window_bound.as_ref() {
-            marked += 1;
-            assert_eq!(b.policy, "second-seq-scan-budget/research-override");
-        }
-        if (&s1, p1) != (&s0, p0) {
-            differed += 1;
-            assert!(
-                bound.is_some(),
-                "#{i}: tw=1 改变了结果却未标 INCOMPLETE_RESOURCE_BOUND"
-            );
-        }
-        let (si, bi) = incremental(ss, &pc1);
-        assert_eq!(bi, bound, "#{i}: 增量尾窗标记须 == 全量");
-        assert_eq!(si, s1, "#{i}: tw=1 增量段须 == 全量");
-    }
+    let pcs = [(3u32, with_tail(3)), (7u32, with_tail(7))];
+    let pc1 = with_tail(1);
+    let cases = corpus();
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    let (marked, differed, trace_only) = std::thread::scope(|scope| {
+        let cases = &cases;
+        let pcs = &pcs;
+        let handles: Vec<_> = (0..workers)
+            .map(|tid| {
+                scope.spawn(move || {
+                    let mut marked = 0usize;
+                    let mut differed = 0usize;
+                    let mut trace_only = [0usize; 2];
+                    for i in (tid..cases.len()).step_by(workers) {
+                        let ss = &cases[i];
+                        let (s0, p0, f0) = segment::divide_segments_with_facts(ss, &unbounded);
+                        assert!(
+                            f0.tail_window_bound.is_none(),
+                            "#{i}: 不设上限时不得有尾窗标记"
+                        );
+                        let f0 = semantic(f0);
+                        for (k, (tw, pc)) in pcs.iter().enumerate() {
+                            let (s, p, f) = segment::divide_segments_with_facts(ss, pc);
+                            assert_eq!((&s, p), (&s0, p0), "#{i}: tw={tw} 段与尾部须与 ∞ 逐位相同");
+                            let f_sem = semantic(f);
+                            if f_sem != f0 {
+                                let (d, trace) = json_diff(&f_sem, &f0);
+                                assert!(d.is_empty(), "#{i}: tw={tw} 段事实与 ∞ 不同：{d:?}");
+                                trace_only[k] += usize::from(trace > 0);
+                            }
+                        }
+                        let (s1, p1, f1) = segment::divide_segments_with_facts(ss, &pc1);
+                        let bound = f1.tail_window_bound.as_ref().map(|b| b.seg_start);
+                        if let Some(b) = f1.tail_window_bound.as_ref() {
+                            marked += 1;
+                            assert_eq!(b.policy, "second-seq-scan-budget/research-override");
+                        }
+                        if (&s1, p1) != (&s0, p0) {
+                            differed += 1;
+                            assert!(
+                                bound.is_some(),
+                                "#{i}: tw=1 改变了结果却未标 INCOMPLETE_RESOURCE_BOUND"
+                            );
+                        }
+                        let (si, bi) = incremental(ss, &pc1);
+                        assert_eq!(bi, bound, "#{i}: 增量尾窗标记须 == 全量");
+                        assert_eq!(si, s1, "#{i}: tw=1 增量段须 == 全量");
+                    }
+                    (marked, differed, trace_only)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .fold((0usize, 0usize, [0usize; 2]), |(m, d, t), h| {
+                let (lm, ld, lt) = h.join().unwrap();
+                (m + lm, d + ld, [t[0] + lt[0], t[1] + lt[1]])
+            })
+    });
     assert!(marked > 0, "语料未触发尾窗截断，标记路径未被覆盖");
     eprintln!(
         "tb1604 语料 {} 例：tw=3/7 仅诊断轨迹 checks 与 ∞ 不同 {}/{} 例；tw=1：{marked} 例带标记，其中 {differed} 例段/尾部与 ∞ 不同",
-        corpus().len(),
+        cases.len(),
         trace_only[0],
         trace_only[1]
     );
@@ -187,23 +214,40 @@ fn tb1604_tangency_open_changes_output_closed_reproduces_signed() {
     closed.research_override_tangency(Tangency::Closed);
     let mut open = signed;
     open.research_override_tangency(Tangency::Open);
-    let mut flipped = 0usize;
-    for (i, ss) in corpus().iter().enumerate() {
-        let (s0, p0, f0) = segment::divide_segments_with_facts(ss, &signed);
-        let (sc, pc, fc) = segment::divide_segments_with_facts(ss, &closed);
-        assert_eq!(
-            fc.policy.as_ref().map(|p| p.construction_rule.as_str()),
-            Some("segment-second/research-override")
-        );
-        assert_eq!((&sc, pc, &semantic(fc)), (&s0, p0, &semantic(f0)), "#{i}");
-        let (so, po, fo) = segment::divide_segments_with_facts(ss, &open);
-        assert_eq!(fo.policy.as_ref().map(|p| p.tangency), Some("open"));
-        if (&so, po) != (&s0, p0) {
-            flipped += 1;
-        }
-        let (si, _) = incremental(ss, &open);
-        assert_eq!(si, so, "#{i}: open 增量段须 == 全量");
-    }
+    let cases = corpus();
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    let flipped: usize = std::thread::scope(|scope| {
+        let cases = &cases;
+        let handles: Vec<_> = (0..workers)
+            .map(|tid| {
+                scope.spawn(move || {
+                    let mut flipped = 0usize;
+                    for i in (tid..cases.len()).step_by(workers) {
+                        let ss = &cases[i];
+                        let (s0, p0, f0) = segment::divide_segments_with_facts(ss, &signed);
+                        let (sc, pc, fc) = segment::divide_segments_with_facts(ss, &closed);
+                        assert_eq!(
+                            fc.policy.as_ref().map(|p| p.construction_rule.as_str()),
+                            Some("segment-second/research-override")
+                        );
+                        assert_eq!((&sc, pc, &semantic(fc)), (&s0, p0, &semantic(f0)), "#{i}");
+                        let (so, po, fo) = segment::divide_segments_with_facts(ss, &open);
+                        assert_eq!(fo.policy.as_ref().map(|p| p.tangency), Some("open"));
+                        if (&so, po) != (&s0, p0) {
+                            flipped += 1;
+                        }
+                        let (si, _) = incremental(ss, &open);
+                        assert_eq!(si, so, "#{i}: open 增量段须 == 全量");
+                    }
+                    flipped
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
     assert!(
         flipped > 0,
         "open 与 closed 在相切语料上无差异——相切谓词疑似回退为常量"
