@@ -38,24 +38,31 @@ impl TickConfig {
 }
 
 /// 读诊断夹具场所 profile；夹具记录损坏是构建期错误（`run_records` 单测锁定可解析），此处显式 panic。
-fn fixture_venue() -> super::run_records::VenueProfile {
-    super::run_records::diagnostic_fixture_venue().unwrap_or_else(|e| panic!("{e}"))
+fn fixture_venue() -> &'static super::run_records::VenueProfile {
+    static CACHE: std::sync::OnceLock<super::run_records::VenueProfile> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        super::run_records::diagnostic_fixture_venue().unwrap_or_else(|e| panic!("{e}"))
+    })
 }
 
 /// 读当前生效的 Θ_risk 记录；同 [`fixture_venue`]：损坏即 panic，不给备用值。
-fn active_theta_risk() -> super::run_records::ThetaRisk {
-    super::run_records::active_theta_risk().unwrap_or_else(|e| panic!("{e}"))
+fn active_theta_risk() -> &'static super::run_records::ThetaRisk {
+    static CACHE: std::sync::OnceLock<super::run_records::ThetaRisk> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| super::run_records::active_theta_risk().unwrap_or_else(|e| panic!("{e}")))
 }
 
 /// 读当前生效的数据 profile 记录；同 [`fixture_venue`]：损坏即 panic，不给备用值。
 fn active_data_profile() -> super::run_records::DataProfile {
-    super::run_records::active_data_profile().unwrap_or_else(|e| panic!("{e}"))
+    static CACHE: std::sync::OnceLock<super::run_records::DataProfile> = std::sync::OnceLock::new();
+    *CACHE
+        .get_or_init(|| super::run_records::active_data_profile().unwrap_or_else(|e| panic!("{e}")))
 }
 
 /// 测试夹具与诊断用：读诊断夹具场所 profile（#1602）。
 impl Default for TickConfig {
     fn default() -> Self {
-        TickConfig::from_venue(&fixture_venue())
+        TickConfig::from_venue(fixture_venue())
     }
 }
 
@@ -110,9 +117,13 @@ impl ParseConfig {
     /// 由当前生效的 `second-seq-scan-budget` 与 `segment-second` 记录构造；记录缺失、未签或非法 ⟹
     /// 报错（不回退）。`new_stroke_min_gap` / `seg_min_strokes` 是 `[缠论可导]` 定义值，不进记录。
     pub fn from_active_records() -> Result<Self, super::policy_records::PolicyError> {
+        static CACHE: std::sync::OnceLock<ParseConfig> = std::sync::OnceLock::new();
+        if let Some(&cfg) = CACHE.get() {
+            return Ok(cfg);
+        }
         let budget = super::policy_records::active_second_seq_scan_budget()?;
         let rule = super::policy_records::active_segment_construction()?;
-        Ok(ParseConfig {
+        let cfg = ParseConfig {
             new_stroke_min_gap: 3,
             seg_min_strokes: 3,
             second_seq_scan_window: budget.second_seq_window,
@@ -120,7 +131,9 @@ impl ParseConfig {
             scan_budget: budget.record,
             tangency: rule.tangency,
             construction_rule: rule.record,
-        })
+        };
+        let _ = CACHE.set(cfg);
+        Ok(cfg)
     }
 
     /// 研究/镜像工具改尾窗：值照改，记录版本标 `research-override`。
@@ -231,11 +244,17 @@ pub struct LevelConfig {
 impl LevelConfig {
     /// 由当前生效的 `tower-level-budget` 记录构造；记录缺失、未签或非法 ⟹ 报错（不回退）。
     pub fn from_active_record() -> Result<Self, super::policy_records::PolicyError> {
-        super::policy_records::try_level_config_from(
+        static CACHE: std::sync::OnceLock<LevelConfig> = std::sync::OnceLock::new();
+        if let Some(&cfg) = CACHE.get() {
+            return Ok(cfg);
+        }
+        let cfg = super::policy_records::try_level_config_from(
             super::policy_records::active_tower_level_budget()?,
             super::policy_records::active_tower_base()?,
             3,
-        )
+        )?;
+        let _ = CACHE.set(cfg);
+        Ok(cfg)
     }
 
     /// 由已解析的塔预算记录 + 中枢三段下限组装。
@@ -280,7 +299,10 @@ pub struct MacdConfig {
 /// 读当前生效记录；同 [`LevelConfig`] 的 `Default`：记录损坏即 panic 停止，不给备用值。
 impl Default for MacdConfig {
     fn default() -> Self {
-        super::policy_records::active_macd_force().unwrap_or_else(|e| panic!("{e}"))
+        static CACHE: std::sync::OnceLock<MacdConfig> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| {
+            super::policy_records::active_macd_force().unwrap_or_else(|e| panic!("{e}"))
+        })
     }
 }
 
@@ -346,7 +368,7 @@ impl VoiceConfig {
 /// 读当前生效的 `theta-risk` 记录（#1602）。
 impl Default for VoiceConfig {
     fn default() -> Self {
-        VoiceConfig::from_record(&active_theta_risk())
+        VoiceConfig::from_record(active_theta_risk())
     }
 }
 
@@ -443,7 +465,7 @@ impl RiskConfig {
 /// 读当前生效的 `theta-risk` 记录（#1602）。
 impl Default for RiskConfig {
     fn default() -> Self {
-        RiskConfig::from_record(&active_theta_risk())
+        RiskConfig::from_record(active_theta_risk())
     }
 }
 
@@ -551,7 +573,7 @@ impl ExecConfig {
 /// 测试夹具与诊断用：读诊断夹具场所 profile（#1602）。
 impl Default for ExecConfig {
     fn default() -> Self {
-        ExecConfig::from_venue(&fixture_venue())
+        ExecConfig::from_venue(fixture_venue())
     }
 }
 
@@ -593,8 +615,8 @@ pub struct RunRecords {
 impl Default for RunRecords {
     fn default() -> Self {
         RunRecords {
-            venue: fixture_venue(),
-            risk: active_theta_risk(),
+            venue: fixture_venue().clone(),
+            risk: active_theta_risk().clone(),
             data: active_data_profile(),
         }
     }
@@ -802,13 +824,19 @@ impl ThetaConfig {
     /// `production_synthetic_ohlc_integer_tb02a_v1`。缺值行为同 [`Self::for_production_symbol`]；
     /// 最终准入仍由 [`Self::admissible`] 判，本构造不放宽。
     pub fn for_s_structure_writer() -> Result<Self, super::run_records::RunPolicyError> {
-        Self::from_records(
+        static CACHE: std::sync::OnceLock<ThetaConfig> = std::sync::OnceLock::new();
+        if let Some(cfg) = CACHE.get() {
+            return Ok(cfg.clone());
+        }
+        let cfg = Self::from_records(
             super::run_records::production_venue_for_s_writer(
                 super::run_records::SYNTHETIC_TB02A_PROFILE_ID,
             ),
             Some(super::run_records::ACTIVE_THETA_RISK_JSON),
             Some(super::run_records::ACTIVE_DATA_PROFILE_JSON),
-        )
+        )?;
+        let _ = CACHE.set(cfg.clone());
+        Ok(cfg)
     }
 
     /// 由给定场所 profile 与 Θ_risk / 数据 profile 记录文本组装（塔预算与 MACD 取当前生效记录）。
