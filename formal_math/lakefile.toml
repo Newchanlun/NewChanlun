@@ -1,6 +1,6 @@
 name = "chan"
 version = "0.1.0"
-defaultTargets = ["Chan"]
+defaultTargets = ["Chan", "ChanTest", "ChanDyn"]
 
 [leanOptions]
 autoImplicit = false
@@ -14,3 +14,13 @@ rev = "v4.36.0"
 
 [[lean_lib]]
 name = "Chan"
+globs = ["Chan.*"]
+
+[[lean_lib]]
+name = "ChanTest"
+roots = ["ChanTest.Probe"]
+globs = ["ChanTest.+"]
+
+[[lean_lib]]
+name = "ChanDyn"
+globs = ["ChanDyn.+"]

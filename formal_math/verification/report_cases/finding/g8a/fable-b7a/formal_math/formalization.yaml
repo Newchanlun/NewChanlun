@@ -1,0 +1,9 @@
+{
+  "nodes": {
+    "u0": {"about": [], "mode": "对任意实现成立", "declarative_unique": true},
+    "u1": {"about": [], "mode": "对任意实现成立", "declarative_unique": true},
+    "u2": {"about": [], "mode": "对任意实现成立", "declarative_unique": true},
+    "u3": {"about": [], "mode": "对任意实现成立", "declarative_unique": true},
+    "u4": {"about": [], "mode": "对任意实现成立", "declarative_unique": true}
+  }
+}

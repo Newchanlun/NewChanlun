@@ -1,0 +1,4 @@
+eu_manual_rev
+eu_manual_id
+alias_mirror
+conj_mirror

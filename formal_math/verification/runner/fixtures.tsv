@@ -1,0 +1,268 @@
+# 旧夹具归属与本片在新入口上的实测期望。列：夹具	归属	退出码	判红步骤	红码	说明
+# 退出码为 - 的行不在新入口上跑。归属是设计上负责的那一层，期望列是现状，不是承诺。
+must_red/g1/r4-manifest-path-source	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 PACKAGE_SOURCE；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g1/r4-manifest-url	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 PACKAGE_SOURCE；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g1/revision	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 PACKAGE_PIN；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g1/runtime-pin	不再检查	0	-	-	旧期望 RUNTIME_TOOLCHAIN_PIN；运行期 Lean 版本不符改为第 3 步 TOOLCHAIN 环境故障退 2；本自测不伪造 lean，故全绿
+must_red/g1/toolchain	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 TOOLCHAIN_PIN；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g15/bridge	预检	1	precheck	TOP_LEVEL	旧期望 IMPORT_EDGE；夹具在 formal_math 顶层放了 Bridge.lean，预检形状规则（d660582472 起无条件执行）判 TOP_LEVEL
+must_red/g15/chan-audit-math-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-audit-math-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-proxy	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-defs-case-to-thm	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-exec-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-exec-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-exec-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-final-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-final-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-hypotheses-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-hypotheses-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-hypotheses-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proofs-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proofs-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proofs-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proxy-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proxy-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-proxy-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-thm-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-thm-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chan-thm-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chan-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-audit	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-dyn	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-exec	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-final	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-proofs	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-proxy	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-root	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-test	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chanchallenge-case-to-thm	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/chandyn-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/chantest-case-to-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 IMPORT_EDGE
+must_red/g15/empty-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g15/literal-proof	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/main-dynamics	头部	1	headers	IMPORT_EDGE	旧期望 IMPORT_EDGE
+must_red/g15/no-expose	第四片	1	shape	SHAPE_EXPOSE	旧期望 EXPOSE_SECTION；本片判红：Chan/Defs 须 @[expose] public section
+must_red/g15/no-module	头部	1	headers	MODULE_FIRST	旧期望 MODULE_FIRST
+must_red/g15/private-import	头部	1	headers	IMPORT_ALL	旧期望 IMPORT_ALL
+must_red/g15/r2-g3-meta-import-all	头部	1	headers	IMPORT_ALL	旧期望 IMPORT_ALL
+must_red/g15/r2-g4-challenge-trans-ext	头部	1	headers	IMPORT_PINNED	旧期望 IMPORT_CLOSURE
+must_red/g15/r2-g5-interp-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g15/r2-g6-bridge-subdir	预检	1	precheck	TOP_LEVEL	旧期望 IMPORT_EDGE；夹具在 formal_math 顶层放了 Helper/，预检形状规则（d660582472 起无条件执行）判 TOP_LEVEL
+must_red/g15/r4-p9d2-challenge-trans-std	头部	1	headers	IMPORT_CLOSURE	旧期望 IMPORT_CLOSURE
+must_red/g15/raw-expose	环境层	1	env	EXPOSE_SECTION,LOCK_UNLISTED	旧期望 EXPOSE_SECTION；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g15/whole-mathlib	头部	1	headers	WHOLE_MATHLIB	旧期望 WHOLE_MATHLIB
+must_red/g2/fable-b1	头部	1	headers	IMPORT_PINNED	旧期望 LOCAL_OPTION；新流水线在头部规则一步拦下
+must_red/g2/lib-option	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 LEAN_OPTION_OVERRIDE；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/local-autoimplicit	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/local-linter	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/missing-option	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 LEAN_OPTION；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r2-a1-clean	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/r2-a2-clean	头部	1	headers	IMPORT_PINNED	旧期望 LOCAL_OPTION；新流水线在头部规则一步拦下
+must_red/g2/r2-a4d-guillemet-opt	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/r2-a5-build-config	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 BUILD_WFAIL,LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r2-a6-build-config	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 BUILD_WFAIL,LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r2-a6b-build-config	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 BUILD_WFAIL,LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r2-a6c-build-config	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 BUILD_WFAIL,LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r2-a6d-build-config	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 BUILD_WFAIL,LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r3-a5b-grind-option	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/r3-a5c-grind-kernel	第四片	1	shape	SHAPE_OPTION,SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：选项白名单、受控选项
+must_red/g2/r4-p6a-lakefile-invalid-toml	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r4-p6b-lakefile-more-lean-args	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/r4-p6c-lakefile-package-options	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 LAKEFILE_KEY；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/raw-linter	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/relaxed-local	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 LOCAL_OPTION；本片判红：受控选项
+must_red/g2/unimported-child	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 BUILD_WFAIL；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_red/g2/unused	沙箱构建	1	build	BUILD_WFAIL	旧期望 BUILD_WFAIL
+must_red/g3/admit	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/attribute-command-macro	第四片	1	shape	SHAPE_ATTRIBUTE	旧期望 TOKEN；本片判红：属性白名单
+must_red/g3/attribute-csimp	第四片	1	shape	SHAPE_ATTRIBUTE	旧期望 TOKEN；本片判红：属性白名单
+must_red/g3/axiom	第四片	1	shape	SHAPE_DECL	旧期望 TOKEN；本片判红：声明白名单
+must_red/g3/blocked-kernel-option	第四片	1	shape	SHAPE_OPTION	旧期望 TOKEN；本片判红：选项白名单
+must_red/g3/deriving-inline-not-whitelisted	第四片	1	shape	SHAPE_DERIVING	旧期望 TOKEN；本片判红：派生目标类白名单
+must_red/g3/deriving-not-whitelisted	第四片	1	shape	SHAPE_DERIVING	旧期望 TOKEN；本片判红：派生目标类白名单
+must_red/g3/environment-derived-without-certificate	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/environment-implemented-by	环境层	1	env	ENV_IMPLEMENTED_BY	旧期望 ENV_IMPLEMENTED_BY；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/environment-meta	环境层	1	env	ENV_META	旧期望 ENV_META；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/environment-partial	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/environment-partial-mutual	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/environment-unsafe	环境层	1	env	ENV_UNSAFE	旧期望 ENV_UNSAFE；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/eval	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：命令白名单、禁用清单
+must_red/g3/exit-command	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：命令白名单、禁用清单
+must_red/g3/explore-eval-rejected	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：命令白名单、禁用清单
+must_red/g3/extern	第四片	1	shape	SHAPE_ATTRIBUTE	旧期望 TOKEN；本片判红：属性白名单
+must_red/g3/fable-b1	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/guard-msgs-declaration	第四片	1	shape	SHAPE_GUARD_MSGS	旧期望 TOKEN；本片判红：#guard_msgs 限制
+must_red/g3/guard-msgs-drop-warning	第四片	1	shape	SHAPE_GUARD_MSGS	旧期望 TOKEN；本片判红：#guard_msgs 限制
+must_red/g3/guard-msgs-outside-final	第四片	1	shape	SHAPE_COMMAND	旧期望 TOKEN；本片判红：命令白名单
+must_red/g3/implemented-by	第四片	1	shape	SHAPE_ATTRIBUTE	旧期望 TOKEN；本片判红：属性白名单
+must_red/g3/import-aesop	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/import-explore	头部	1	headers	IMPORT_EDGE,IMPORT_SOURCE	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/import-lean	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_green/known-not-covered/rfl-prime-library-macro	第四片（已知不防）	0	-	-	旧期望 TOKEN；已知不防：库宏 rfl' 展开时设置 smartUnfolding，只解析看不见；它只影响精化期展开，不影响健全性，证明仍由内核检查（接手对照 must_red/known-not-covered/rfl-prime-false）；夹具从 must_red/g3 移来，期望为绿
+must_red/g3/local-linter	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 TOKEN；本片判红：受控选项
+must_red/g3/meta-def	第四片	1	shape	SHAPE_MODIFIER	旧期望 TOKEN；本片判红：修饰符白名单
+must_red/g3/meta-import-library	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/meta-section	第四片	1	shape	SHAPE_MODIFIER	旧期望 TOKEN；本片判红：修饰符白名单
+must_red/g3/native-decide	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/non-module	头部	1	headers	MODULE_FIRST	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/partial	第四片	1	shape	SHAPE_MODIFIER	旧期望 TOKEN；本片判红：修饰符白名单
+must_red/g3/prelude	头部	1	headers	PRELUDE	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/private-proof	环境层	1	build	BUILD_WFAIL	旧期望 ENV_SORRY；整次运行在 build 一步先判红；对应的环境层码由其它夹具覆盖；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r2-a2-clean	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r2-a2-syntax-quotes	第四片	1	shape	SHAPE_COMMAND	旧期望 TOKEN；本片判红：命令白名单
+must_red/g3/r2-a3-interp-raw-g3	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：命令白名单、禁用清单
+must_red/g3/r2-a4d-guillemet-opt	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 TOKEN；本片判红：受控选项
+must_red/g3/r2-d5c-subsingleton-ref	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r2-g3-meta-import-all	头部	1	headers	IMPORT_ALL	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1-macro	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1b-macro-clean	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1c-macro-full	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1d-macro-nuclear	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1e-macro-fresh	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1f-environment	环境层	1	headers	META_IMPORT	旧期望 ENV_IMPLEMENTED_BY,ENV_META,ENV_PARTIAL,ENV_UNSAFE；整次运行在 headers 一步先判红；对应的环境层码由其它夹具覆盖；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r3-a1f-macro	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1f-victim-source-only	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1g-environment	环境层	1	headers	META_IMPORT	旧期望 ENV_IMPLEMENTED_BY,ENV_META,ENV_PARTIAL,ENV_UNSAFE；整次运行在 headers 一步先判红；对应的环境层码由其它夹具覆盖；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r3-a1g-macro-stripinfo	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a1g-victim-source-only	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a2-init-attr	第四片	1	shape	SHAPE_ATTRIBUTE	旧期望 TOKEN；本片判红：属性白名单
+must_red/g3/r3-a2b-init-meta-import	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a2b-init-plain-source-only	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a3-meta-attrs	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a3b-app-elab	头部	1	headers	META_IMPORT	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/r3-a4-guard-msgs-drop	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN,SHAPE_GUARD_MSGS	旧期望 TOKEN；本片判红：命令白名单、禁用清单、#guard_msgs 限制
+must_red/g3/r3-a5a-example-sorryax	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r3-a5b-grind-option	第四片	1	shape	SHAPE_OPTION_CONTROLLED	旧期望 TOKEN；本片判红：受控选项
+must_red/g3/r3-a5c-grind-kernel	第四片	1	shape	SHAPE_OPTION,SHAPE_OPTION_CONTROLLED	旧期望 TOKEN；本片判红：选项白名单、受控选项
+must_red/g3/r3-a8b-mathlib-lemma	第四片	1	shape	SHAPE_COMMAND	旧期望 TOKEN；本片判红：命令白名单
+must_red/g3/r4-p0-include-str-unsafe-io	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p0-include-str-unsafe-io-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p1a-by-elab-io	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p1a-by-elab-io-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p1b-by-elab-options	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p1b-by-elab-options-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p1d-sudo-by-elab-io	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p1d-sudo-by-elab-io-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p2a-sudo-set-option	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p2b-sudo-set-option-clean	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3a-eval-percent	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3a-eval-percent-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3b-include-str-host-read	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3b-include-str-host-read-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3b2-include-str-clean	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3b2-include-str-clean-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3c-trace-siffwm	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3c-trace-siffwm-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3d-trace-siffwm-eval	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p3d-trace-siffwm-eval-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_green/known-not-covered/rfl-prime-decreasing-by	第四片（已知不防）	0	-	-	旧期望 TOKEN；已知不防：库宏 rfl' 展开时设置 smartUnfolding，只解析看不见；它只影响精化期展开，不影响健全性，证明仍由内核检查（接手对照 must_red/known-not-covered/rfl-prime-false）；夹具从 must_red/g3 移来，期望为绿
+must_red/g3/r4-p5a-guard-msgs-substring	第四片	1	shape	SHAPE_GUARD_MSGS	旧期望 TOKEN；本片判红：#guard_msgs 限制
+must_red/g3/r4-p5b-guard-msgs-swallow	第四片	1	shape	SHAPE_GUARD_MSGS	旧期望 TOKEN；本片判红：#guard_msgs 限制
+must_red/g3/r4-p7a-deriving-spoof	环境层	1	build	BUILD_WFAIL	旧期望 ENV_PARTIAL；整次运行在 build 一步先判红；对应的环境层码由其它夹具覆盖；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r4-p7a-deriving-spoof-source	第四片	1	shape	SHAPE_MODIFIER	旧期望 TOKEN；本片判红：修饰符白名单
+must_red/g3/r4-p7a2-deriving-spoof	环境层	1	env	ENV_PARTIAL	旧期望 ENV_PARTIAL；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r4-p7a2-deriving-spoof-source	第四片	1	shape	SHAPE_MODIFIER	旧期望 TOKEN；本片判红：修饰符白名单
+must_red/g3/r4-p7b-ctoridx-spoof-source	第四片	1	shape	SHAPE_ATTRIBUTE,SHAPE_MODIFIER	旧期望 TOKEN；本片判红：属性白名单、修饰符白名单
+must_red/g3/r4-p7b2-ctoridx-spoof	环境层	1	env	ENV_IMPLEMENTED_BY,ENV_UNSAFE	旧期望 ENV_IMPLEMENTED_BY,ENV_UNSAFE；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r4-p7b2-ctoridx-spoof-source	第四片	1	shape	SHAPE_ATTRIBUTE,SHAPE_MODIFIER	旧期望 TOKEN；本片判红：属性白名单、修饰符白名单
+must_red/g3/r4-p7c-extern-on-exempt	环境层	1	env	ENV_EXTERN	旧期望 ENV_EXTERN；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g3/r4-p7c-extern-on-exempt-source	第四片	1	shape	SHAPE_ATTRIBUTE	旧期望 TOKEN；本片判红：属性白名单
+must_red/g3/r4-p7d-term-unsafe	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p7d-term-unsafe-source-only	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/r4-p7e-root-sorryax	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/raw-command	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN,SHAPE_OPTION_CONTROLLED	旧期望 TOKEN；本片判红：命令白名单、禁用清单、受控选项
+must_red/g3/run-cmd	头部	1	headers	IMPORT_PINNED	旧期望 TOKEN；新流水线在头部规则一步拦下
+must_red/g3/sorry	第四片	1	shape	SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：禁用清单
+must_red/g3/sorry-via-export	第四片	1	shape	SHAPE_COMMAND,SHAPE_FORBIDDEN	旧期望 TOKEN；本片判红：命令白名单、禁用清单
+must_red/g3/syntax	第四片	1	shape	SHAPE_COMMAND	旧期望 TOKEN；本片判红：命令白名单
+must_red/g3/unsafe	第四片	1	shape	SHAPE_MODIFIER	旧期望 TOKEN；本片判红：修饰符白名单
+must_red/g6a/changed-constant	声明锁	1	env	LOCK_CHANGED	旧期望 LOCK_CHANGED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g6a/def-to-abbrev	声明锁	1	env	LOCK_CHANGED	旧期望 LOCK_CHANGED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g6a/opaque-type	声明锁	1	env	LOCK_CHANGED	旧期望 LOCK_CHANGED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g6a/removed	声明锁	1	env	LOCK_REMOVED	旧期望 LOCK_REMOVED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g6a/theorem-to-axiom	声明锁	1	env	ENV_AXIOM,ENV_AXIOM_DEP,LOCK_CHANGED	旧期望 LOCK_CHANGED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g6a/unlisted	声明锁	1	env	LOCK_UNLISTED	旧期望 LOCK_UNLISTED；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_red/g6b/no-layout-waiver	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。infra 改 statement-lock.json：PATH_SCOPE，第一片自测同形；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_red/g6b/proof-edits-defs	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。proof 改 Chan/Defs：PATH_SCOPE；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_red/g6b/r4-empty-branch-suffix	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。空后缀分支名：BRANCH_ROLE；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_red/g6b/r4-symlink-in-proof	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。提交树里的符号链接：MODE；工作树里的符号链接不再检查；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_red/g6b/r4-untracked-root-file	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。未跟踪文件：门禁只审提交；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_green/g1/pins	预检（规则 TRUSTED_DRIFT、LAKE_FILE）取代，夹具已删除	-	-	-	旧期望 绿；旧门 1、门 2 的 lakefile 逐键白名单与钉选机制已由「构建配置与基线同一对象」取代，预检自测覆盖这些形状
+must_green/g15/expose	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/module-comments	头部	0	-	-	旧期望 绿
+must_green/g15/r2-g1-unexposed-struct	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r2-g2-unexposed-instance	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r2-g7-public-import-chan-defs	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r4-p9d1-defs-noncomputable	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g15/r4-w1d-defs-deriving	头部	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g2/common-syntax	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/generated-auxiliaries	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/no-warnings	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a4c-guard-msgs	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a7-omit	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a7b-mutual-deriving	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r3-a7c-omit-instance	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r4-w1a-plain-rec-ord	沙箱构建	0	-	-	旧期望 绿；阴性对照
+must_green/g2/r4-w2-w3-proofs	沙箱构建	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/attributes-whitelist	第四片	1	build	BUILD_WFAIL	旧期望 绿；阴性对照，第 5 步零命中；夹具自身有告警（`@[no_expose]` has no effect），--wfail 判红；旧自测只跑门 3、不构建
+must_green/g3/comments	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/common-syntax	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/generated-auxiliaries	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r2-a4c-guillemet	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a4c-guard-msgs	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-default-prop-field	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-named-expose-section	第四片	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照，第 5 步零命中；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/r3-a7-noncomputable-section	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-omit	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-open-scoped	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-open-scoped-attr	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-struct-extends	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7-tactic-var	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7b-mutual-deriving	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7c-omit-instance	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a7d-deriving-nonempty	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r3-a8-mathlib	第四片	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照，第 5 步零命中；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/r4-p8a-local-instance-simp	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r4-w1a-plain-rec-ord	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r4-w1b-plain-rec-others	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r4-w1c-ns-private-deriving	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r4-w1d-defs-deriving	第四片	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照，第 5 步零命中；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/r4-w1e-ns-param-deriving	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/r4-w2-w3-proofs	第四片	1	env	LOCK_UNLISTED	旧期望 绿；阴性对照，第 5 步零命中；夹具不带锁文件，全跑时声明锁判 LOCK_UNLISTED
+must_green/g3/raw-comments	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g3/real-declarations	第四片	0	-	-	旧期望 绿；阴性对照，第 5 步零命中
+must_green/g6a/alpha-rename	声明锁	0	-	-	旧期望 绿；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_green/g6a/def-to-abbrev	声明锁	0	-	-	旧期望 绿；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_green/g6a/opaque-type	声明锁	0	-	-	旧期望 绿；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_green/g6a/original	声明锁	0	-	-	旧期望 绿；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_green/g6a/r4-p9a-let-vs-have	声明锁	0	-	-	旧期望 绿；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_green/g6a/theorem-to-axiom	声明锁	0	-	-	旧期望 绿；语料用例跳过第 5 步跑（源码带第 5 步会拒的写法，本夹具要测的是第 7 步）
+must_green/g6b/decl-signoffs	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。decl 改 verification/garbage-signoffs.yaml：新表下判红，见第一片 README 出入表；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_green/g6b/detached-pr	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。分支名由调用方作参数给出，不再读 HEAD 或 GITHUB_HEAD_REF；infra 改门禁目录归预检放行流程；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_green/g6b/infra-generic	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。infra 改门禁目录：须放行开关；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_green/g6b/proof-edits-test	预检	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。proof 改 ChanTest：绿；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_green/g6b/symbolic-wins	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。分支名来源优先级：改为显式参数；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_unknown/g2/broken-string	沙箱构建	1	shape	SHAPE_PARSE	旧期望 退 2；源码写坏：旧实现无法判定（退 2），新流水线在构建一步判红；第四片起由第 5 步先判红（解析失败）
+must_unknown/g3/broken-string	沙箱构建	1	shape	SHAPE_PARSE	旧期望 退 2；源码写坏：旧实现无法判定（退 2），新流水线在构建一步判红；第四片起由第 5 步先判红（解析失败）
+must_unknown/g3/r2-a4-comment-edge	沙箱构建	1	shape	SHAPE_PARSE	旧期望 退 2；源码写坏：旧实现无法判定（退 2），新流水线在构建一步判红；第四片起由第 5 步先判红（解析失败）
+must_unknown/g3/r2-a4b-comment-desync	头部	1	headers	HEADER_PARSE	旧期望 退 2；新流水线在头部规则一步拦下
+must_unknown/g6b/detached-no-ref	不再检查	-	-	-	未在新入口上跑（工作树、分支名来源类夹具）。分离 HEAD 且无分支名：改为显式参数，缺参数退 2；夹具已在第四片删除（只服务旧 run_gates.py 门 6b，预检自测覆盖这些形状）
+must_green/g3/r5-b4-everyday-tactics	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒汇总（第五轮审阅 r5-fixtures/b4-…）；第 5 步零命中；第 6 步构建判红，原因是夹具自身的告警/错误（见 README「R5-B4」），不是形状门
+must_green/g3/r5-b4-everyday-terms	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒汇总（第五轮审阅 r5-fixtures/b4-…）；第 5 步零命中；第 6 步构建判红，原因是夹具自身的告警/错误（见 README「R5-B4」），不是形状门
+must_green/g3/r5-b4-readme-promised	第四片	1	build	BUILD_WFAIL	R5-B4 的误拒汇总（第五轮审阅 r5-fixtures/b4-…）；第 5 步零命中；第 6 步构建判红，原因是夹具自身的告警/错误（见 README「R5-B4」），不是形状门
+must_red/known-not-covered/rfl-prime-false	第四片（已知不防的接手对照）	1	build	BUILD_WFAIL	已知不防 rfl' 的接手对照：用 rfl' 证假命题，第 6 步构建判红（形状门看不见 rfl' 展开出的 smartUnfolding，但它改不了证明是否成立）
+must_red/g3/r1-legacy-config	第四片	1	shape	SHAPE_FORBIDDEN	独审 r1 甲-1 的三种写法（aesop (config := …) 取值带 dbgTrace 标记、aesop (simp_config := …)、plausible (config := …)）；本片判红：禁用清单（旧式配置子句）。修复前 1acb400d63 上七步全绿，标记 FM-LEGACY-CONFIG-RAN 出现在构建日志
+must_green/autoparam/default-proof	自动参数（环境层豁免第 4 类）	0	-	-	独审 r1 N1：structure 字段的自动证明默认值 `:= by omega` 生成 meta 常量 Win.ok._autoParam；原在 must_green/known-issue（第 7 步 ENV_META），第 4 类豁免后七步全绿
+must_green/autoparam/binders	自动参数（环境层豁免第 4 类）	0	-	-	第 1 步查到的生成点各一个：def、theorem、abbrev 参数，类型里的 ∀ 绑定器，structure 参数，inductive 构造子参数，structure 字段、继承、子结构覆写、class 字段；以及省略它们的使用处
+must_green/autoparam/combined	自动参数（环境层豁免第 4 类）	0	-	-	自动参数与 deriving（递归类型，派生证书）、instance、mutual、private、protected 同时出现
+must_green/autoparam/many-fields	自动参数（环境层豁免第 4 类）	0	-	-	一个文件里三个结构体、每个多个带自动证明默认值的字段
+must_green/known-issue/autoparam-variable-binder	已知问题（环境层误拒）	1	env	ENV_META	variable 绑定器上的自动参数：Lean 生成的载体 _private.<模块>.0._auto_<N> 没有任何声明以 autoParam 引用，按「必须被引用」仍判 ENV_META（刻意保留的窄误拒）；绕开办法是写在用到它的 def/theorem 自己的绑定器上
+must_red/autoparam/spoofs	环境层	1	env	ENV_EXTERN,ENV_IMPLEMENTED_BY,ENV_META,ENV_UNSAFE	第 4 类豁免的冒用形态（手写 meta def 逐字照抄生成值、孤立、值里有函数调用、值里引用别的常量、类型是别名、名字形态不对、unsafe、implemented_by、给生成的载体事后挂 implemented_by 或 extern），每种一个文件，另有一个合法载体作对照；逐声明的比对见自测 A2；语料用例跳过第 5 步跑（meta、unsafe、implemented_by、extern 第 5 步会拒）
+must_red/g6a/autoparam-tactic-edit	声明锁	1	env	LOCK_CHANGED	已知问题的现状记录（不是归属门的承诺）：锁文件按 `by omega` 生成，源码只把结构体字段的默认证明改成 `by (omega)`；自动参数载体 LockWin.ok._autoParam 在锁定目录里进入锁行，它的锁行变（LOCK_CHANGED），结构体与构造子的锁行不变。载体该不该算锁定内容留待以后定；语料用例跳过第 5 步跑
+must_green/known-not-covered/linarith-oracle-eval	第四片（已知不防）	0	-	-	独审 r2 甲-2：linarith (oracle := …) 键不以 config 结尾，第 5 步按设计放行；已知不防：构建期求值被审项（Mathlib 用 derive_eval_expr_instance_using_meta_eval 打开 Meta.evalExpr'），能力上界是纯计算与往标准错误输出；宿主机一侧由第 6 步沙箱接（自测 H4 断言标记只出现在 FM LOG build 行、沙箱外无哨兵）；伪造产物一类后果归 #2315，本票未测；按设计不往禁用清单补键名
+must_green/g3/r2-config-shaped-green	第四片	0	-	-	独审 r2 甲-C1／甲-C2 的必绿对照：新式字面量配置项、(cfg := 1) 命名参数、(my_config : Nat) 类型标注、(config, config) 元组；第 5 步零命中、七步全绿

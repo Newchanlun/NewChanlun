@@ -1,0 +1,11 @@
+{
+  "nodes": {
+    "_private.Chan.Thm.Fixture.0.helper": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "doc_only": {
+        "1": "夹具专查调用方的 eta 展开"
+      }
+    }
+  }
+}

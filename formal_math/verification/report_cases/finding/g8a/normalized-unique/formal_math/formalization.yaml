@@ -1,0 +1,24 @@
+{
+  "nodes": {
+    "andTrue": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "declarative_unique": true
+    },
+    "wrapped": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "declarative_unique": true
+    },
+    "idWrapped": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "declarative_unique": true
+    },
+    "manual": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "declarative_unique": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "nodes": {
+    "claim": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "main_theorem": true,
+      "necessary": [
+        1
+      ],
+      "convenience": {
+        "2": "保留输入契约，交独审"
+      }
+    }
+  }
+}

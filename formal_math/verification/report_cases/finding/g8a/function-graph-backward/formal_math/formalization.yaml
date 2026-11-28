@@ -1,0 +1,9 @@
+{
+  "nodes": {
+    "main_step_unique": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "declarative_unique": true
+    }
+  }
+}
