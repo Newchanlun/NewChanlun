@@ -94,7 +94,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "二级旁证答疑 019:1058 宣称首尾相连且方向交替的 N 字三段必然有重叠、且不可能仅有边界单点重叠（随后在答疑 031:912 被作者自行否定）；一级正文 067:16 讨论的 Si 与 Si+1 已限定属于同一条以向上笔开始且在完整笔序列中尚未被特征序列破坏分界截断的真实线段。Lean 侧将 b2_lesson67SameUpSegAdjacentPair 升级为与 B-9 共用真实分界见证（b9_validStrokeSegBool 与 segPairConfirmsDestructionBool）的完整笔序列谓词，严格拒绝跨过真实破坏分界的笔（如 0→15→10→16→12→14→11 中跨 16 分界的 10→16→12→14）并合法容纳如 0→10→4→8；另将纯局部三笔不破前低价格条件单列命名为 b2_upTripleNoBreakPriorLow，绝不冠以“同线段”名义。待下游 Chan/Audit/Math 仅对答疑字面断言 b2_reply019ConnectedThreeAlwaysOverlapLiteral 与 b2_reply019NoBoundaryOnlyOverlapLiteral 构造形式化反例。"
+  exact_proposition: "二级旁证答疑 019:1058 宣称首尾相连且方向交替的 N 字三段必然有重叠、且不可能仅有边界单点重叠（随后在答疑 031:912 被作者自行否定）；一级正文 067:16 讨论的 Si 与 Si+1 已限定属于同一条以向上笔开始且在完整笔序列中尚未被特征序列破坏分界截断的真实线段。Lean 侧将 b2_lesson67SameUpSegAdjacentPair 升级为与 B-9 共用真实分界见证（b9_validStrokeSegBool 与按 065:44/071:40 无缺口判别式实现的 segPairConfirmsDestructionBool）的完整笔序列谓词，严格拒绝跨过真实破坏分界的笔（如 0→15→10→16→12→14→11 中跨 16 分界的 10→16→12→14，及 0→10→4→8→1→3→0→2 中跨 8 分界的 4→8 与 1→3）并合法容纳如 0→10→4→8；另将纯局部三笔不破前低价格条件单列命名为 b2_upTripleNoBreakPriorLow，绝不冠以“同线段”名义。待下游 Chan/Audit/Math 仅对答疑字面断言 b2_reply019ConnectedThreeAlwaysOverlapLiteral 与 b2_reply019NoBoundaryOnlyOverlapLiteral 构造形式化反例。"
   citations:
     - cite: "065:48"
       tier: 1
@@ -142,7 +142,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "在同一条已完成次级别走势列表 segs 上按连续下标 (i, i + 1) 严格绑定真实越界离开段（向上须 endPrice > ZG、向下须 endPrice < ZD，杜绝起终点仍在核内的段被认作离开）与紧接的首次回试段（所有 j < i 均仍触及中枢核心，杜绝第二次回试冒充首次回试，且依 020:60 仅约束回试低点及 078:42 允许向下线段起点非最高点，撤除多余的 retestSeg.hi ≤ leaveSeg.hi 及卖点侧对偶门，并与纯价格分量 b3_priceNoBreakZg/b3_priceNoBreakZd 严格区分）的前提下，正文 020:60 对第三类买点字面写作“低点不跌破 ZG”（含等号 ≥），其对偶卖点允许回抽高点等于 ZD；而正文 054:24 明确判定 d1=g2 触及边界即属中枢震荡、必须严格 d1>g2 才构成第三类卖点。同时中枢重叠、包含关系、背驰力度与数值相等五个谓词的等号口径散见各处。待下游 Chan/Audit/Math 在同列表首次离开-回试前提下证伪 b3_literalThirdDisjointFromOscillation。"
+  exact_proposition: "在同一条已完成次级别走势列表 segs 上按连续下标 (i, i + 1) 严格绑定真实越界离开段（向上须 endPrice > ZG、向下须 endPrice < ZD，杜绝起终点仍在核内的段被认作离开）与紧接的首次回试段（所有 j < i 均仍触及中枢核心，且经 b3_noPriorLiteralThirdBool 按自身含等号判据排除先前位置已成立的字面第三类买卖点，杜绝如 [10,20] 上 15→30→20→31→24 重复产生两次首次回试；并依 020:60 仅约束回试低点及 078:42 允许向下线段起点非最高点，撤除多余的 retestSeg.hi ≤ leaveSeg.hi 及卖点侧对偶门，与纯价格分量 b3_priceNoBreakZg/b3_priceNoBreakZd 严格区分）的前提下，正文 020:60 对第三类买点字面写作“低点不跌破 ZG”（含等号 ≥），其对偶卖点允许回抽高点等于 ZD；而正文 054:24 明确判定 d1=g2 触及边界即属中枢震荡、必须严格 d1>g2 才构成第三类卖点。同时中枢重叠、包含关系、背驰力度与数值相等五个谓词的等号口径散见各处。待下游 Chan/Audit/Math 在同列表首次离开-回试前提下证伪 b3_literalThirdDisjointFromOscillation。"
   citations:
     - cite: "020:56"
       tier: 1
@@ -188,6 +188,8 @@
     - "Chan.Audit.Literal.CenterCore"
     - "Chan.Audit.Literal.b3_priceNoBreakZg"
     - "Chan.Audit.Literal.b3_priceNoBreakZd"
+    - "Chan.Audit.Literal.b3_isLiteralThirdAtLocalBool"
+    - "Chan.Audit.Literal.b3_noPriorLiteralThirdBool"
     - "Chan.Audit.Literal.b3_validUpLeaveAndFirstRetestAt"
     - "Chan.Audit.Literal.b3_validDownLeaveAndFirstRetestAt"
     - "Chan.Audit.Literal.b3_thirdBuyAtLiteral"
@@ -615,7 +617,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "正文 078:58 与 078:60 宣称当线段最高低点不在端点时，可将每条线段标准化为端点即极值并形成“延续不断、首尾相连的折线”；但 070:48 与 078:42 明确允许线段端点不是极值。端点非极值时独立标准化并非必然断开（若相邻两段极值恰相等仍可相接），但按 065:44,46、067:28,38、071:30,32,40,42 与 078:20,22,50 实现共享的特征序列真实破坏判定 segPairConfirmsDestructionBool 及内部无提前破坏检验 segHasNoInternalDestructionBool（正确接受如 0→15→10→16 与 16→12→14→11、16→8→20→6、16→8→12→6，拒绝已在 16 破坏却追加 6→14 的 7 笔串）后，在满足完整破坏结构的真实笔序列载体 b9_adjacentDestroyedSegPair 上独立标准化仍可能断开（如 0→15→10→16 与 16→8→20→6 标准化后端点 16 ≠ 20）。待下游 Chan/Audit/Math 证伪 b9_standardizedStrokeSegsAlwaysConnectedLiteral 与 b9_standardizedAlwaysConnectedLiteral。"
+  exact_proposition: "正文 078:58 与 078:60 宣称当线段最高低点不在端点时，可将每条线段标准化为端点即极值并形成“延续不断、首尾相连的折线”；但 070:48 与 078:42 明确允许线段端点不是极值。端点非极值时独立标准化并非必然断开（若相邻两段极值恰相等仍可相接），但按 065:44,46、067:28,38、071:30,32,40,42 与 078:20,22,50 实现共享的特征序列真实破坏判定 segPairConfirmsDestructionBool（依 065:44/071:40 无缺口判别式且不误加 e1.hi < e2.hi）、内部无提前破坏检验 segHasNoInternalDestructionBool，并在 b9_adjacentDestroyedSegPair 中支持 067:38 第二种情况带缺口分界读取后续确认笔尾 confirmTail（而不将其算入第二段）后，在满足完整破坏结构的真实笔序列载体上独立标准化仍可能断开（如 0→15→10→16 与 16→8→20→6 标准化后端点 16 ≠ 20）。待下游 Chan/Audit/Math 证伪 b9_standardizedStrokeSegsAlwaysConnectedLiteral 与 b9_standardizedAlwaysConnectedLiteral。"
   citations:
     - cite: "065:44"
       tier: 1
@@ -2142,13 +2144,18 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "020:58 走势中枢中心定理二对前后同级别的两个中枢仅列举后 GG < 前 DD、后 DD > 前 GG 以及两核心严格分离但外缘重叠三项。Lean 侧将 B38SequentialCentersTrace 绑定到同一条完整连续交替首尾衔接的走势链（彻底杜绝价格瞬移），并严格按 020:52,54 仅遍历同向 Z 走势段 (s1, s3) 重算 DD/ZD/ZG/GG（绝不混入中间反向段极值而翻转分类），同时区分三条边界：（1）同课 020:58 + 020:60 字面含等号破坏连续链（b38_validLiteralDestructionChain），回试端点恰落于 ZG/ZD 时新中枢核心与前中枢单点相触，使三分支全不覆盖（b38_centerTheorem2ExhaustiveLiteral）；（2）038:26 同级别分解连续链（b38_validSameLevelDecompChain），盘整+盘整允许核心真重叠，三分支亦不覆盖（b38_centerTheorem2ExhaustiveSameLevelDecompLiteral）；（3）054:24 严格不触核破坏且无缺口无倒灌连续链（b38_validStrictDestructionChain），三分支穷尽成立，单列为 b38_centerTheorem2ExhaustiveStrictGaplessBoundary 以标定 020:58 隐含边界条件。另独立登记 093:26 正文写“有两种可能的情形，一、……”后直接跳至 093:30“三、……”，文本确缺第二项。待下游 Chan/Audit/Math 分别验证。"
+  exact_proposition: "020:58 走势中枢中心定理二对前后同级别的两个中枢仅列举后 GG < 前 DD、后 DD > 前 GG 以及两核心严格分离但外缘重叠三项。Lean 侧将 B38SequentialCentersTrace 绑定到同一条完整连续交替首尾衔接的走势链（彻底杜绝价格瞬移），保留 020:52 仅遍历同向 Z 走势段 (s1, s3) 计算外缘 DD/GG（绝不混入中间反向段极值而翻转分类），同时按 020:48 令核心 [ZD, ZG] 精确等于三段公共交（b38_threeSegsZD/b38_threeSegsZG，杜绝核心包含中间段从未到过的价格），并区分三条边界：（1）同课 020:58 + 020:60 字面含等号破坏连续链（b38_validLiteralDestructionChain），回试端点恰落于 ZG/ZD 时新中枢核心与前中枢单点相触，使三分支全不覆盖（b38_centerTheorem2ExhaustiveLiteral）；（2）038:26 同级别分解相邻链（b38_validSameLevelDecompChain），允许六段直连 bridgeSegs = [] 并经 b38_hasNoTripleOverlapBool 禁止跳过中间完整中枢，盘整+盘整允许核心真重叠，三分支亦不覆盖（b38_centerTheorem2ExhaustiveSameLevelDecompLiteral）；（3）054:24 严格不触核破坏且无缺口无倒灌连续链（b38_validStrictDestructionChain），三分支穷尽成立，单列为 b38_centerTheorem2ExhaustiveStrictGaplessBoundary 以标定 020:58 隐含边界条件。另独立登记 093:26 正文写“有两种可能的情形，一、……”后直接跳至 093:30“三、……”，文本确缺第二项。待下游 Chan/Audit/Math 分别验证。"
   citations:
     - cite: "018:64"
       tier: 1
       source_tag: "[一级正文]"
       admit_id: 200
       quote: "某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。"
+    - cite: "020:48"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 261
+      quote: "有了上面的定理，就可以很精确地讨论走势中枢的问题了：根据走势中枢的数学表达式：\u00a0A、B、C，分别的高、低点是a1\\a2,b1\\b2,c1\\c2，则中枢的区间就是[max（a2,b2,c2），min（a1,b1,c1）]。"
     - cite: "020:52"
       tier: 1
       source_tag: "[一级正文]"
@@ -2193,9 +2200,10 @@
     - "Chan.Audit.Literal.CenterMetrics"
     - "Chan.Audit.Literal.b38_zSegsDD"
     - "Chan.Audit.Literal.b38_zSegsGG"
-    - "Chan.Audit.Literal.b38_zSegsZD"
-    - "Chan.Audit.Literal.b38_zSegsZG"
+    - "Chan.Audit.Literal.b38_threeSegsZD"
+    - "Chan.Audit.Literal.b38_threeSegsZG"
     - "Chan.Audit.Literal.B38SequentialCentersTrace"
+    - "Chan.Audit.Literal.b38_hasNoTripleOverlapBool"
     - "Chan.Audit.Literal.b38_validLiteralDestructionChain"
     - "Chan.Audit.Literal.b38_validStrictDestructionChain"
     - "Chan.Audit.Literal.b38_validSameLevelDecompChain"
@@ -2205,7 +2213,7 @@
     - "Chan.Audit.Literal.b38_centerTheorem2ExhaustiveLiteral"
     - "Chan.Audit.Literal.b38_centerTheorem2ExhaustiveSameLevelDecompLiteral"
     - "Chan.Audit.Literal.b38_centerTheorem2ExhaustiveStrictGaplessBoundary"
-  history_revision: "修订绑定同一条连续走势链且按 020:52 同向 Z 段重算四指标的前后同级中枢位置分类，显式区分 020:60 字面破坏、038:26 同级别分解与 054:24 严格无缺口破坏边界，改用区间全序完备枚举核心重叠、外缘重叠与完全分离全部情形；并独立补记 093:26 正文缺失的第二类情形。"
+  history_revision: "修订绑定同一条连续走势链且按 020:52 同向 Z 段算外缘 DD/GG、按 020:48 三段公共交算核心 [ZD, ZG] 的前后同级中枢位置分类，显式区分 020:60 字面破坏、038:26 同级别分解（含六段直连且禁跳枢）与 054:24 严格无缺口破坏边界，改用区间全序完备枚举核心重叠、外缘重叠与完全分离全部情形；并独立补记 093:26 正文缺失的第二类情形。"
 
 - id: "B-39"
   title: "解盘陈述中绝对模态词“必然”与经验概率词“通常”“基本”“90%”并置"

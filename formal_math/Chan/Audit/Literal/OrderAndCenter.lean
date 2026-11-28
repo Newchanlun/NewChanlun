@@ -271,9 +271,9 @@ def segCase1InsideScanBool (d1 : SegDir) (t1Start t1End : Int) : List PenStroke 
 /-- 共享真实线段破坏判定（严格依 `065:44,46`、`067:28,38` 与 `071:30,32,40,42`）：
 校验 `st1`（至少 3 笔且奇数笔、方向 `d1`）与后续笔序列 `st2`（至少 3 笔、方向相反、前三笔有重叠、首尾衔接于转折点）在分界点处构成真实线段破坏。
 1. **第一种情况（无缺口，分界点两侧 `e1` 与 `e2 = range(t1)` 不做包含合并）**：
-   - `d1 = .up`：`e1.hi < e2.hi` 且无缺口 `e2.lo ≤ e1.hi ∧ e1.lo ≤ e2.hi`，且要么 `t3.endPrice < t1.endPrice`（`071:30`，含 `16→12→14→11` 与 `16→8→20→6`），要么 `t3` 落入 `t1` 内部时后续笔先破 `t1.endPrice` 于破 `t1.startPrice` 之前（`071:32`）；
-   - `d1 = .down`：对称对偶。
-2. **第二种情况（有缺口，`067:38`）**：`e1` 与 `e2` 存在缺口，且 `st2` 的标准第二特征序列出现反向分型（`d1 = .up` 见底分型、`d1 = .down` 见顶分型）。
+   - `d1 = .up`：无缺口 `e2.lo ≤ e1.hi`（`065:44` `dj ≤ gi` 与 `071:40` 判别式，不附加 `e1.hi < e2.hi`），且要么 `t3.endPrice < t1.endPrice`（`071:30`，含 `16→12→14→11`、`16→8→20→6` 及 `0→10→4→8→1→3→0→2` 在 `8` 处），要么 `t3` 落入 `t1` 内部时后续笔先破 `t1.endPrice` 于破 `t1.startPrice` 之前（`071:32`）；
+   - `d1 = .down`：对称对偶（无缺口 `e1.lo ≤ e2.hi`）。
+2. **第二种情况（严格有缺口，`067:38`）**：`d1 = .up` 时 `e1.hi < e2.lo` 且 `st2` 的标准第二特征序列出现底分型；`d1 = .down` 时 `e2.hi < e1.lo` 且 `st2` 的标准第二特征序列出现顶分型。
 引文：[065:44]「如果找到i和j，j>=i+2,使得dj<=gi,那么称向上线段被笔破坏。」
 引文：[065:46]「如果找到i和j，j>=i+2,使得gj>=di,那么称向下线段被笔破坏。」
 引文：[067:28]「特征序列的顶分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该底分型的低点处结束，该低点是该线段的终点；」
@@ -295,25 +295,21 @@ def segPairConfirmsDestructionBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bo
     decide (last1.endPrice = t1.startPrice) &&
     match d1 with
     | .up =>
-      if decide (e1.hi < e2.hi) && decide (e2.lo ≤ e1.hi) && decide (e1.lo ≤ e2.hi) then
+      if decide (e2.lo ≤ e1.hi) then
         decide (t3.endPrice < t1.endPrice) ||
         (decide (t2.endPrice ≤ t1.startPrice) &&
          decide (t1.endPrice ≤ t3.endPrice) &&
          segCase1InsideScanBool .up t1.startPrice t1.endPrice rest)
-      else if decide (e1.hi < e2.lo) then
-        segHasBottomFractalBool (segMergeCharElems false (segExtractCharElems st2))
       else
-        false
+        segHasBottomFractalBool (segMergeCharElems false (segExtractCharElems st2))
     | .down =>
-      if decide (e2.lo < e1.lo) && decide (e1.lo ≤ e2.hi) && decide (e2.lo ≤ e1.hi) then
+      if decide (e1.lo ≤ e2.hi) then
         decide (t3.endPrice > t1.endPrice) ||
         (decide (t1.startPrice ≤ t2.endPrice) &&
          decide (t3.endPrice ≤ t1.endPrice) &&
          segCase1InsideScanBool .down t1.startPrice t1.endPrice rest)
-      else if decide (e2.hi < e1.lo) then
-        segHasTopFractalBool (segMergeCharElems true (segExtractCharElems st2))
       else
-        false
+        segHasTopFractalBool (segMergeCharElems true (segExtractCharElems st2))
   | _, _, _ => false
 
 /-- 辅助递归：检查笔序列 `strokes` 从奇数切分点 `k` 起是否不存在内部提前破坏。
@@ -601,12 +597,32 @@ instance instDecidableB3ValidDownLeaveAndFirstRetest
     leaveSeg.endPrice < z.zd ∧
     leaveSeg.endPrice = retestSeg.startPrice))
 
-/-- B-3 列表绑定完整前提（向上离开 + 首次回试，布尔版）：在同一条已完成次级别走势列表 `segs` 上，所有下标 `< i` 的段均仍属中枢震荡（`z` 尚未被破坏），且连续下标 `(i, i + 1)` 分别给出真实向上离开段与紧接的首次向下回试段。
+/-- B-3 单位置局部字面第三类买卖点判定（含等号口径）：检验相邻两段 `(s1, s2)` 是否已按 `020:60`（含等号）或其卖点对偶构成字面第三类买卖点，供前缀首次性检查排除更早成立的字面三买卖。
+引文：[020:60]「一个次级别走势类型向上离开缠中说禅走势中枢，然后以一个次级别走势类型回试，其低点不跌破ZG，则构成第三类买点」
+引文：[020:62]「注意，第三类买卖点比第一、二类要后知后觉，但如果抓得好，往往不用浪费盘整的时间，比较适合短线技术较好的资金，但一定要注意，并不是任何回调回抽都是第三类买卖点，必须是第一次。」 -/
+def b3_isLiteralThirdAtLocalBool (z : CenterCore) (s1 s2 : DirectedSeg) : Bool :=
+  (decide (b3_validUpLeaveAndFirstRetest z s1 s2) && decide (b3_priceNoBreakZg z.zg s2.lo)) ||
+  (decide (b3_validDownLeaveAndFirstRetest z s1 s2) && decide (b3_priceNoBreakZd z.zd s2.hi))
+
+/-- 检查走势段列表 `segs` 在从下标 `j` 起的 `fuel` 个更早位置上均未按自身含等号字面判据提前成立第三类买卖点（杜绝首次触边成立三买卖后，在同一中枢上重复产生第二次“首次”回试）。
+引文：[020:62]「注意，第三类买卖点比第一、二类要后知后觉，但如果抓得好，往往不用浪费盘整的时间，比较适合短线技术较好的资金，但一定要注意，并不是任何回调回抽都是第三类买卖点，必须是第一次。」 -/
+def b3_noPriorLiteralThirdBool (z : CenterCore) (segs : List DirectedSeg) (j fuel : Nat) : Bool :=
+  match fuel with
+  | 0 => true
+  | fuel' + 1 =>
+    match nthSegOpt segs j, nthSegOpt segs (j + 1) with
+    | some s1, some s2 =>
+      (!b3_isLiteralThirdAtLocalBool z s1 s2) &&
+      b3_noPriorLiteralThirdBool z segs (j + 1) fuel'
+    | _, _ => false
+
+/-- B-3 列表绑定完整前提（向上离开 + 首次回试，布尔版）：在同一条已完成次级别走势列表 `segs` 上，所有下标 `< i` 的段均仍属中枢震荡且此前尚未按自身含等号口径成立过字面第三类买卖点，且连续下标 `(i, i + 1)` 分别给出真实向上离开段与紧接的首次向下回试段。
 引文：[020:60]「一个次级别走势类型向上离开缠中说禅走势中枢，然后以一个次级别走势类型回试，其低点不跌破ZG，则构成第三类买点」
 引文：[020:62]「注意，第三类买卖点比第一、二类要后知后觉，但如果抓得好，往往不用浪费盘整的时间，比较适合短线技术较好的资金，但一定要注意，并不是任何回调回抽都是第三类买卖点，必须是第一次。」 -/
 def b3_validUpLeaveAndFirstRetestAtBool (z : CenterCore) (segs : List DirectedSeg) (i : Nat) : Bool :=
   b3_validSegChainBool segs &&
   b3_allTouchBeforeBool z i segs &&
+  b3_noPriorLiteralThirdBool z segs 0 i &&
   match nthSegOpt segs i, nthSegOpt segs (i + 1) with
   | some leaveSeg, some retestSeg => decide (b3_validUpLeaveAndFirstRetest z leaveSeg retestSeg)
   | _, _ => false
@@ -623,12 +639,13 @@ instance instDecidableB3ValidUpLeaveAndFirstRetestAt
     Decidable (b3_validUpLeaveAndFirstRetestAt z segs i) :=
   inferInstanceAs (Decidable (b3_validUpLeaveAndFirstRetestAtBool z segs i = true))
 
-/-- B-3 列表绑定完整前提（向下离开 + 首次回抽，布尔版）：在同一条已完成次级别走势列表 `segs` 上，所有下标 `< i` 的段均仍属中枢震荡，且连续下标 `(i, i + 1)` 分别给出真实向下离开段与紧接的首次向上回抽段。
+/-- B-3 列表绑定完整前提（向下离开 + 首次回抽，布尔版）：在同一条已完成次级别走势列表 `segs` 上，所有下标 `< i` 的段均仍属中枢震荡且此前尚未按自身含等号口径成立过字面第三类买卖点，且连续下标 `(i, i + 1)` 分别给出真实向下离开段与紧接的首次向上回抽段。
 引文：[020:62]「注意，第三类买卖点比第一、二类要后知后觉，但如果抓得好，往往不用浪费盘整的时间，比较适合短线技术较好的资金，但一定要注意，并不是任何回调回抽都是第三类买卖点，必须是第一次。」
 引文：[054:24]「当走势发展到d2时，一个1分钟级别的中枢就形成，区间是[d1,g1]。后面出现的线段，就要以该区间来决定是中枢震荡还是第三类买卖点。由于d1=g2，那么d2g2这段就属于[d1,g1]中枢的震荡。而到d3g3这段，显然已经不能触及[d1,g1]，所以g3就是第三类卖点。当然，如果前面d1>g2，那g2就是第三类卖点了。」 -/
 def b3_validDownLeaveAndFirstRetestAtBool (z : CenterCore) (segs : List DirectedSeg) (i : Nat) : Bool :=
   b3_validSegChainBool segs &&
   b3_allTouchBeforeBool z i segs &&
+  b3_noPriorLiteralThirdBool z segs 0 i &&
   match nthSegOpt segs i, nthSegOpt segs (i + 1) with
   | some leaveSeg, some retestSeg => decide (b3_validDownLeaveAndFirstRetest z leaveSeg retestSeg)
   | _, _ => false
@@ -726,24 +743,38 @@ def b8_approxEqEquivalenceTransitivityRequirement (tol : Int) : Prop :=
 
 /-! ### B-9：符合 `065:44`/`067:28,38`/`071:30,32,40,42`/`078:22,42,50` 真实破坏结构的相邻线段经独立标准化后折线可能断开 -/
 
-/-- 符合 `065:44,46`、`067:28,38`、`071:30,32,40,42` 与 `078:22,42,50` 真实相邻线段破坏结构的笔序列载体前提：两段笔序列各自构成内部未被提前破坏的合法线段（方向相反），且在分界点处满足 `segPairConfirmsDestructionBool d1 st1 st2`（正确接受如 `0→15→10→16` 与 `16→12→14→11`、`16→8→20→6`、`16→8→12→6`，同时拒绝已在内部破坏的多段串）。
+/-- 符合 `065:44,46`、`067:28,38`、`071:30,32,40,42` 与 `078:22,42,50` 真实相邻线段破坏结构的笔序列载体前提（支持 `067:38` 第二种情况借助后续确认笔尾 `confirmTail` 确认 `st1/st2` 分界，但不把 `confirmTail` 算入 `st2`）：
+1. `st1` 与 `st2` 各自构成内部未被提前破坏的合法线段且方向相反；
+2. 若 `confirmTail` 非空，须满足 `st2 ++ confirmTail` 连续交替合法且 `st2` 在 `st2/confirmTail` 处确实被第三段破坏结束（杜绝中途乱切 `st2`）；
+3. `segPairConfirmsDestructionBool d1 st1 (st2 ++ confirmTail) = true`（第一种情况传 `confirmTail = []` 即可确认，第二种情况带缺口分界允许读取确认底/顶分型所需的 `confirmTail`）。
+引文：[067:38]「特征序列的顶分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最高点开始的向下一笔开始的序列的特征序列出现底分型，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最低点开始的向上一笔开始的序列的特征序列出现顶分型，那么该线段在该底分型的低点处结束，该低点是该线段的终点；」
 引文：[078:22]「由于图形不断延续，因此，除非是新股上市后最开始的一段，否则任何一段都是破坏前一段的，如果你的划分，不能保证前面每一段都是被后一段破坏，那么这划分肯定不对。线段的破坏是可以逆时间传递的，也就是说被后线段破坏的线段，一定破坏前线段，如果违反这个原则，那线段的划分一定有问题。」
-引文：[071:30]「从上面的分析就可以知道，从转折点开始，如果第一笔就破坏了前线段，进而该笔延伸出三笔来，其中第三笔破点第一笔的结束位置，那么，新的线段一定形成，前线段一定结束。」
 引文：[二级旁证] [078:50]「注意，这个例子中有一个最关键的前提，就是线段B已经确认线段破坏了他前面的线段，如果线段B对前面线段的破坏都没确认，那就先确认，这里的分析都不适用了。」 -/
-def b9_adjacentDestroyedSegPairBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bool :=
+def b9_adjacentDestroyedSegPairBool
+    (d1 : SegDir) (st1 st2 confirmTail : List PenStroke) : Bool :=
+  let d2 := flipSegDir d1
+  let tailOk :=
+    match confirmTail with
+    | [] => true
+    | _ :: _ =>
+      b9_strokesChainValidBool d2 (st2 ++ confirmTail) &&
+      segPairConfirmsDestructionBool d2 st2 confirmTail
   b9_validStrokeSegBool d1 st1 &&
-  b9_validStrokeSegBool (flipSegDir d1) st2 &&
-  segPairConfirmsDestructionBool d1 st1 st2
+  b9_validStrokeSegBool d2 st2 &&
+  tailOk &&
+  segPairConfirmsDestructionBool d1 st1 (st2 ++ confirmTail)
 
 /-- `b9_adjacentDestroyedSegPairBool` 的命题版本。
 引文：[078:22]「由于图形不断延续，因此，除非是新股上市后最开始的一段，否则任何一段都是破坏前一段的，如果你的划分，不能保证前面每一段都是被后一段破坏，那么这划分肯定不对。线段的破坏是可以逆时间传递的，也就是说被后线段破坏的线段，一定破坏前线段，如果违反这个原则，那线段的划分一定有问题。」 -/
-def b9_adjacentDestroyedSegPair (d1 : SegDir) (st1 st2 : List PenStroke) : Prop :=
-  b9_adjacentDestroyedSegPairBool d1 st1 st2 = true
+def b9_adjacentDestroyedSegPair
+    (d1 : SegDir) (st1 st2 confirmTail : List PenStroke) : Prop :=
+  b9_adjacentDestroyedSegPairBool d1 st1 st2 confirmTail = true
 
 /-- `b9_adjacentDestroyedSegPair` 的可判定实例。 -/
-instance instDecidableB9AdjacentDestroyedSegPair (d1 : SegDir) (st1 st2 : List PenStroke) :
-    Decidable (b9_adjacentDestroyedSegPair d1 st1 st2) :=
-  inferInstanceAs (Decidable (b9_adjacentDestroyedSegPairBool d1 st1 st2 = true))
+instance instDecidableB9AdjacentDestroyedSegPair
+    (d1 : SegDir) (st1 st2 confirmTail : List PenStroke) :
+    Decidable (b9_adjacentDestroyedSegPair d1 st1 st2 confirmTail) :=
+  inferInstanceAs (Decidable (b9_adjacentDestroyedSegPairBool d1 st1 st2 confirmTail = true))
 
 /-- 两条方向一致的原始相邻线段方向交替且在原连接点首尾相连。
 引文：[078:20]「同样，正如同一笔不可能出现顶低于底的情况，同一线段中，两端的一顶一底，顶肯定要高于底，如果你划出一个不符合这基本要求的线段，那肯定是划错了。」
@@ -770,12 +801,12 @@ def b9_standardizeSegLiteral (s : DirectedSeg) : DirectedSeg :=
   | .up => { s with startPrice := s.lo, endPrice := s.hi }
   | .down => { s with startPrice := s.hi, endPrice := s.lo }
 
-/-- B-9 真实笔序列破坏载体上的字面折线连续性断言：任意满足 `065:44`/`067:28,38`/`071:30,32,40,42`/`078:22,42,50` 真实相邻破坏结构的两段笔序列，经 `b9_standardizeSegLiteral` 独立标准化后仍首尾相连。
-所刻画确切命题：`078:60` 宣称标准化后所有线段的连接形成“延续不断、首尾相连的折线”；端点非极值时标准化后并非必然断开（若相邻两段极值恰相等仍可相接），但存在完全符合真实相邻线段破坏结构且内部均未被提前破坏的两段笔序列（如前上段 `0→15→10→16` 与后下段 `16→8→20→6`）在独立标准化后直接断开（`16 ≠ 20`）。
+/-- B-9 真实笔序列破坏载体上的字面折线连续性断言：任意满足 `065:44`/`067:28,38`/`071:30,32,40,42`/`078:22,42,50` 真实相邻破坏结构（含可选第二种情况确认笔尾 `confirmTail`）的两段笔序列 `st1, st2`，经 `b9_standardizeSegLiteral` 独立标准化后仍首尾相连（仅标准化 `st1` 与 `st2`，不将 `confirmTail` 算入第二段）。
+所刻画确切命题：`078:60` 宣称标准化后所有线段的连接形成“延续不断、首尾相连的折线”；端点非极值时标准化后并非必然断开（若相邻两段极值恰相等仍可相接），但存在完全符合真实相邻线段破坏结构且内部均未被提前破坏的两段笔序列（如前上段 `0→15→10→16` 与后下段 `16→8→20→6`、`confirmTail = []`）在独立标准化后直接断开（`16 ≠ 20`）。
 引文：[078:60]「经过标准化处理后，所有向上线段都是以最低点开始最高点结束，向下线段都是以最高点开始最低点结束，这样，所以线段的连接，就形成一条延续不断、首尾相连的折线，这样，复杂的图形，就会十分地标准化，也为后面的中枢、走势类型等分析提供了最标准且基础的部件。」 -/
 def b9_standardizedStrokeSegsAlwaysConnectedLiteral : Prop :=
-  ∀ (d1 : SegDir) (st1 st2 : List PenStroke),
-    b9_adjacentDestroyedSegPair d1 st1 st2 →
+  ∀ (d1 : SegDir) (st1 st2 confirmTail : List PenStroke),
+    b9_adjacentDestroyedSegPair d1 st1 st2 confirmTail →
     match b9_segFromStrokes d1 st1, b9_segFromStrokes (flipSegDir d1) st2 with
     | some s1, some s2 =>
       (b9_standardizeSegLiteral s1).endPrice = (b9_standardizeSegLiteral s2).startPrice
@@ -828,19 +859,19 @@ def b38_zSegsDD (s1 s3 : DirectedSeg) : Int :=
 def b38_zSegsGG (s1 s3 : DirectedSeg) : Int :=
   intMax s1.hi s3.hi
 
-/-- 按 `020:54` 仅由同向 `Z` 走势段 `(s1, s3)` 计算中枢核心下沿 `ZD = max(d1, d2)`。
-引文：[020:54]「特别地，再定义ZG= min(g1、g2),ZD=max(d1、d2)，显然，[ZD，ZG]就是缠中说禅走势中枢的区间，由此有了如下定理：」 -/
-def b38_zSegsZD (s1 s3 : DirectedSeg) : Int :=
-  intMax s1.lo s3.lo
+/-- 按 `020:48` 取连续三段 `(s1, s2, s3)` 公共重叠区间下沿 `ZD = max(d1, d2, d3)`（保证中枢核心精确等于三段公共交，杜绝纳入中间段 `s2` 从未到过的价格）。
+引文：[020:48]「有了上面的定理，就可以很精确地讨论走势中枢的问题了：根据走势中枢的数学表达式： A、B、C，分别的高、低点是a1\a2,b1\b2,c1\c2，则中枢的区间就是[max（a2,b2,c2），min（a1,b1,c1）]。」 -/
+def b38_threeSegsZD (s1 s2 s3 : DirectedSeg) : Int :=
+  intMax (intMax s1.lo s2.lo) s3.lo
 
-/-- 按 `020:54` 仅由同向 `Z` 走势段 `(s1, s3)` 计算中枢核心上沿 `ZG = min(g1, g2)`。
-引文：[020:54]「特别地，再定义ZG= min(g1、g2),ZD=max(d1、d2)，显然，[ZD，ZG]就是缠中说禅走势中枢的区间，由此有了如下定理：」 -/
-def b38_zSegsZG (s1 s3 : DirectedSeg) : Int :=
-  intMin s1.hi s3.hi
+/-- 按 `020:48` 取连续三段 `(s1, s2, s3)` 公共重叠区间上沿 `ZG = min(g1, g2, g3)`（保证中枢核心精确等于三段公共交，杜绝纳入中间段 `s2` 从未到过的价格）。
+引文：[020:48]「有了上面的定理，就可以很精确地讨论走势中枢的问题了：根据走势中枢的数学表达式： A、B、C，分别的高、低点是a1\a2,b1\b2,c1\c2，则中枢的区间就是[max（a2,b2,c2），min（a1,b1,c1）]。」 -/
+def b38_threeSegsZG (s1 s2 s3 : DirectedSeg) : Int :=
+  intMin (intMin s1.hi s2.hi) s3.hi
 
-/-- 校验中枢 `c` 合法地由连续交替、存在公共重叠的三段次级别走势 `(s1, s2, s3)` 按 `020:52,54` 同向 `Z` 段公式重算生成。
-引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」
-引文：[020:54]「特别地，再定义ZG= min(g1、g2),ZD=max(d1、d2)，显然，[ZD，ZG]就是缠中说禅走势中枢的区间，由此有了如下定理：」 -/
+/-- 校验中枢 `c` 合法地由连续交替、存在公共重叠的三段次级别走势 `(s1, s2, s3)` 重算生成：外缘 `DD/GG` 按 `020:52` 仅遍历同向 `Z` 段 `(s1, s3)`，核心 `[ZD, ZG]` 按 `020:48` 精确等于三段公共交。
+引文：[020:48]「有了上面的定理，就可以很精确地讨论走势中枢的问题了：根据走势中枢的数学表达式： A、B、C，分别的高、低点是a1\a2,b1\b2,c1\c2，则中枢的区间就是[max（a2,b2,c2），min（a1,b1,c1）]。」
+引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」 -/
 def b38_centerMatchesThreeSegs (c : CenterMetrics) (s1 s2 s3 : DirectedSeg) : Prop :=
   c.valid ∧
   directedSegValid s1 ∧
@@ -852,8 +883,8 @@ def b38_centerMatchesThreeSegs (c : CenterMetrics) (s1 s2 s3 : DirectedSeg) : Pr
   s2.endPrice = s3.startPrice ∧
   b2_tripleCommonOverlap s1.toRange s2.toRange s3.toRange ∧
   c.dd = b38_zSegsDD s1 s3 ∧
-  c.zd = b38_zSegsZD s1 s3 ∧
-  c.zg = b38_zSegsZG s1 s3 ∧
+  c.zd = b38_threeSegsZD s1 s2 s3 ∧
+  c.zg = b38_threeSegsZG s1 s2 s3 ∧
   c.gg = b38_zSegsGG s1 s3
 
 /-- `b38_centerMatchesThreeSegs` 的可判定实例。 -/
@@ -871,8 +902,8 @@ instance instDecidableB38CenterMatchesThreeSegs
     s2.endPrice = s3.startPrice ∧
     b2_tripleCommonOverlap s1.toRange s2.toRange s3.toRange ∧
     c.dd = b38_zSegsDD s1 s3 ∧
-    c.zd = b38_zSegsZD s1 s3 ∧
-    c.zg = b38_zSegsZG s1 s3 ∧
+    c.zd = b38_threeSegsZD s1 s2 s3 ∧
+    c.zg = b38_threeSegsZG s1 s2 s3 ∧
     c.gg = b38_zSegsGG s1 s3))
 
 /-- 绑定同一条完整连续交替次级别走势链的前后两中枢演化轨迹：
@@ -905,13 +936,13 @@ structure B38SequentialCentersTrace where
 def b38_fullSegChain (tr : B38SequentialCentersTrace) : List DirectedSeg :=
   [tr.c1Seg1, tr.c1Seg2, tr.c1Seg3] ++ tr.bridgeSegs ++ [tr.c2Seg1, tr.c2Seg2, tr.c2Seg3]
 
-/-- B-38 公共基础链合法性（布尔版）：`c1`、`c2` 同级别、时间严格先后、各自按 `020:52` 同向 `Z` 段由三段重算生成，且整条 `b38_fullSegChain tr` 连续交替首尾衔接（彻底杜绝任何价格瞬移）。
+/-- B-38 公共基础链合法性（布尔版）：`c1`、`c2` 同级别、时间先后不交（`c1.endT ≤ c2.startT`，允许六段直连共享转折端点时刻）、各自按 `020:48` 取三段公共核心且按 `020:52` 同向 `Z` 段取外缘重算生成，且整条 `b38_fullSegChain tr` 连续交替首尾衔接（彻底杜绝任何价格瞬移）。
 引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」 -/
 def b38_baseChainValidBool (tr : B38SequentialCentersTrace) : Bool :=
   decide (b38_centerMatchesThreeSegs tr.c1 tr.c1Seg1 tr.c1Seg2 tr.c1Seg3) &&
   decide (b38_centerMatchesThreeSegs tr.c2 tr.c2Seg1 tr.c2Seg2 tr.c2Seg3) &&
   decide (tr.c1.level = tr.c2.level) &&
-  decide (tr.c1.endT < tr.c2.startT) &&
+  decide (tr.c1.endT ≤ tr.c2.startT) &&
   b3_validSegChainBool (b38_fullSegChain tr)
 
 /-- B-38 前提一（同课 `020:58` + `020:60` 字面含等号破坏连续链，布尔版）：
@@ -978,12 +1009,20 @@ instance instDecidableB38ValidStrictDestructionChain (tr : B38SequentialCentersT
     Decidable (b38_validStrictDestructionChain tr) :=
   inferInstanceAs (Decidable (b38_validStrictDestructionChainBool tr = true))
 
-/-- B-38 前提三（`038:26` 同级别分解连续两同级中枢链，布尔版）：在完整连续无瞬移走势链上，允许盘整+盘整经任意非空连接段 `bridgeSegs` 直接衔接而不要求第三类破坏。
+/-- 检查衔接段列表 `segs` 内部不存在任何连续三段公共重叠（防止在同级别分解中把一个完整中枢塞进 `bridgeSegs` 而跳过中间中枢）。
+引文：[038:26]「因此，完全合理、不违反任何理论原则的，可以制定出这样的同级别分解规则：在某级别中，不定义中枢延伸，允许该级别上的盘整+盘整连接；与此同时，规定该级别以下的所有级别，都允许中枢延伸，不允许盘整+盘整连接；至于该级别以上级别，根本不考虑，因为所有走势都按该级别给分解了。」 -/
+def b38_hasNoTripleOverlapBool : List DirectedSeg → Bool
+  | s1 :: s2 :: s3 :: rest =>
+    (!decide (b2_tripleCommonOverlap s1.toRange s2.toRange s3.toRange)) &&
+    b38_hasNoTripleOverlapBool (s2 :: s3 :: rest)
+  | _ => true
+
+/-- B-38 前提三（`038:26` 同级别分解相邻两同级中枢链，布尔版）：在完整连续无瞬移走势链上，允许盘整+盘整六段直连（`bridgeSegs = []`，对应 `038:22`）或经不含独立三段中枢的连接段相连（`b38_hasNoTripleOverlapBool tr.bridgeSegs`，禁止跳过中间完整中枢）。
 引文：[038:26]「因此，完全合理、不违反任何理论原则的，可以制定出这样的同级别分解规则：在某级别中，不定义中枢延伸，允许该级别上的盘整+盘整连接；与此同时，规定该级别以下的所有级别，都允许中枢延伸，不允许盘整+盘整连接；至于该级别以上级别，根本不考虑，因为所有走势都按该级别给分解了。」 -/
 def b38_validSameLevelDecompChainBool (tr : B38SequentialCentersTrace) : Bool :=
-  b38_baseChainValidBool tr && decide (tr.bridgeSegs ≠ [])
+  b38_baseChainValidBool tr && b38_hasNoTripleOverlapBool tr.bridgeSegs
 
-/-- B-38 前提三（`038:26` 同级别分解连续两同级中枢链，`Prop` 版）。
+/-- B-38 前提三（`038:26` 同级别分解相邻两同级中枢链，`Prop` 版）。
 引文：[038:26]「因此，完全合理、不违反任何理论原则的，可以制定出这样的同级别分解规则：在某级别中，不定义中枢延伸，允许该级别上的盘整+盘整连接；与此同时，规定该级别以下的所有级别，都允许中枢延伸，不允许盘整+盘整连接；至于该级别以上级别，根本不考虑，因为所有走势都按该级别给分解了。」 -/
 def b38_validSameLevelDecompChain (tr : B38SequentialCentersTrace) : Prop :=
   b38_validSameLevelDecompChainBool tr = true
