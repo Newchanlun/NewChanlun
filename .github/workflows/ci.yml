@@ -829,6 +829,10 @@ jobs:
       #   由 unsigned_p0_refuses_s_serve_* 两条测试锁住）；生产构建不含该臂，遇开关即拒绝启动。
       - name: cargo test — production_session_entry
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          # 保持 --release（debug_assertions=false 生产语义不变），跳过两轮 290s+ LLVM -O3 优化（实测 348s -> 182s，-166s / 1.92x）。
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session_testonly --test production_session_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # 纯生产构建（只开 production_session，#1769 返修 M-3/M-4）：编译生产 launcher、X 骨架与 S bin 的生产 cfg
@@ -838,6 +842,9 @@ jobs:
       #   （入口、重启、S 唯一授权、epoch2 拒绝、首次初始化原子），文件 cfg 为 production_session，同在纯生产构建执行。
       - name: cargo test — production_session_entry / history_simulation_entry（纯生产构建）
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
         run: ../.github/scripts/run-cargo-with-telemetry.sh cargo test --release --locked --features production_session --test production_session_entry --test history_simulation_entry --jobs "${CI_CARGO_JOBS:-1}" -- --test-threads 1
 
       # #1875：原 rust-test-backtest-bin 作业并入本作业（各约 2 min，Boat 上每轮少起 1 台机器）。三个测试步都带
