@@ -91,9 +91,23 @@ theorem action_spec_iff_chosen
     (p1 p2 p3 p4 p5 p6 p7 p8 p9 : Bool) (a : ActionClass) :
     ActionSpec p1 p2 p3 p4 p5 p6 p7 p8 p9 a <->
       a = chooseAction p1 p2 p3 p4 p5 p6 p7 p8 p9 := by
-  cases p1 <;> cases p2 <;> cases p3 <;> cases p4 <;> cases p5 <;>
-  cases p6 <;> cases p7 <;> cases p8 <;> cases p9 <;>
-  cases a <;> simp [ActionSpec, chooseAction]
+  cases p1 with
+  | true => cases a <;> simp [ActionSpec, chooseAction]
+  | false => cases p2 with
+    | true => cases a <;> simp [ActionSpec, chooseAction]
+    | false => cases p3 with
+      | true => cases a <;> simp [ActionSpec, chooseAction]
+      | false => cases p4 with
+        | true => cases a <;> simp [ActionSpec, chooseAction]
+        | false => cases p5 with
+          | true => cases a <;> simp [ActionSpec, chooseAction]
+          | false => cases p6 with
+            | true => cases a <;> simp [ActionSpec, chooseAction]
+            | false => cases p7 with
+              | true => cases a <;> simp [ActionSpec, chooseAction]
+              | false => cases p8 with
+                | true => cases a <;> simp [ActionSpec, chooseAction]
+                | false => cases p9 <;> cases a <;> simp [ActionSpec, chooseAction]
 
 theorem action_priority_complete_unique
     (p1 p2 p3 p4 p5 p6 p7 p8 p9 : Bool) :
@@ -130,8 +144,13 @@ def RiskModeSpec (m0 m1 m2 m3 : Bool) : RiskMode -> Prop
 theorem risk_mode_spec_iff_chosen (m0 m1 m2 m3 : Bool) (m : RiskMode) :
     RiskModeSpec m0 m1 m2 m3 m <->
       m = chooseRiskMode m0 m1 m2 m3 := by
-  cases m0 <;> cases m1 <;> cases m2 <;> cases m3 <;>
-  cases m <;> simp [RiskModeSpec, chooseRiskMode]
+  cases m0 with
+  | true => cases m <;> simp [RiskModeSpec, chooseRiskMode]
+  | false => cases m1 with
+    | true => cases m <;> simp [RiskModeSpec, chooseRiskMode]
+    | false => cases m2 with
+      | true => cases m <;> simp [RiskModeSpec, chooseRiskMode]
+      | false => cases m3 <;> cases m <;> simp [RiskModeSpec, chooseRiskMode]
 
 theorem risk_mode_complete_unique (m0 m1 m2 m3 : Bool) :
     ExistsUnique (fun m => RiskModeSpec m0 m1 m2 m3 m) := by
@@ -169,8 +188,11 @@ theorem capital_phase_spec_iff_chosen
     (returned ready reserveLow accreteLow : Bool) (p : CapitalPhase) :
     CapitalPhaseSpec returned ready reserveLow accreteLow p <->
       p = chooseCapitalPhase returned ready reserveLow accreteLow := by
-  cases returned <;> cases ready <;> cases reserveLow <;> cases accreteLow <;>
-  cases p <;> simp [CapitalPhaseSpec, chooseCapitalPhase]
+  cases returned with
+  | false => cases ready <;> cases p <;> simp [CapitalPhaseSpec, chooseCapitalPhase]
+  | true => cases reserveLow with
+    | true => cases p <;> simp [CapitalPhaseSpec, chooseCapitalPhase]
+    | false => cases accreteLow <;> cases p <;> simp [CapitalPhaseSpec, chooseCapitalPhase]
 
 theorem capital_phase_complete_unique (returned ready reserveLow accreteLow : Bool) :
     ExistsUnique (fun p => CapitalPhaseSpec returned ready reserveLow accreteLow p) := by
