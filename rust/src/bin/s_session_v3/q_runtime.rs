@@ -1101,13 +1101,45 @@ mod tests {
         let (e, t) = f.accept_begin(n, (&id, n * 10, 6 + n, 12 + n, 3 + n, 7 + n), 1);
         f.publish(&e, &t).unwrap();
     }
-    pub(super) fn projection(f: &Fixture, r: &QResources) -> Projection {
-        let mut reader = AuditReader::new(f.db_path(), r);
+    fn shared_gen1_db() -> PathBuf {
+        static SHARED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                let mut f = Fixture::new();
+                publish(&mut f, 1);
+                let src = f.db_path();
+                let dst_dir = std::env::temp_dir().join(format!(
+                    "q-runtime-gen1-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&dst_dir).unwrap();
+                let dst = dst_dir.join("session.db");
+                std::fs::copy(&src, &dst).unwrap();
+                for suffix in ["-wal", "-shm"] {
+                    let s_side = PathBuf::from(format!("{}{suffix}", src.display()));
+                    if s_side.exists() {
+                        let d_side = PathBuf::from(format!("{}{suffix}", dst.display()));
+                        std::fs::copy(&s_side, &d_side).unwrap();
+                    }
+                }
+                dst
+            })
+            .clone()
+    }
+    fn projection_at(db_path: PathBuf, r: &QResources) -> Projection {
+        let mut reader = AuditReader::new(db_path, r);
         reader
             .with_capture(r, &mut ServerAccess::new(r), |c, a| {
                 c.projection(1, HistoryMode::AsKnown, a)
             })
             .unwrap()
+    }
+    pub(super) fn projection(f: &Fixture, r: &QResources) -> Projection {
+        projection_at(f.db_path(), r)
     }
     pub(super) fn envelope(fixed: &Value, payload: Value) -> Vec<u8> {
         canonical_json(&json!({"schema_revision":"s-session/3","session_id":fixed["session_id"],"session_generation":fixed["session_generation"],"source_namespace":"q-runtime-test","source_epoch":"1","message_id":"request","producer_id":"test-client","producer_epoch":"1","payload_hash":sha256_hex(canonical_json(&payload).as_bytes()),"causal_refs":[],"payload":payload})).into_bytes()
@@ -1215,12 +1247,11 @@ mod tests {
     }
     #[test]
     fn server_resource_gates_and_exact_requests_do_not_depend_on_client_job_configuration() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let r = resources();
-        let p = projection(&f, &r);
+        let p = projection_at(db_path.clone(), &r);
         let incoming = snapshot(&p);
-        let rt = Runtime::new(f.db_path(), Arc::clone(&r), "1").unwrap();
+        let rt = Runtime::new(db_path.clone(), Arc::clone(&r), "1").unwrap();
         assert!(rt.dispatch("/api/v2/snapshot", &incoming).is_err());
         let mut forged: Value = strict_json(&incoming).unwrap();
         forged["job_limits"] = json!({"max_total_nodes":"999999"});
@@ -1268,7 +1299,7 @@ mod tests {
             let mut config = strict_json(r.canonical().as_bytes()).unwrap();
             config["limits"][key] = json!(value);
             let small = Arc::new(QResources::parse(canonical_json(&config).as_bytes()).unwrap());
-            let runtime = Runtime::new(f.db_path(), small, "1").unwrap();
+            let runtime = Runtime::new(db_path.clone(), small, "1").unwrap();
             let result = match runtime.dispatch(path, &input) {
                 Ok(p) => p.recv(),
                 Err(e) => Err(e),
@@ -1278,11 +1309,10 @@ mod tests {
     }
     #[test]
     fn runtime_write_failure_never_advances_lease() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let r = resources();
-        let p = projection(&f, &r);
-        let rt = Runtime::new(f.db_path(), r, "1").unwrap();
+        let p = projection_at(db_path.clone(), &r);
+        let rt = Runtime::new(db_path.clone(), r, "1").unwrap();
         let response = call(&rt, "/api/v3/watch", &watch(&p));
         struct Reject;
         impl Write for Reject {
@@ -1308,14 +1338,13 @@ mod tests {
     #[test]
     fn response_write_holds_worker_slot_until_completion() {
         use std::sync::mpsc;
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let mut config = q_resources::tests::functional_input();
         config["limits"]["max_query_workers"] = json!("1");
         config["limits"]["max_query_queue"] = json!("1");
         let r = Arc::new(QResources::parse(canonical_json(&config).as_bytes()).unwrap());
-        let p = projection(&f, &r);
-        let runtime = Runtime::new(f.db_path(), r, "1").unwrap();
+        let p = projection_at(db_path.clone(), &r);
+        let runtime = Runtime::new(db_path.clone(), r, "1").unwrap();
         let (started_rx_send, started) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         struct Held {
@@ -1431,11 +1460,10 @@ sys.stdout.buffer.write(canonical(r))"#;
     }
     #[test]
     fn real_tcp_http_routes_share_actual_capture_and_watch_delivery() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let r = resources();
-        let p = projection(&f, &r);
-        let rt = Runtime::new(f.db_path(), r, "1").unwrap();
+        let p = projection_at(db_path.clone(), &r);
+        let rt = Runtime::new(db_path.clone(), r, "1").unwrap();
         let content = envelope(
             &plain_wire(&p)["fixed_cut"],
             json!({"op":"content","anchor":p.anchor(),"path":[{"field":"rows"}],"unit":"items","offset":"0","limit":"1"}),
@@ -1459,11 +1487,10 @@ sys.stdout.buffer.write(canonical(r))"#;
     }
     #[test]
     fn http_plain_and_bound_errors_do_not_claim_unverified_identity() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let r = resources();
-        let p = projection(&f, &r);
-        let rt = Runtime::new(f.db_path(), Arc::clone(&r), "2").unwrap();
+        let p = projection_at(db_path.clone(), &r);
+        let rt = Runtime::new(db_path.clone(), Arc::clone(&r), "2").unwrap();
         for (wire,status,error) in [
             (b"POST /api/v3/snapshot HTTP/1.1\r\nContent-Length: 1\r\ncontent-length: 1\r\n\r\nx".to_vec(),400,"InvalidQuery"),
             (b"POST /api/v3/snapshot HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\nx".to_vec(),400,"InvalidQuery"),
@@ -1504,7 +1531,7 @@ sys.stdout.buffer.write(canonical(r))"#;
             &reply,
             json!({"meta":{"session_id":plain_wire(&p)["fixed_cut"]["session_id"]},"protocol":{"session_generation":plain_wire(&p)["fixed_cut"]["session_generation"]}}),
         );
-        let unavailable = Runtime::new(f.db_path().with_extension("absent"), r, "2").unwrap();
+        let unavailable = Runtime::new(db_path.with_extension("absent"), r, "2").unwrap();
         let (result, wire) = exchange(
             &unavailable,
             &http_request("/api/v3/snapshot", &snapshot(&p)),
@@ -1596,16 +1623,15 @@ sys.stdout.buffer.write(canonical(r))"#;
     }
     #[test]
     fn http_frame_includes_headers_and_all_errors_obey_reply_bound() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let r = resources();
-        let p = projection(&f, &r);
+        let p = projection_at(db_path.clone(), &r);
         let wire = http_request("/api/v3/snapshot", &snapshot(&p));
         for (limit, status) in [(wire.len(), 200), (wire.len() - 1, 503)] {
             let mut v = strict_json(r.canonical().as_bytes()).unwrap();
             v["limits"]["max_frame_bytes"] = json!(limit.to_string());
             let rt = Runtime::new(
-                f.db_path(),
+                db_path.clone(),
                 Arc::new(QResources::parse(canonical_json(&v).as_bytes()).unwrap()),
                 "1",
             )
@@ -1617,7 +1643,7 @@ sys.stdout.buffer.write(canonical(r))"#;
         let mut v = strict_json(r.canonical().as_bytes()).unwrap();
         v["limits"]["max_reply_bytes"] = json!("1");
         let rt = Runtime::new(
-            f.db_path(),
+            db_path.clone(),
             Arc::new(QResources::parse(canonical_json(&v).as_bytes()).unwrap()),
             "1",
         )
@@ -1668,14 +1694,13 @@ sys.stdout.buffer.write(canonical(r))"#;
     }
     #[test]
     fn http_header_and_body_preserve_original_separate_sendall_timeouts() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let mut v = q_resources::tests::functional_input();
         v["limits"]["max_query_workers"] = json!("1");
         v["limits"]["socket_write_timeout_ms"] = json!("100");
         let r = Arc::new(QResources::parse(canonical_json(&v).as_bytes()).unwrap());
-        let p = projection(&f, &r);
-        let rt = Runtime::new(f.db_path(), Arc::clone(&r), "1").unwrap();
+        let p = projection_at(db_path.clone(), &r);
+        let rt = Runtime::new(db_path.clone(), Arc::clone(&r), "1").unwrap();
         let reply = call(&rt, "/api/v3/watch", &watch(&p));
         struct PartialHeader(usize);
         impl Write for PartialHeader {
@@ -2098,14 +2123,13 @@ sys.stdout.buffer.write(canonical(r))"#;
 
     #[test]
     fn actual_socket_read_timeout_sends_503_and_releases_worker() {
-        let mut f = Fixture::new();
-        publish(&mut f, 1);
+        let db_path = shared_gen1_db();
         let mut v = q_resources::tests::functional_input();
         v["limits"]["max_query_workers"] = json!("1");
         v["limits"]["socket_read_timeout_ms"] = json!("20");
         let r = Arc::new(QResources::parse(canonical_json(&v).as_bytes()).unwrap());
-        let p = projection(&f, &r);
-        let rt = Runtime::new(f.db_path(), r, "1").unwrap();
+        let p = projection_at(db_path.clone(), &r);
+        let rt = Runtime::new(db_path.clone(), r, "1").unwrap();
         let (mut client, server) = tcp_pair();
         client
             .write_all(b"POST /api/v3/snapshot HTTP/1.1\r\nContent-Length: 8\r\n\r\n{")
