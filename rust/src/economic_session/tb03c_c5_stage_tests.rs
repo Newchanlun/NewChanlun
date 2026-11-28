@@ -45,27 +45,55 @@ struct Db {
     files: Files,
 }
 impl Db {
+    fn template_bytes() -> &'static [u8] {
+        static TEMPLATE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        TEMPLATE.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "c5-stage-tpl-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let _guard = Files(dir.clone());
+            let path = dir.join("eb.sqlite");
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(&format!(
+                "BEGIN IMMEDIATE;                 CREATE TABLE meta(k TEXT PRIMARY KEY,v TEXT NOT NULL) STRICT;                 {};                 COMMIT;",
+                store::CONTENT_SQL
+            ))
+            .unwrap();
+            c.execute_batch("BEGIN IMMEDIATE;").unwrap();
+            c.execute("INSERT INTO meta VALUES('schema_revision',?1)", [SCHEMA_V2])
+                .unwrap();
+            c.execute(
+                "INSERT INTO content_meta VALUES(1,?1)",
+                [s_content::CONTENT_FORMAT],
+            )
+            .unwrap();
+            c.execute_batch("COMMIT;").unwrap();
+            drop(c);
+            std::fs::read(&path).unwrap()
+        })
+    }
+
     fn fresh(tag: &str) -> Self {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "c5-stage-{}-{tag}-{}",
+            "c5-stage-{}-{tag}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         std::fs::create_dir(&dir).unwrap();
-        let c = Connection::open(dir.join("eb.sqlite")).unwrap();
-        c.execute_batch("CREATE TABLE meta(k TEXT PRIMARY KEY,v TEXT NOT NULL) STRICT;")
-            .unwrap();
-        c.execute_batch(store::CONTENT_SQL).unwrap();
-        c.execute("INSERT INTO meta VALUES('schema_revision',?1)", [SCHEMA_V2])
-            .unwrap();
-        c.execute(
-            "INSERT INTO content_meta VALUES(1,?1)",
-            [s_content::CONTENT_FORMAT],
-        )
-        .unwrap();
+        let db = dir.join("eb.sqlite");
+        std::fs::write(&db, Self::template_bytes()).unwrap();
+        let c = Connection::open(&db).unwrap();
         Self {
             c,
             files: Files(dir),
