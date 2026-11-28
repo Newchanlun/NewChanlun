@@ -200,21 +200,28 @@ def DivGeometry.passes (mode : ForceCompareMode) (spec : ForceSpec) (h : List �
     forceWeaker mode spec h side
 
 /-- #2322 K-2/K-4/K-5/K-6：复用 M15 传入的分解及末枢，不再分解或复验一类点结构。
-`j` 是离开段，方向取该段自身；`isFirstBuy` 对应向下离开与底背驰。`i` 不参与求值：
-比较段 b 由两枢之间的全部连接段合成。价格只读离开段终点（含）之前的前缀。
+取离开段收笔方向 `d.closingDir? j`：深度 0 恒等于 `Seg.dir`，深度 ≥ 1 时偶数块的
+收笔方向与起笔方向相反。与 M15 `firstPoint` 的收笔方向门一致：`isFirstBuy` 判底背驰。
+`prev` 依赖 `d.ledger.centers` 的时间序；b 由两枢之间的全部连接段合成，`i` 不参与求值。
+c 从末枢结束处的第一段起，到第 `j` 段终点（含）；价格只读截至该终点的前缀。
+依据契约 S1–S5，不重复检查在线 `progresses` 守卫。
 [033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」
 -/
 def divJudge (recipe : ForceRecipe) (mode : ForceCompareMode) (h : List ℚ) : StrengthJudge ℚ :=
   fun d z _i j => Id.run do
-    let some c := d.steps[j]? | return false
+    let some cSeg := d.steps[j]? | return false
+    let some side := d.closingDir? j | return false
+    if j < z.stop then return false
     let some prev := (d.ledger.centers.takeWhile (fun p => p.start < z.start)).getLast? | return false
-    let some w := trendWindowOfDecomp? d prev z c.source | return false
-    let past := h.take (c.source.last + 1)
-    return MakesNewExtreme past c.dir w.earlier w.later &&
-      forceWeaker mode (recipe.atWindow w) past c.dir
+    let some cStart := d.steps[z.stop]?.map (·.source.first) | return false
+    let some c := span? cStart cSeg.source.last | return false
+    let some w := trendWindowOfDecomp? d prev z c | return false
+    let past := h.take (cSeg.source.last + 1)
+    return MakesNewExtreme past side w.earlier w.later &&
+      forceWeaker mode (recipe.atWindow w) past side
 
 /-- K-2 镜像义务：势为反号等变时，价格取负且分解与中枢镜像的判定一致。
-段跨度和中枢段号保持不变，段方向翻转，传入末枢的核取负并交换上下沿。
+段跨度和中枢段号保持不变，起笔与收笔方向均翻转，传入末枢的核取负并交换上下沿。
 [033:26] 「所谓顶背驰，就是最后这个中枢，向上离开比向下离开要弱，而中枢有这样的特性，就是对无论向上或向下离开的，都有相同的回拉作用，既然向上离开比向下离开要弱，而向下离开都能拉回中枢，那向上的离开当然也能拉回中枢里，对于b+B+c向上的走势，这就构成顶背驰，而对于b+B+c向下的走势，就构成底背驰。」
 -/
 def DivJudgeMirrorEquiv (recipe : ForceRecipe) (mode : ForceCompareMode) : Prop :=
@@ -222,6 +229,7 @@ def DivJudgeMirrorEquiv (recipe : ForceRecipe) (mode : ForceCompareMode) : Prop 
     ∀ (h : List ℚ) (d d' : Decomposition ℚ) (z z' : Center ℚ) (i j : Nat),
       d'.steps.map (fun s => (s.source, s.dir)) =
         d.steps.map (fun s => (s.source, s.dir.flip)) →
+      (∀ k, d'.closingDir? k = (d.closingDir? k).map Dir.flip) →
       d'.ledger.centers.map (fun p => (p.start, p.stop)) =
         d.ledger.centers.map (fun p => (p.start, p.stop)) →
       z'.start = z.start → z'.stop = z.stop →
