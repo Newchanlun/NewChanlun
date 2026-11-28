@@ -109,24 +109,18 @@ def selOrderBWithKeys (keys : Strict.Nest.SelectorKeys) (a b : Interval) : Bool 
 /-- Bool 与 Prop 的通用键表镜像一致。 -/
 theorem selOrderBWithKeys_iff (keys : Strict.Nest.SelectorKeys) (a b : Interval) :
     selOrderBWithKeys keys a b = true ↔ Strict.Nest.selOrderWithKeys keys a b := by
-  cases keys <;> simp [selOrderBWithKeys, Strict.Nest.selOrderWithKeys] at * <;> omega
+  cases keys <;>
+    simp only [selOrderBWithKeys, Strict.Nest.selOrderWithKeys,
+      Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
+      or_assoc, and_assoc, gt_iff_lt]
 
 /-- 仅显式测试默认记录的 Bool 镜像；生产使用 `selOrderBWithKeys`。 -/
 def selOrderB (a b : Interval) : Bool :=
   selOrderBWithKeys defaultSelectorKeys a b
 
 /-- **`selOrderB` ⟺ `selOrder`（Bool/Prop 一致，L0）** —— 可计算版与谓词版同真，无漂移。 -/
-theorem selOrderB_iff (a b : Interval) : selOrderB a b = true ↔ selOrder a b := by
-  unfold selOrderB selOrder selOrderBWithKeys Strict.Nest.selOrderWithKeys defaultSelectorKeys
-  -- selOrderB 用 `||`（左结合），selOrder 用 `∨`（右结合）——结合性不同。两侧都是 Nat 比较的
-  -- 析取，omega 理解 `<`/`=` 并跨结合性证等价（无 Mathlib tauto，本项目纯 Lean4）。
-  constructor
-  · intro h
-    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at h
-    omega
-  · intro h
-    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq]
-    omega
+theorem selOrderB_iff (a b : Interval) : selOrderB a b = true ↔ selOrder a b :=
+  selOrderBWithKeys_iff defaultSelectorKeys a b
 
 /--
   **Sel_Θ 严格全序三歧性（不留平局，L0）** —— 对任意两候选 `a b`，下列恰一成立：
@@ -160,14 +154,8 @@ theorem selOrder_trichotomy (a b : Interval) :
 
 /-- **selOrder 传递（全序的传递性，L0）** —— `selOrder a b` ∧ `selOrder b c` ⟹ `selOrder a c`。 -/
 theorem selOrder_trans {a b c : Interval}
-    (h₁ : selOrder a b) (h₂ : selOrder b c) : selOrder a c := by
-  unfold selOrder at *
-  rcases h₁ with he₁ | ⟨he₁, hs₁⟩ | ⟨he₁, hs₁, hi₁⟩ <;>
-    rcases h₂ with he₂ | ⟨he₂, hs₂⟩ | ⟨he₂, hs₂, hi₂⟩
-  all_goals first
-    | (left; omega)
-    | (right; left; omega)
-    | (right; right; omega)
+    (h₁ : selOrder a b) (h₂ : selOrder b c) : selOrder a c :=
+  Strict.Nest.selOrderWithKeys_trans h₁ h₂
 
 /--
   **selOrder 由 selKey 决定（左替换，L0）** —— `selOrder` 只读 endTime/startTime/idx
