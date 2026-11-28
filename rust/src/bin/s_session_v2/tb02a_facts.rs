@@ -174,15 +174,15 @@ impl UnitsCache {
 
 /// 后续 bar 的精确内容键（源坐标 + revision + 4 价）——修订即键变，杜绝同 ID 未核内容兜底。
 fn unit_content_key(coord: i64, event: &Value, bar: &Value) -> String {
-    canonical_json(&json!({
-        "source_coord": coord.to_string(),
-        "revision": event["revision"],
-        "input_revision": event["input_revision"],
-        "open": bar["open"],
-        "high": bar["high"],
-        "low": bar["low"],
-        "close": bar["close"],
-    }))
+    unit_content_key_fast(
+        coord,
+        &event["revision"],
+        &event["input_revision"],
+        &bar["open"],
+        &bar["high"],
+        &bar["low"],
+        &bar["close"],
+    )
 }
 fn comparisons(a: Option<&Bar>, b: &Bar) -> (Value, Value) {
     let Some(a) = a else {
@@ -242,18 +242,18 @@ impl Builder<'_> {
             })
             .collect();
         let key = canonical_json(&slot);
-        let id = format!(
-            "obj-{}",
-            sha256_hex(
-                canonical_json(
-                    &json!({"kind":kind,"fact_key":key,"payload":payload,"input_refs":refs,
-            "profile_id":tb02a::PROFILE,"rule_revision":RULE_REVISION})
-                )
-                .as_bytes()
-            )
+        let payload_json = canonical_json(&payload);
+        let input_refs_json = canonical_json(&Value::Array(refs));
+        let id = object_id_from_canonical(
+            kind,
+            &key,
+            &payload_json,
+            &input_refs_json,
+            tb02a::PROFILE,
+            RULE_REVISION,
         );
         json!({"object_id":id,"object_revision":1,"kind":kind,"fact_key":key,
-            "payload_json":canonical_json(&payload),"input_refs_json":canonical_json(&json!(refs)),"source_coords_json":canonical_json(&json!(coords(&sources))),
+            "payload_json":payload_json,"input_refs_json":input_refs_json,"source_coords_json":canonical_json(&json!(coords(&sources))),
             "first_known_generation":self.generation,"first_known_cut":self.cut,"published_generation":self.generation})
     }
 
@@ -378,6 +378,7 @@ fn cc007_add(
     }
     let shape_sources = base_sources.clone();
     let end = *groups[2].members.last().unwrap();
+    let ref_targets = cc007_ref_targets(&groups);
     let refs_key = canonical_json(&json!(references));
     let mut sources = base_sources;
     let mut observed: Vec<Value> = Vec::new();
@@ -388,12 +389,11 @@ fn cc007_add(
         let bar = raw_bar(event);
         let content_key = unit_content_key(coord, event, &bar);
         let unit = units.unit(&refs_key, coord, content_key.clone(), || {
-            let mut relations = Vec::new();
+            let mut relations = Vec::with_capacity(4 * references.len());
             for axis in ["open", "high", "low", "close"] {
-                let price = bar[axis].as_str().unwrap().parse::<i64>().unwrap();
-                for r in &references {
-                    let target = r["value"].as_str().unwrap().parse::<i64>().unwrap();
-                    relations.push(json!({"axis":axis,"value":price.to_string(),"reference":r["name"],"reference_value":r["value"],"order":order(price,target)}));
+                let (price_str, price) = parse_bar_axis(&bar, axis);
+                for (r, target) in references.iter().zip(ref_targets) {
+                    relations.push(json!({"axis":axis,"value":price_str,"reference":r["name"],"reference_value":r["value"],"order":order(price,target)}));
                 }
             }
             UnitEntry {
@@ -728,8 +728,7 @@ pub(super) fn build_incremental(
                 .copied()
                 .filter(|reason| *reason != EQUAL_EXTREME_IDENTITY),
         );
-        let slot = json!(["CC-004.inclusion_step", coord.to_string()]);
-        let key = canonical_json(&slot);
+        let key = format!("[\"CC-004.inclusion_step\",\"{coord}\"]");
         if let Some(record) = cache.records.get(&key) {
             cache.hits += 1;
             b.objects.push(project_object(&record.object, gen, cut));
@@ -737,6 +736,7 @@ pub(super) fn build_incremental(
             continue;
         }
         cache.misses += 1;
+        let slot = json!(["CC-004.inclusion_step", coord.to_string()]);
         let fact = state.step_fact(index).expect("步骤索引在域内");
         let object = b.build_object(
             "CC-004.inclusion_step",
@@ -767,12 +767,7 @@ pub(super) fn build_incremental(
         let anchor = compact.bar.source_index;
         let reasons = group_reasons(&group_facts[index]);
         all_reasons.extend(reasons.iter().copied());
-        let slot = json!(["CC-005.inclusion_group", anchor.to_string()]);
-        let key = canonical_json(&json!([
-            "CC-005.inclusion_group",
-            anchor.to_string(),
-            version
-        ]));
+        let key = format!("[\"CC-005.inclusion_group\",\"{anchor}\",{version}]");
         if let Some(record) = cache.records.get(&key) {
             cache.hits += 1;
             b.objects.push(project_object(&record.object, gen, cut));
@@ -780,6 +775,7 @@ pub(super) fn build_incremental(
             continue;
         }
         cache.misses += 1;
+        let slot = json!(["CC-005.inclusion_group", anchor.to_string()]);
         let fact = &group_facts[index];
         let sources = group_sources(fact);
         let object = b.build_object(
@@ -1073,11 +1069,144 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
     let raw = raw.into();
     let withdrawals = withdrawals.into();
     let replaces = replaces.into();
+    // Zero-alloc canonical fast-path for request_id of the form ["<kind>"...] or [["<kind>"...]...].
+    // Returns None on any escape, whitespace, or unexpected syntax so caller falls back to full parse().
+    fn fast_request_kind(raw: &str) -> Option<&str> {
+        let bytes = raw.as_bytes();
+        let start = if bytes.starts_with(b"[\"") {
+            2
+        } else if bytes.starts_with(b"[[\"") {
+            3
+        } else {
+            return None;
+        };
+        let mut i = start;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'"' {
+                let next = *bytes.get(i + 1)?;
+                if next == b',' || next == b']' {
+                    return Some(&raw[start..i]);
+                }
+                return None;
+            }
+            if b == b'\\' || b < 0x20 {
+                return None;
+            }
+            i += 1;
+        }
+        None
+    }
+    // Zero-alloc top-level JSON object scanner for canonical step payload_json "comparisons" field.
+    // Returns Some(true) if top-level "comparisons" is [], Some(false) if non-empty array, None on fallback.
+    fn fast_top_level_comparisons_empty(raw: &str) -> Option<bool> {
+        let b = raw.as_bytes();
+        let mut i = 0usize;
+        let skip_ws = |idx: &mut usize| {
+            while *idx < b.len() && matches!(b[*idx], b' ' | b'\t' | b'\n' | b'\r') {
+                *idx += 1;
+            }
+        };
+        skip_ws(&mut i);
+        if *b.get(i)? != b'{' {
+            return None;
+        }
+        i += 1;
+        loop {
+            skip_ws(&mut i);
+            match *b.get(i)? {
+                b'}' => return None,
+                b'"' => {}
+                _ => return None,
+            }
+            i += 1;
+            let key_start = i;
+            let mut has_escape = false;
+            while i < b.len() {
+                match b[i] {
+                    b'\\' => {
+                        has_escape = true;
+                        i += 2;
+                    }
+                    b'"' => break,
+                    _ => i += 1,
+                }
+            }
+            if i >= b.len() {
+                return None;
+            }
+            let key = &raw[key_start..i];
+            i += 1;
+            skip_ws(&mut i);
+            if *b.get(i)? != b':' {
+                return None;
+            }
+            i += 1;
+            skip_ws(&mut i);
+            if !has_escape && key == "comparisons" {
+                if *b.get(i)? != b'[' {
+                    return None;
+                }
+                i += 1;
+                skip_ws(&mut i);
+                return match *b.get(i)? {
+                    b']' => Some(true),
+                    _ => Some(false),
+                };
+            }
+            // Skip arbitrary JSON value at current depth.
+            let mut depth = 0usize;
+            loop {
+                match *b.get(i)? {
+                    b'"' => {
+                        i += 1;
+                        while i < b.len() {
+                            match b[i] {
+                                b'\\' => i += 2,
+                                b'"' => {
+                                    i += 1;
+                                    break;
+                                }
+                                _ => i += 1,
+                            }
+                        }
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    b'{' | b'[' => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    b'}' | b']' => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                        i += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    b',' if depth == 0 => break,
+                    _ => i += 1,
+                }
+            }
+            skip_ws(&mut i);
+            match *b.get(i)? {
+                b',' => i += 1,
+                b'}' => return None,
+                _ => return None,
+            }
+        }
+    }
     let knowledge = objects
         .iter()
         .find(|o| field(*o, "kind").as_str() == Some("CC-054.knowledge_state"))
         .map(|o| parse(store, field(o, "payload_json").as_str().unwrap()))
         .transpose()?;
+    let mut version_payloads: Option<CodecVec<JsonOwner>> = None;
+    let mut segment_version_payloads: Option<CodecVec<JsonOwner>> = None;
     let mut axes = bj::new_work::<(&'static str, JsonOwner)>(store.allocation_budget().as_ref());
     for &axis in table.axes() {
         let kind = match axis {
@@ -1112,12 +1241,18 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
             })
         }) {
             if matches!(axis, "CC-001" | "CC-002" | "CC-003") {
-                let payload = parse(store, field(o, "payload_json").as_str().unwrap())?;
-                if field(payload.view(), "comparisons")
-                    .as_array()
-                    .unwrap()
-                    .is_empty()
-                {
+                let payload_text = field(o, "payload_json").as_str().unwrap();
+                let empty = match fast_top_level_comparisons_empty(payload_text) {
+                    Some(is_empty) => is_empty,
+                    None => {
+                        let payload = parse(store, payload_text)?;
+                        field(payload.view(), "comparisons")
+                            .as_array()
+                            .unwrap()
+                            .is_empty()
+                    }
+                };
+                if empty {
                     continue;
                 }
             }
@@ -1144,19 +1279,25 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
                 }
             } else if !matches!(axis, "CC-001" | "CC-002" | "CC-003" | "CC-056") {
                 for request in field(k.view(), "requests").as_array().unwrap().iter() {
-                    let key = parse(store, field(request, "request_id").as_str().unwrap())?;
-                    let first = key
-                        .view()
-                        .as_array()
-                        .and_then(|a| a.get(0))
-                        .unwrap_or(JsonView::Null);
-                    if first.as_str() == Some(kind)
-                        || first
-                            .as_array()
-                            .and_then(|a| a.get(0))
-                            .and_then(|v| v.as_str())
-                            == Some(kind)
-                    {
+                    let req_id = field(request, "request_id").as_str().unwrap();
+                    let matched = match fast_request_kind(req_id) {
+                        Some(first) => first == kind,
+                        None => {
+                            let key = parse(store, req_id)?;
+                            let first = key
+                                .view()
+                                .as_array()
+                                .and_then(|a| a.get(0))
+                                .unwrap_or(JsonView::Null);
+                            first.as_str() == Some(kind)
+                                || first
+                                    .as_array()
+                                    .and_then(|a| a.get(0))
+                                    .and_then(|v| v.as_str())
+                                    == Some(kind)
+                        }
+                    };
+                    if matched {
                         for r in field(request, "reasons").as_array().unwrap().iter() {
                             add_reason(r)?;
                         }
@@ -1164,19 +1305,26 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
                 }
             }
         }
-        let version = if matches!(axis, "CC-008" | "CC-009" | "CC-010" | "CC-055" | "CC-056") {
-            Some("CC-056.version")
+        let version_slot = if matches!(axis, "CC-008" | "CC-009" | "CC-010" | "CC-055" | "CC-056") {
+            Some(("CC-056.version", &mut version_payloads))
         } else if matches!(axis, "CC-011" | "CC-012" | "CC-013" | "CC-014") {
-            Some("CC-056.segment_version")
+            Some(("CC-056.segment_version", &mut segment_version_payloads))
         } else {
             None
         };
-        if let Some(version) = version {
-            for o in objects
-                .iter()
-                .filter(|o| field(*o, "kind").as_str() == Some(version))
-            {
-                let payload = parse(store, field(o, "payload_json").as_str().unwrap())?;
+        if let Some((version, slot)) = version_slot {
+            if slot.is_none() {
+                let mut loaded = bj::new_work::<JsonOwner>(store.allocation_budget().as_ref());
+                for o in objects
+                    .iter()
+                    .filter(|o| field(*o, "kind").as_str() == Some(version))
+                {
+                    let payload = parse(store, field(o, "payload_json").as_str().unwrap())?;
+                    push(store, &mut loaded, payload)?;
+                }
+                *slot = Some(loaded);
+            }
+            for payload in slot.as_ref().unwrap().iter() {
                 for r in field(field(payload.view(), "data"), "waiting_reasons")
                     .as_array()
                     .unwrap()
@@ -1317,6 +1465,109 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
         push(store, &mut root_fields, (*key, row.view()))?;
     }
     fields(store, &root_fields)
+}
+
+fn unit_content_key_fast(
+    coord: i64,
+    revision: &Value,
+    input_revision: &Value,
+    open: &Value,
+    high: &Value,
+    low: &Value,
+    close: &Value,
+) -> String {
+    use std::fmt::Write as _;
+    let mut key = String::with_capacity(96);
+    let _ = write!(key, "{coord}|");
+    let push_val = |buf: &mut String, v: &Value| match v {
+        Value::String(s) => {
+            buf.push('s');
+            let _ = write!(buf, "{}:{s}|", s.len());
+        }
+        Value::Number(n) => {
+            let _ = write!(buf, "n{n}|");
+        }
+        other => {
+            let enc = canonical_json(other);
+            let _ = write!(buf, "j{}:{enc}|", enc.len());
+        }
+    };
+    push_val(&mut key, revision);
+    push_val(&mut key, input_revision);
+    push_val(&mut key, open);
+    push_val(&mut key, high);
+    push_val(&mut key, low);
+    push_val(&mut key, close);
+    key
+}
+
+fn object_id_from_canonical(
+    kind: &str,
+    fact_key: &str,
+    payload_json: &str,
+    input_refs_json: &str,
+    profile_id: &str,
+    rule_revision: &str,
+) -> String {
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, b"{\"fact_key\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(fact_key)
+            .expect("string json")
+            .as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b",\"input_refs\":");
+    sha2::Digest::update(&mut hasher, input_refs_json.as_bytes());
+    sha2::Digest::update(&mut hasher, b",\"kind\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(kind).expect("string json").as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b",\"payload\":");
+    sha2::Digest::update(&mut hasher, payload_json.as_bytes());
+    sha2::Digest::update(&mut hasher, b",\"profile_id\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(profile_id)
+            .expect("string json")
+            .as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b",\"rule_revision\":");
+    sha2::Digest::update(
+        &mut hasher,
+        serde_json::to_string(rule_revision)
+            .expect("string json")
+            .as_bytes(),
+    );
+    sha2::Digest::update(&mut hasher, b"}");
+    let digest = sha2::Digest::finalize(hasher);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id_bytes = [0u8; 68];
+    id_bytes[..4].copy_from_slice(b"obj-");
+    for (i, b) in digest.iter().enumerate() {
+        id_bytes[4 + i * 2] = HEX[(b >> 4) as usize];
+        id_bytes[5 + i * 2] = HEX[(b & 15) as usize];
+    }
+    std::str::from_utf8(&id_bytes)
+        .expect("ascii hex")
+        .to_owned()
+}
+
+fn cc007_ref_targets(groups: &[&InclusionGroupFact; 3]) -> [i64; 6] {
+    [
+        groups[0].bar.high,
+        groups[0].bar.low,
+        groups[1].bar.high,
+        groups[1].bar.low,
+        groups[2].bar.high,
+        groups[2].bar.low,
+    ]
+}
+
+fn parse_bar_axis<'a>(bar: &'a Value, axis: &str) -> (&'a str, i64) {
+    let price_str = bar[axis].as_str().unwrap();
+    (price_str, price_str.parse::<i64>().unwrap())
 }
 
 #[cfg(test)]
