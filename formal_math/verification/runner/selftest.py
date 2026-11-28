@@ -267,6 +267,8 @@ class Suite:
         self.lite_base = self.repo.commit(self.lite_files)
         self.counter = 0
         self.warm = None
+        # run_path 会临时改 sys 模块状态；在启动用例线程前只加载一次。
+        self.sandbox = runpy.run_path(RUN)["sandbox"]
 
     def warm_auditor(self):
         """语料用例共用的审计程序预编译产物；骨架用例每次都在受信目录里从头构建。"""
@@ -1359,7 +1361,6 @@ def elab_consistency(s, work):
     prefix = os.path.realpath(subprocess.run(["lean", "--print-prefix"], cwd=pkg, check=True,
                                              capture_output=True, text=True).stdout.strip())
     ctx = SimpleNamespace(workdir=work, prefix=prefix)
-    run_sandbox = runpy.run_path(RUN)["sandbox"]
     binds = [("--ro-bind", audited, audited), ("--ro-bind", s.packages, s.packages),
              ("--ro-bind", auditor, auditor)]
     mods = []
@@ -1375,7 +1376,7 @@ def elab_consistency(s, work):
     env = {"LEAN_PATH": ":".join(libs), "LEAN_SYSROOT": prefix}
 
     def rows(argv, tag, mounts):
-        p = run_sandbox(ctx, argv, mounts, env, audited, 3600, "ELAB_CONSISTENCY", tag)
+        p = s.sandbox(ctx, argv, mounts, env, audited, 3600, "ELAB_CONSISTENCY", tag)
         p.check_returncode()
         return [json.loads(line) for line in p.stdout.decode().split("\n") if line]
 
