@@ -7,7 +7,7 @@
 // 另写一份 CLAUDE_ENV_FILE（Claude Code 每条 Bash 命令前 source），login shell 的 path_helper
 // 若把 /opt/homebrew/bin 重排到前面，这里再把垫片目录顶回最前。
 // 边界：用绝对路径（/opt/homebrew/bin/cargo）调用拦不住——那属于明知故犯，由提示词明令禁止。
-import { chmodSync, lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -30,18 +30,17 @@ export const GUARDED_TOOLS = [
 export const NC_REMOTE = "~/.local/bin/nc-remote";
 
 export function guardScript(tool: string): string {
-  return `#!/bin/sh
-# #1588 本机 cargo 垫片（.sandcastle/cargo-guard.mts 生成，勿手改）。
-cat >&2 <<'EOF'
-[nc-local-cargo-guard #1588] 本机（macOS 宿主）禁止运行 ${tool}：本仓约定本机不跑 cargo build/test/check 等重型验证。
+  const msg = `[nc-local-cargo-guard #1588] 本机（macOS 宿主）禁止运行 ${tool}：本仓约定本机不跑 cargo build/test/check 等重型验证。
 Rust 验证二选一：
   1) 远端（windows-5090 WSL）：先 git commit，再
        NC_REPO="$(git rev-parse --show-toplevel)" NC_TARGET=<工蜂唯一名，如 sandcastle-issue-N> \\
          ${NC_REMOTE} <已提交的 ref，如 sandcastle/issue-N> rust cargo check --locked
      日志拷回 /tmp/nc-remote/；ref 必须是已提交的提交。
   2) 推分支开 PR 走 CI（工蜂不 push 时交编排层）。
-不要用绝对路径绕过本垫片。
-EOF
+不要用绝对路径绕过本垫片。`;
+  return `#!/bin/sh
+# #1588 本机 cargo 垫片（.sandcastle/cargo-guard.mts 生成，勿手改）。
+printf '%s\\n' ${shQuote(msg)} >&2
 exit ${LOCAL_CARGO_BLOCKED_EXIT}
 `;
 }
@@ -64,8 +63,25 @@ export function defaultCargoGuardRoot(): string {
   return join(tmpdir(), CARGO_GUARD_DIR_NAME);
 }
 
-/** 原子写：同目录临时名写全 + chmod 后 rename 覆盖。 */
+/** 若目标已是当前用户的普通文件且权限与内容完全一致，则跳过覆盖（免反复换 inode）；否则同目录临时名写全 + chmod 后 rename 原子替换。 */
 function writeFileAtomic(path: string, content: string, mode: number): void {
+  try {
+    const st = lstatSync(path);
+    const uid = process.getuid?.();
+    if (
+      st.isFile() &&
+      !st.isSymbolicLink() &&
+      st.nlink === 1 &&
+      (uid === undefined || st.uid === uid) &&
+      (st.mode & 0o777) === mode &&
+      st.size === Buffer.byteLength(content) &&
+      readFileSync(path, "utf8") === content
+    ) {
+      return;
+    }
+  } catch {
+    // 文件尚不存在或无法读取：走原子创建/替换。
+  }
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, content, { mode });
   chmodSync(tmp, mode);
