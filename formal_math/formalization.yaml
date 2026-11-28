@@ -94,7 +94,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "本组并行审计两处原典重合断言并显式与充分加强价格条件分层：（1）二级旁证答疑 019:1058 宣称首尾相连且方向交替的 N 字三段必然有重叠、且不可能仅有边界单点重叠（b2_reply019ConnectedThreeAlwaysOverlapLiteral 与 b2_reply019NoBoundaryOnlyOverlapLiteral，随后在答疑 031:912 被作者自行否定）；（2）一级正文 067:16 宣称以向上笔开始的同一线段中任何 Si 与 Si+1 之间一定有重合区间（b2_lesson67SameUpSegAlwaysOverlapsLiteral），但在 067:28 与 071:30,32 完整线段破坏规则（包含 071:32 笔破坏后第三笔落入第一笔内部并先破起点而延续原段情形）所定义的完好向上线段前提 b2_lesson67SameUpSegAdjacentPair 下，该字面断言本身可被证伪（如 0→10→4→12→1→3→2→15 或 0→10→4→8→1→3→2→9 接 9→2→8→1 中 S2 与 S3 严格不相交）；（3）仅当额外附加回落笔不破前向上笔低点的加强价格条件 b2_upTripleNoBreakPriorLow 时，相邻向上笔重合才可推出。待下游 Chan/Audit/Math 分别对 019:1058 与 067:16 字面断言构造形式化反例。"
+  exact_proposition: "本组并行审计两处原典重合断言并显式与充分加强价格条件分层：（1）二级旁证答疑 019:1058 宣称首尾相连且方向交替的 N 字三段必然有重叠、且不可能仅有边界单点重叠（b2_reply019ConnectedThreeAlwaysOverlapLiteral 与 b2_reply019NoBoundaryOnlyOverlapLiteral，随后在答疑 031:912 被作者自行否定）；（2）一级正文 067:16 宣称以向上笔开始的同一线段中任何 Si 与 Si+1 之间一定有重合区间（b2_lesson67SameUpSegAlwaysOverlapsLiteral），但在 067:28 与 071:30,32 完整线段破坏规则（包含 071:32 笔破坏后第三笔落入第一笔内部并先破起点而延续原段情形）所定义的完好向上线段前提 b2_lesson67SameUpSegAdjacentPair 下，该字面断言本身可被证伪（如 0→10→4→12→1→3→2→15 或 0→10→4→8→1→3→2→9 接 9→2→8→1 中 S2 与 S3 严格不相交）；（3）若额外附加回落笔不破前向上笔低点的加强价格条件 b2_upTripleNoBreakPriorLow（充分加强前提，非必要条件），则可推出相邻向上笔必然重合。待下游 Chan/Audit/Math 分别对 019:1058 与 067:16 字面断言构造形式化反例。"
   citations:
     - cite: "065:48"
       tier: 1
@@ -623,7 +623,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "正文 078:58 与 078:60 宣称当线段最高低点不在端点时，可将每条线段标准化为端点即极值并形成“延续不断、首尾相连的折线”；但 070:48 与 078:42 明确允许线段端点不是极值。端点非极值时独立标准化并非必然断开（若相邻两段极值恰相等仍可相接），但按 065:44,46、067:28,38、071:30,32,40,42 与 078:20,22,50 实现共享的特征序列真实破坏判定 segPairConfirmsDestructionBool（依 065:44/071:40 无缺口判别式且不误加 e1.hi < e2.hi）、内部无提前破坏检验 segHasNoInternalDestructionBool，并在 b9_adjacentDestroyedSegPair 中支持 067:38 第二种情况带缺口分界读取后续确认笔尾 confirmTail（而不将其算入第二段），且沿完整观察序列 obs1 = st1 ++ st2 ++ confirmTail 与 obs2 = st2 ++ confirmTail 排除 st1 与 st2 任何更早的内部破坏分界（杜绝同一条完整笔链将第二段切在两个不同终点）后，在满足完整破坏结构的真实笔序列载体上独立标准化仍可能断开（如 0→15→10→16 与 16→8→20→6 标准化后端点 16 ≠ 20）。待下游 Chan/Audit/Math 证伪 b9_standardizedStrokeSegsAlwaysConnectedLiteral 与 b9_standardizedAlwaysConnectedLiteral。"
+  exact_proposition: "正文 078:58 与 078:60 宣称当线段最高低点不在端点时，可将每条线段标准化为端点即极值并形成“延续不断、首尾相连的折线”；但 070:48 与 078:42 明确允许线段端点不是极值。端点非极值时独立标准化并非必然断开（若相邻两段极值恰相等仍可相接），但按 065:44,46、067:28,38、071:30,32,40,42 与 078:20,22,50,52 实现共享的特征序列真实破坏判定 segPairConfirmsDestructionBool（第一种情况依 065:44/071:40 无缺口判别式且不误加 e1.hi < e2.hi；第二种情况有缺口经 segTakeThroughNewExtreme 在首次创新高/新低后截停，并经 segExtractOddPosElems 确认候选点自身构成第一特征序列分型且在截停前缀内出现第二特征序列反向分型，杜绝已失效候选点复活）、内部无提前破坏检验 segHasNoInternalDestructionBool，并在 b9_adjacentDestroyedSegPair 中支持 067:38 第二种情况带缺口分界读取后续确认笔尾 confirmTail（而不将其算入第二段），且沿完整观察序列 obs1 = st1 ++ st2 ++ confirmTail 与 obs2 = st2 ++ confirmTail 排除 st1 与 st2 任何更早的内部破坏分界（杜绝同一条完整笔链将第二段切在两个不同终点）后，在满足完整破坏结构的真实笔序列载体上独立标准化仍可能断开（如 0→15→10→16 与 16→8→20→6 标准化后端点 16 ≠ 20）。待下游 Chan/Audit/Math 证伪 b9_standardizedStrokeSegsAlwaysConnectedLiteral 与 b9_standardizedAlwaysConnectedLiteral。"
   citations:
     - cite: "065:44"
       tier: 1
@@ -655,6 +655,11 @@
       source_tag: "[二级旁证]"
       admit_id: null
       quote: "注意，这个例子中有一个最关键的前提，就是线段B已经确认线段破坏了他前面的线段，如果线段B对前面线段的破坏都没确认，那就先确认，这里的分析都不适用了。"
+    - cite: "078:52"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 1217
+      quote: "从这个例子就知道，笔破坏与线段破坏的异同。对于线段破坏的第二种情况，例如线段B对线段A是第二种情况，而线段C没有形成第二特征序列的分型又直接新高或新低了，这时候，不能认为这是三个线段，线段A、B、C加起来只能算是一个线段。"
     - cite: "078:58"
       tier: 1
       source_tag: "[一级正文]"
@@ -684,6 +689,8 @@
     - "Chan.Audit.Literal.directedSegValid"
     - "Chan.Audit.Literal.PenStroke"
     - "Chan.Audit.Literal.b9_segFromStrokes"
+    - "Chan.Audit.Literal.segTakeThroughNewExtreme"
+    - "Chan.Audit.Literal.segExtractOddPosElems"
     - "Chan.Audit.Literal.segPairConfirmsDestructionBool"
     - "Chan.Audit.Literal.segHasNoInternalDestructionBool"
     - "Chan.Audit.Literal.b9_validStrokeSegBool"

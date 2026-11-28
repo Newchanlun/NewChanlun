@@ -268,18 +268,39 @@ def segCase1InsideScanBool (d1 : SegDir) (t1Start t1End : Int) : List PenStroke 
       else
         if s.endPrice < t1Start then false else segCase1InsideScanBool d1 t1Start t1End rest
 
-/-- 共享真实线段破坏判定（严格依 `065:44,46`、`067:28,38` 与 `071:30,32,40,42`）：
+/-- 沿候选转折后的笔序列 `st2` 截断至首次创新高（`d1 = .up` 时向上笔 `s.endPrice > pivot`）或首次创新低（`d1 = .down` 时向下笔 `s.endPrice < pivot`）为止（保留该创新极值笔本身，但严格截停并丢弃其后所有笔，对应 `078:52` 未形成第二特征序列分型即创新高/新低时原线段延续、已失效候选点不得由更晚分型复活）。
+引文：[078:52]「从这个例子就知道，笔破坏与线段破坏的异同。对于线段破坏的第二种情况，例如线段B对线段A是第二种情况，而线段C没有形成第二特征序列的分型又直接新高或新低了，这时候，不能认为这是三个线段，线段A、B、C加起来只能算是一个线段。」 -/
+def segTakeThroughNewExtreme (d1 : SegDir) (pivot : Int) : List PenStroke → List PenStroke
+  | [] => []
+  | s :: rest =>
+    match d1 with
+    | .up =>
+      if decide (penStrokeDir s = .up) && decide (s.endPrice > pivot) then [s]
+      else s :: segTakeThroughNewExtreme d1 pivot rest
+    | .down =>
+      if decide (penStrokeDir s = .down) && decide (s.endPrice < pivot) then [s]
+      else s :: segTakeThroughNewExtreme d1 pivot rest
+
+/-- 提取候选转折后笔序列 `st2` 的偶数下标笔 `0, 2, 4, ...`（即 `t1, t3, t5, ...`，与前段第一特征序列同向的元素），用于按 `067:38` 与 `071:42` 检验候选转折点自身是否在第一特征序列中真正构成顶/底分型。
+引文：[067:38]「特征序列的顶分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最高点开始的向下一笔开始的序列的特征序列出现底分型，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最低点开始的向上一笔开始的序列的特征序列出现顶分型，那么该线段在该底分型的低点处结束，该低点是该线段的终点；」 -/
+def segExtractOddPosElems : List PenStroke → List RangeBounds
+  | s :: _ :: rest => penStrokeRange s :: segExtractOddPosElems rest
+  | [s] => [penStrokeRange s]
+  | [] => []
+
+/-- 共享真实线段破坏判定（严格依 `065:44,46`、`067:28,38`、`071:30,32,40,42` 与 `078:52`）：
 校验 `st1`（至少 3 笔且奇数笔、方向 `d1`）与后续笔序列 `st2`（至少 3 笔、方向相反、前三笔有重叠、首尾衔接于转折点）在分界点处构成真实线段破坏。
 1. **第一种情况（无缺口，分界点两侧 `e1` 与 `e2 = range(t1)` 不做包含合并）**：
    - `d1 = .up`：无缺口 `e2.lo ≤ e1.hi`（`065:44` `dj ≤ gi` 与 `071:40` 判别式，不附加 `e1.hi < e2.hi`），且要么 `t3.endPrice < t1.endPrice`（`071:30`，含 `16→12→14→11`、`16→8→20→6` 及 `0→10→4→8→1→3→0→2` 在 `8` 处），要么 `t3` 落入 `t1` 内部时后续笔先破 `t1.endPrice` 于破 `t1.startPrice` 之前（`071:32`）；
    - `d1 = .down`：对称对偶（无缺口 `e1.lo ≤ e2.hi`）。
-2. **第二种情况（严格有缺口，`067:38`）**：`d1 = .up` 时 `e1.hi < e2.lo` 且 `st2` 的标准第二特征序列出现底分型；`d1 = .down` 时 `e2.hi < e1.lo` 且 `st2` 的标准第二特征序列出现顶分型。
+2. **第二种情况（严格有缺口，`067:38` + `078:52`）**：先以 `segTakeThroughNewExtreme` 截停至首次创新高/新低为止，确认候选点自身在转折后标准第一特征序列中真正构成顶/底分型（且不与 `e1` 合并），同时在截停前缀内的标准第二特征序列出现反向分型（防止已失效的候选点被更晚分型复活）。
 引文：[065:44]「如果找到i和j，j>=i+2,使得dj<=gi,那么称向上线段被笔破坏。」
 引文：[065:46]「如果找到i和j，j>=i+2,使得gj>=di,那么称向下线段被笔破坏。」
 引文：[067:28]「特征序列的顶分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间不存在特征序列的缺口，那么该线段在该底分型的低点处结束，该低点是该线段的终点；」
 引文：[071:30]「从上面的分析就可以知道，从转折点开始，如果第一笔就破坏了前线段，进而该笔延伸出三笔来，其中第三笔破点第一笔的结束位置，那么，新的线段一定形成，前线段一定结束。」
 引文：[071:40]「特征序列的分型中，第一元素就是以该假设转折点前线段的最后一个特征元素，第二个元素，就是从这转折点开始的第一笔，显然，这两者之间是同方向的，因此，如果这两者之间有缺口，那么就是第二种情况，否则就是第一种，然后根据定义来考察就可以。」
-引文：[071:42]「这里还要强调一下包含的问题，上面的分析知道，在这假设的转折点前后那两元素，是不存在包含关系的。因为，这两者已经被假设不是同一性质的东西，不一定是同一特征序列的；但假设的转折点后的顶分型的元素，是可以应用包含关系的。为什么？因此，这些元素间，肯定是同一性质的东西，或者就是原线段的延续，那么就同是原线段的特征序列中，或者就是新线段的非特征序列中，反正都是同一类的东西，同一类的东西，当然可以考察包含关系。」 -/
+引文：[071:42]「这里还要强调一下包含的问题，上面的分析知道，在这假设的转折点前后那两元素，是不存在包含关系的。因为，这两者已经被假设不是同一性质的东西，不一定是同一特征序列的；但假设的转折点后的顶分型的元素，是可以应用包含关系的。为什么？因此，这些元素间，肯定是同一性质的东西，或者就是原线段的延续，那么就同是原线段的特征序列中，或者就是新线段的非特征序列中，反正都是同一类的东西，同一类的东西，当然可以考察包含关系。」
+引文：[078:52]「从这个例子就知道，笔破坏与线段破坏的异同。对于线段破坏的第二种情况，例如线段B对线段A是第二种情况，而线段C没有形成第二特征序列的分型又直接新高或新低了，这时候，不能认为这是三个线段，线段A、B、C加起来只能算是一个线段。」 -/
 def segPairConfirmsDestructionBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bool :=
   let char1 := segMergeCharElems (decide (d1 = .up)) (segExtractCharElems st1)
   decide (st1.length ≥ 3) &&
@@ -301,7 +322,13 @@ def segPairConfirmsDestructionBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bo
          decide (t1.endPrice ≤ t3.endPrice) &&
          segCase1InsideScanBool .up t1.startPrice t1.endPrice rest)
       else
-        segHasBottomFractalBool (segMergeCharElems false (segExtractCharElems st2))
+        let prefix2 := segTakeThroughNewExtreme .up t1.startPrice st2
+        let postFirst := segMergeCharElems false (segExtractOddPosElems prefix2)
+        match postFirst with
+        | e2' :: e3' :: _ =>
+          segRangeIsTopFractalBool e1 e2' e3' &&
+          segHasBottomFractalBool (segMergeCharElems false (segExtractCharElems prefix2))
+        | _ => false
     | .down =>
       if decide (e1.lo ≤ e2.hi) then
         decide (t3.endPrice > t1.endPrice) ||
@@ -309,7 +336,13 @@ def segPairConfirmsDestructionBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bo
          decide (t3.endPrice ≤ t1.endPrice) &&
          segCase1InsideScanBool .down t1.startPrice t1.endPrice rest)
       else
-        segHasTopFractalBool (segMergeCharElems true (segExtractCharElems st2))
+        let prefix2 := segTakeThroughNewExtreme .down t1.startPrice st2
+        let postFirst := segMergeCharElems true (segExtractOddPosElems prefix2)
+        match postFirst with
+        | e2' :: e3' :: _ =>
+          segRangeIsBottomFractalBool e1 e2' e3' &&
+          segHasTopFractalBool (segMergeCharElems true (segExtractCharElems prefix2))
+        | _ => false
   | _, _, _ => false
 
 /-- 辅助递归：检查笔序列 `strokes` 从奇数切分点 `k` 起是否不存在内部提前破坏。
@@ -479,7 +512,7 @@ instance instDecidableB2Lesson67SameUpSegAdjacentPair
   inferInstanceAs (Decidable (b2_lesson67SameUpSegAdjacentPairBool allStrokes segLen k = true))
 
 /-- B-2 正文 `067:16` 字面断言：在 `067:28` + `071:30,32` 真实完好向上线段前提 `b2_lesson67SameUpSegAdjacentPair` 下，任意相邻向上笔 `S_k` 与 `S_{k+1}` 必有公共重合区间。
-所刻画确切命题：在完整线段破坏规则（含 `071:32` 笔破坏未成段而先破起点延续原段情形）下，该断言本身存在反例（如 `0→10→4→12→1→3→2→15` 或 `0→10→4→8→1→3→2→9` 接 `9→2→8→1` 中 `S2` 与 `S3` 严格不相交）；仅当额外附加回落笔不破前向上笔低点条件 `b2_upTripleNoBreakPriorLow` 时，相邻向上笔重合才可推出。
+所刻画确切命题：在完整线段破坏规则（含 `071:32` 笔破坏未成段而先破起点延续原段情形）下，该断言本身存在反例（如 `0→10→4→12→1→3→2→15` 或 `0→10→4→8→1→3→2→9` 接 `9→2→8→1` 中 `S2` 与 `S3` 严格不相交）；若额外附加回落笔不破前向上笔低点条件 `b2_upTripleNoBreakPriorLow`（充分条件），则相邻向上笔必然重合。
 引文：[067:16]「以向上笔开始的线段，可以用笔的序列表示：S1X1S2X2S3X3…SnXn。容易证明，任何Si与Si+1之间，一定有重合区间。而考察序列X1X2…Xn，该序列中， Xi与Xi+1之间并不一定有重合区间，因此，这序列更能代表线段的性质。」
 引文：[071:32]「这种情况还有更复杂一点的情况，就是第三笔完全在第一笔的范围内，这样，这三笔就分不出是向上还是向下，这样也就定义不了什么特征序列，为什么？因为特征序列是和走势相反的，而走势连方向都没有，那怎么知道哪个元素属于特征序列？这种情况，无非两种最后的结果：1、最终还是先破了第一笔的结束位置，这时候，新的线段显然成立，旧线段还是被破坏了；2、最终，先破第一笔的开始位置，这样，旧线段只被一笔破坏，接着就延续原来的方向，那么，显然旧线段依然延续，新线段没有出现。」 -/
 def b2_lesson67SameUpSegAlwaysOverlapsLiteral : Prop :=
