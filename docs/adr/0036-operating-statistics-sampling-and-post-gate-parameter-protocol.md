@@ -46,4 +46,4 @@ C_before 只从该重 book 同源读；统计单位 = 重，汇总只作报告�
 
 ## #1551 适用范围指针
 
-> **★ 2026-11-16 适用范围指针（[#1551](https://github.com/Newchanlun/NewChanlun/issues/1551)，[ADR 0064](0064-at18-whole-graph-acceptance-and-closeout.md) 第二节第 4 条，依 #1909 代理独审裁定）**：第十节「时序与有效域」末句「TB-11 关图须出示三条记录」读作对 `growth_enabled=true` 或声明闸门后参数生效的每个槽位必出三条记录；闸门未触达或阶段能力尚未启用的槽位出示未启用证据，并以 `required=false` 记入整图报告的 `unexecuted[]`，不按已激活处理。原文不删；本指针置于文末，以免移动本文既有行号引用。
+> **★ 2026-11-16 适用范围指针（[#1551](https://github.com/Newchanlun/NewChanlun/issues/1551)，[ADR 0064](0064-at18-whole-graph-acceptance-and-closeout.md) 第二节第 4 条，依 #1909 代理独审裁定）**：第十节「TB-11 关图须出示三条记录」按每个重的启用历史核验。凡曾启用阶段能力或使闸门后参数生效的重，均须保留该重首次启用的触达、合法版本、首次启用三条互引记录；按规回退的重还须有实际回退原件及回退后行为证据，即使同槽当前无启用重也不得延期。只有按规证明从未启用的重可逐重纳入延期集合，在同槽唯一的 `unexecuted[]` 条目记 `required=false`；该条目不豁免同槽其他重。未启用部署槽另按 ADR 0064 的边界记账。
