@@ -1,22 +1,27 @@
 import inspect
 import json
+import shutil
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import conftest
 import pytest
 import test_queue
+import v2env
 from conftest import FAKE, MODELS, git
+from fake_github import FakeGitHub
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from test_agent import call, scripted
 from test_boat import config
 from test_queue import SPEC, authorize, executor, publish_ruling
-from v2env import TICKET, SimulatedCrash
+from v2env import TICKET, SimulatedCrash, V2Env
 
 from pilot1742 import agent as agent_module
 from pilot1742 import approval, boat_execution, cli
 from pilot1742 import run as run_module
+from pilot1742.approval import SignedApprovals
 from pilot1742.boat_execution import ExecutionUnknown, ForkIntent, new_execution
 from pilot1742.domain import DEEPAGENTS_OUTPUT_PROTOCOL, EffectUnknown, WorkerKey
 from pilot1742.executor import (
@@ -26,7 +31,9 @@ from pilot1742.executor import (
     release_claim,
     run_quiet,
 )
+from pilot1742.github_app import AppIdentity
 from pilot1742.run import Halted, PilotRun
+from pilot1742.workunit import DEDICATED_MARKER
 
 SPEC_BODY = '# SPEC\ndeepagents-scope: demo/\n\n## 行为依据\n依据 EXECUTOR.md 与 BOAT.md。\n'
 queued = test_queue.queued
@@ -159,33 +166,127 @@ class Bench:
             conn.close()
 
 
-@pytest.fixture
-def bench(queued, tmp_path, monkeypatch):
-    v2, cutover, intake, signer = queued
+@pytest.fixture(scope='module')
+def _bench_seed(tmp_path_factory):
+    root = tmp_path_factory.mktemp('early_stop_seed')
+    seed = V2Env(root)
     source_root = Path(__file__).resolve().parents[3]
     for name in RUNTIME:
-        target = v2.source / name
+        target = seed.source / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((source_root / name).read_bytes())
-    manuals = v2.source / '.sandcastle/deepagents-pilot'
+    manuals = seed.source / '.sandcastle/deepagents-pilot'
     (manuals / 'EXECUTOR.md').write_text('EXECUTOR_FROZEN\n')
     (manuals / 'BOAT.md').write_text('BOAT_FROZEN\n')
-    (v2.source / 'AGENTS.md').write_text('AGENTS_FROZEN\n')
-    skill = v2.source / '.agents/skills/project/SKILL.md'
+    (seed.source / 'AGENTS.md').write_text('AGENTS_FROZEN\n')
+    skill = seed.source / '.agents/skills/project/SKILL.md'
     skill.parent.mkdir(parents=True)
     skill.write_text('---\nname: project\ndescription: fixture\n---\nPROJECT\n')
-    git(v2.source, 'add', '.')
-    git(v2.source, 'commit', '-qm', 'runtime and manuals')
-    git(v2.source, 'push', '-q', str(v2.bare), 'main')
-    v2.base = git(v2.source, 'rev-parse', 'HEAD')
-    v2.github.issues[SPEC]['body'] = SPEC_BODY
-    pstack = tmp_path / 'pstack'
+    git(seed.source, 'add', '.')
+    git(seed.source, 'commit', '-qm', 'runtime and manuals')
+    git(seed.source, 'push', '-q', str(seed.bare), 'main')
+    seed.base = git(seed.source, 'rev-parse', 'HEAD')
+    pstack = root / 'pstack'
     entry = pstack / 'installed/skills/poteto-mode/SKILL.md'
     entry.parent.mkdir(parents=True)
     entry.write_text('---\nname: pstack-upstream-poteto-mode\ndescription: fixture\n---\nPSTACK\n')
     (pstack / 'upstream').mkdir()
     (pstack / 'upstream/LICENSE').write_text('LICENSE')
     (pstack / 'aliases.json').write_text('{}')
+    return seed.source, seed.base, seed.bare, seed.identity.private_key_path, pstack
+
+
+@pytest.fixture(autouse=True)
+def _fast_env(monkeypatch, _bench_seed):
+    seed_source, seed_base, seed_bare, seed_pem, _ = _bench_seed
+    orig_ensure = run_module.PilotRun._ensure_checkout
+    real_sleep = run_module.time.sleep
+
+    def _fast_env_init(self, tmp: Path):
+        self.home = tmp / 'home'
+        self.source = tmp / 'source'
+        shutil.copytree(seed_source, self.source)
+        self.base = seed_base
+        self.home.mkdir()
+        self.control({})
+
+    def _fast_v2_init(self, tmp: Path):
+        _fast_env_init(self, tmp)
+        self.tmp = tmp
+        self.bare = tmp / 'origin.git'
+        shutil.copytree(seed_bare, self.bare)
+        pem = tmp / 'app.pem'
+        shutil.copy2(seed_pem, pem)
+        pem.chmod(0o600)
+        self.identity = AppIdentity(
+            5486877, 179444545, 1150335160, 'Newchanlun/NewChanlun', 'newchanlun-deepagents-1742', pem
+        )
+        self.github = FakeGitHub(self.identity, self.bare)
+        self.github.add_issue(TICKET, body=f'#1742 首证专用票\n\n{DEDICATED_MARKER}\n')
+        self.claims_root = tmp / 'claims'
+        self.workers_log = tmp / 'workers.jsonl'
+        self.workers_log.write_text(json.dumps({'ticket': 1715, 'branch': 'sandcastle/issue-1715'}) + '\n')
+        self.approvals = SignedApprovals(
+            trust_path=tmp / 'unconfigured-trust.json',
+            authority_root=tmp / 'unconfigured-authority',
+        )
+
+    def _fast_ensure(self, role, head):
+        path, branch = self.spec.checkout_for(role), self.spec.branch_for(role)
+        if not path.exists():
+            src = Path(self.source_repo)
+            git_dir = src / '.git'
+            branch_ref = git_dir / 'refs' / 'heads' / branch
+            head_file = git_dir / 'HEAD'
+            main_ref = git_dir / 'refs' / 'heads' / 'main'
+            index_file = git_dir / 'index'
+            wt_name = f'{self.spec.run_id}-{role}'
+            wt_admin = git_dir / 'worktrees' / wt_name
+            if (
+                git_dir.is_dir()
+                and not (git_dir / 'packed-refs').exists()
+                and not branch_ref.exists()
+                and not wt_admin.exists()
+                and head_file.is_file()
+                and head_file.read_text().strip() == 'ref: refs/heads/main'
+                and main_ref.is_file()
+                and main_ref.read_text().strip() == str(head)
+                and index_file.is_file()
+            ):
+                run_module.require_free_space(path.parent)
+                path.mkdir(parents=True, exist_ok=True)
+                branch_ref.parent.mkdir(parents=True, exist_ok=True)
+                branch_ref.write_text(f'{head}\n')
+                wt_admin.mkdir(parents=True)
+                (wt_admin / 'HEAD').write_text(f'ref: refs/heads/{branch}\n')
+                (wt_admin / 'commondir').write_text('../..\n')
+                (wt_admin / 'gitdir').write_text(f"{path / '.git'}\n")
+                shutil.copy2(index_file, wt_admin / 'index')
+                for item in src.iterdir():
+                    if item.name == '.git':
+                        continue
+                    dst = path / item.name
+                    if item.is_dir() and not item.is_symlink():
+                        shutil.copytree(item, dst, symlinks=True)
+                    else:
+                        shutil.copy2(item, dst, follow_symlinks=False)
+                (path / '.git').write_text(f'gitdir: {wt_admin}\n')
+                self.trail('checkout_created', role=role, path=str(path), branch=branch)
+                return
+        return orig_ensure(self, role, head)
+
+    monkeypatch.setattr(conftest.Env, '__init__', _fast_env_init)
+    monkeypatch.setattr(v2env.V2Env, '__init__', _fast_v2_init)
+    monkeypatch.setattr(run_module.PilotRun, '_ensure_checkout', _fast_ensure)
+    monkeypatch.setattr(run_module.time, 'sleep', lambda sec: real_sleep(min(sec, 0.01)))
+
+
+@pytest.fixture
+def bench(queued, tmp_path, monkeypatch, _bench_seed):
+    v2, cutover, intake, signer = queued
+    v2.github.issues[SPEC]['body'] = SPEC_BODY
+    pstack = tmp_path / 'pstack'
+    shutil.copytree(_bench_seed[4], pstack)
     rules = tmp_path / 'rules.md'
     rules.write_text(MODELS)
     path = tmp_path / 'boat-config.json'
