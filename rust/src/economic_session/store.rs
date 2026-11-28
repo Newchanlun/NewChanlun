@@ -112,6 +112,7 @@ pub(crate) fn domain_revision(manifest: &Value) -> Result<&'static str, String> 
 
 #[derive(Clone)]
 pub(crate) struct Config {
+    pub intake: super::capture_continuity::Intake,
     pub manifest: Value,
     pub manifest_hash: String,
     pub db: PathBuf,
@@ -264,6 +265,7 @@ impl Config {
             }
             _ => return Err("InvalidDomain：必须显式指定时钟adapter".into()),
         }
+        super::capture_continuity::validate_config(&manifest)?;
         let configured_faults = fault_plans(&manifest["test_only_fault"]);
         let mut fault_keys = std::collections::BTreeSet::new();
         for f in configured_faults {
@@ -297,6 +299,7 @@ impl Config {
         }
         let socket = absolute(required(route, "socket")?)?;
         Ok(Self {
+            intake: Default::default(),
             manifest_hash: hash(&manifest),
             manifest,
             db: expected,
@@ -826,6 +829,7 @@ pub(crate) fn init(config: &Config) -> Result<Value, String> {
     if let Some(revision) = super::domain_event::withdrawal_bound_revision(config)? {
         set_meta(&tx, super::domain_event::WITHDRAWAL_META_KEY, revision)?;
     }
+    super::capture_continuity::initialize(&tx, config)?;
     let ns = config.clock(None, "init_ns", 0)?;
     tx.execute("INSERT INTO epochs VALUES(1,'init',?)", [&ns])
         .map_err(err)?;

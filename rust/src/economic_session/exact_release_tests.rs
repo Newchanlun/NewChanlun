@@ -67,6 +67,7 @@ pub(super) fn decorate_manifest(manifest: &mut Value) {
         ("close-late", 175),
         ("capture-late", 180),
         ("ReleaseExact-alpha-late", 190),
+        ("ReleaseExact-alpha-post-recover", 1200),
         ("ReleaseExact-alpha-expired", 100001),
     ] {
         clocks[message] = json!({"received_ns":t.to_string(),"first_known_ns":(t+1).to_string(),"commit_ns":(t+2).to_string()});
@@ -1183,6 +1184,479 @@ fn frozen_conditions_refuse_a_missing_or_repeated_required_capability() {
     dispatch(&mut f, "alpha");
     let r = f.handle(0, "ReleaseExact-alpha", release_payload(&f, "alpha"));
     assert_eq!(r["record"]["state"], "ReleasedExact", "{r}");
+}
+
+#[test]
+fn clean_handoff_preserves_healthy_restart_while_legacy_and_self_attest_stay_blocked() {
+    use crate::economic_session::{capture_continuity, store};
+
+    let send_e = |f: &mut Fixture, ep: i64, msg: &str, p: Value| {
+        let mut e = envelope(msg, p);
+        e["schema_revision"] = json!(f.configs[0].revision().unwrap());
+        e["session_id"] = json!(f.configs[0].session);
+        e["session_generation"] = json!(f.configs[0].generation);
+        service::handle(&mut f.dbs[0], &f.configs[0], ep, ep, &json!({}), &e)["payload"].clone()
+    };
+
+    // Case 1: 健康无 tape 会话经显式优雅停机签发 clean_handoff -> recover(1000) -> epoch 2 放行 alpha。
+    let mut f_clean = fixture(None);
+    committed(&mut f_clean);
+    dispatch(&mut f_clean, "alpha");
+    let e_cfg = f_clean.configs[0].clone();
+    {
+        let intake1 = capture_continuity::start(&mut f_clean.dbs[0], &e_cfg, 1).unwrap();
+        let mut cfg1 = e_cfg.clone();
+        cfg1.intake = intake1;
+        capture_continuity::finish_clean(&mut f_clean.dbs[0], &cfg1, 1, true, false).unwrap();
+    }
+    let rec2 = recover(&e_cfg).unwrap();
+    assert_eq!(rec2["writer_epoch"], "2");
+    f_clean.configs[0].intake = capture_continuity::start(&mut f_clean.dbs[0], &e_cfg, 2).unwrap();
+    let mut rel_alpha = release_payload(&f_clean, "alpha");
+    rel_alpha["writer_epoch"] = json!("2");
+    let r_alpha = send_e(
+        &mut f_clean,
+        2,
+        "ReleaseExact-alpha-post-recover",
+        rel_alpha,
+    );
+    assert_eq!(r_alpha["kind"], "ReleasedExactReceipt", "{r_alpha}");
+
+    // Case 2: 异常退出（explicit_stop=false）不得签发 clean_handoff，换代后继续挡新放行。
+    let mut f_abnormal = fixture(None);
+    committed(&mut f_abnormal);
+    dispatch(&mut f_abnormal, "alpha");
+    let a_cfg = f_abnormal.configs[0].clone();
+    {
+        let intake1 = capture_continuity::start(&mut f_abnormal.dbs[0], &a_cfg, 1).unwrap();
+        let mut cfg1 = a_cfg.clone();
+        cfg1.intake = intake1;
+        capture_continuity::finish_clean(&mut f_abnormal.dbs[0], &cfg1, 1, false, false).unwrap();
+    }
+    let rec_a = recover(&a_cfg).unwrap();
+    assert_eq!(rec_a["writer_epoch"], "2");
+    f_abnormal.configs[0].intake =
+        capture_continuity::start(&mut f_abnormal.dbs[0], &a_cfg, 2).unwrap();
+    let mut rel_a = release_payload(&f_abnormal, "alpha");
+    rel_a["writer_epoch"] = json!("2");
+    let blocked_a = send_e(&mut f_abnormal, 2, "ReleaseExact-alpha-post-recover", rel_a);
+    assert_eq!(blocked_a["kind"], "Error", "{blocked_a}");
+    assert!(
+        blocked_a["error"]
+            .as_str()
+            .unwrap()
+            .contains("未核来源缺口"),
+        "{blocked_a}"
+    );
+
+    // Case 3: 无独立原件源的旧库升级（不改原 manifest）-> recover -> epoch 2：
+    // 直接放行被挡；普通 CaptureExternal 主体自报完整 events 列表也被权限与契约拒绝，alpha 锁在 Dispatchable。
+    let mut f_legacy = fixture(None);
+    committed(&mut f_legacy);
+    dispatch(&mut f_legacy, "alpha");
+    let l_cfg = f_legacy.configs[0].clone();
+    f_legacy.dbs[0]
+        .execute("DELETE FROM meta WHERE k='external_intake_lease/1'", [])
+        .unwrap();
+    let rec_l = recover(&l_cfg).unwrap();
+    assert_eq!(rec_l["writer_epoch"], "2");
+    f_legacy.configs[0].intake =
+        capture_continuity::start(&mut f_legacy.dbs[0], &l_cfg, 2).unwrap();
+
+    let mut rel_l = release_payload(&f_legacy, "alpha");
+    rel_l["writer_epoch"] = json!("2");
+    let blocked = send_e(
+        &mut f_legacy,
+        2,
+        "ReleaseExact-alpha-post-recover",
+        rel_l.clone(),
+    );
+    assert_eq!(blocked["kind"], "Error", "{blocked}");
+    assert!(
+        blocked["error"]
+            .as_str()
+            .unwrap()
+            .contains("缺少独立持久原件与可证结束界"),
+        "{blocked}"
+    );
+
+    let mut events = Vec::new();
+    let mut max_cursor = 0i64;
+    for rec in store::rows(&f_legacy.dbs[0], "facts").unwrap() {
+        let cur = rec["event"]["source"]["source_cursor"].as_str().unwrap();
+        max_cursor = max_cursor.max(cur.parse::<i64>().unwrap());
+        events.push(json!({
+            "fact_key": rec["fact_key"],
+            "fact_hash": rec["fact_hash"],
+            "raw_sha256": rec["raw_sha256"],
+            "json_pointer": rec["json_pointer"],
+            "token": rec["token"],
+            "source_cursor": cur,
+        }));
+    }
+    let self_attest = send_e(
+        &mut f_legacy,
+        2,
+        "reconcile-self-attest",
+        json!({
+            "op": "ReconcileCaptureContinuity",
+            "writer_epoch": "2",
+            "range_start": "genesis",
+            "range_end_cursor": max_cursor.to_string(),
+            "through_ns": "1000",
+            "events": events,
+        }),
+    );
+    assert_eq!(self_attest["kind"], "Error", "{self_attest}");
+    assert!(
+        self_attest["error"]
+            .as_str()
+            .unwrap()
+            .contains("来源未获准执行该操作"),
+        "{self_attest}"
+    );
+
+    let still_blocked = send_e(&mut f_legacy, 2, "ReleaseExact-alpha-post-recover", rel_l);
+    assert_eq!(still_blocked["kind"], "Error", "{still_blocked}");
+    assert!(
+        still_blocked["error"]
+            .as_str()
+            .unwrap()
+            .contains("缺少独立持久原件与可证结束界"),
+        "{still_blocked}"
+    );
+}
+
+#[test]
+fn history_simulation_source_live_frontier_blocks_empty_advance_inflight_and_multi_source() {
+    use crate::economic_session::{capture_continuity, store};
+    use crate::history_simulation::{
+        model::{Change, OrderKind, Side},
+        runtime as sim_rt, store as sim_store,
+        tests::{batch, model, order},
+    };
+    use rusqlite::{params, Connection};
+
+    let f = fixture(None);
+    let x_db = f.dir.join("x-live.db");
+    let _x_writer_lock = sim_rt::acquire_simulation_writer_lock(&x_db).unwrap();
+    let mut xc = Connection::open(&x_db).unwrap();
+    let sim_model = model();
+    let auth = |id: &str| sim_rt::Authority {
+        socket: f.dir.join(format!("{id}.sock")).display().to_string(),
+        authority_id: id.into(),
+        authority_epoch: "1".into(),
+        schema_revision: "economic-session/1".into(),
+        reply_namespace: "ns".into(),
+        producer_id: format!("P:{id}"),
+    };
+    let prof = sim_rt::Profile {
+        x_id: "X".into(),
+        session_id: f.configs[0].session.clone(),
+        session_generation: f.configs[0].generation.clone(),
+        source_namespace: "sim-x".into(),
+        source_epoch: "1".into(),
+        model: sim_model.clone(),
+        socket: f.dir.join("x.sock").display().to_string(),
+        e: auth("E"),
+        s: auth("S"),
+        conditions: CONDITIONS
+            .iter()
+            .map(|(id, cap, stage)| sim_rt::Condition {
+                condition_id: (*id).into(),
+                authority_revision: (*cap).into(),
+                dependency_set: vec!["dep".into()],
+                invalidation_sources: vec!["inv".into()],
+                required_check_stages: vec![(*stage).into()],
+                evidence_refs: vec!["ev".into()],
+                coverage_proof: "cov".into(),
+                validator_capability: (*cap).into(),
+                failure_result: "Denied".into(),
+            })
+            .collect(),
+        timeout_ms: 1000,
+        max_frame_bytes: 1_048_576,
+    };
+    xc.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;")
+        .unwrap();
+    for (k, v) in [
+        ("profile_revision", "x-execution-profile/1"),
+        ("profile_mode", "simulation"),
+        ("history_simulation", "true"),
+        ("writer_epoch", "1"),
+    ] {
+        xc.execute("INSERT INTO x_meta VALUES(?1,?2)", params![k, v])
+            .unwrap();
+    }
+    {
+        let xtx = xc.transaction().unwrap();
+        sim_rt::initialize_in_transaction(&xtx, &prof, 1).unwrap();
+        xtx.commit().unwrap();
+    }
+    let model_hash = crate::session_protocol::sha256_hex(
+        canonical_json(&serde_json::to_value(&sim_model).unwrap()).as_bytes(),
+    );
+
+    // 构造真实绑定 history_simulation_source 的 tb03c-book/1 精确交付 E 配置。
+    let mut m = f.configs[0].manifest.clone();
+    m["book_revision"] = json!("tb03c-book/1");
+    m["authorized_sources"][0]["operations"] = json!([
+        "ReadView",
+        "ImportResponsibility",
+        "Reserve",
+        "MakeDispatchable",
+        "ReleaseExact",
+        "QueryCommand",
+        "QueryReleasedExact"
+    ]);
+    m["authorized_sources"].as_array_mut().unwrap().push(json!({
+        "source_namespace": "sim-x",
+        "source_epoch": "1",
+        "producer_id": "X:sim",
+        "producer_epoch": "1",
+        "operations": ["CaptureExternal", "ResolveEvidence", "ReadView"]
+    }));
+    m["history_simulation_source"] = json!({
+        "source_namespace": "sim-x",
+        "source_epoch": "1",
+        "producer_id": "X:sim",
+        "producer_epoch": "1",
+        "x_db": x_db,
+        "model_content_hash": model_hash,
+    });
+    let sim_e_db = f.dir.join("sim-e.db");
+    m["e"]["db"] = json!(sim_e_db);
+    let sim_manifest_path = f.dir.join("sim-manifest.json");
+    std::fs::write(&sim_manifest_path, canonical_json(&m)).unwrap();
+
+    let sim_e_cfg = store::Config::load(&sim_manifest_path, &sim_e_db, None).unwrap();
+    store::init(&sim_e_cfg).unwrap();
+    let (mut ec, _) = store::open(&sim_e_db, false).unwrap();
+    let _intake1 = capture_continuity::start(&mut ec, &sim_e_cfg, 1).unwrap();
+
+    // 模拟真实崩溃（无 clean_handoff）-> recover -> epoch 2 进入缺口态。
+    drop(ec);
+    let rec2 = recover(&sim_e_cfg).unwrap();
+    assert_eq!(rec2["writer_epoch"], "2");
+    let (mut ec, _) = store::open(&sim_e_db, false).unwrap();
+    let mut cfg2 = sim_e_cfg.clone();
+    cfg2.intake = capture_continuity::start(&mut ec, &sim_e_cfg, 2).unwrap();
+
+    let empty_image = json!({
+        "recorded": [],
+        "pending": [],
+        "finance": {"responsibilities": []}
+    });
+    let rel_record = json!({
+        "state": "ReleasedExact",
+        "owner": "B:alpha",
+        "command": {"x_id": "X", "x_epoch": 1}
+    });
+
+    // 1) 空快照（0 批）在缺口态必须拒绝。
+    let empty_err = cfg2
+        .intake
+        .check_new_risk(&cfg2, &empty_image, &rel_record, "1202")
+        .unwrap_err();
+    assert!(empty_err.contains("空快照"), "{empty_err}");
+
+    // 2) 提交空挂单批次 b-0 后，先验证 pending_batch 存在时必须拒收。
+    sim_store::commit_batch(&mut xc, &batch(0, vec![])).unwrap();
+    xc.execute("INSERT INTO x_sim_meta VALUES('pending_batch','{}')", [])
+        .unwrap();
+    let pending_err = cfg2
+        .intake
+        .check_new_risk(&cfg2, &empty_image, &rel_record, "1202")
+        .unwrap_err();
+    assert!(
+        pending_err.contains("未提交") || pending_err.contains("pending"),
+        "{pending_err}"
+    );
+    xc.execute("DELETE FROM x_sim_meta WHERE k='pending_batch'", [])
+        .unwrap();
+
+    // 3) 构造合法的 #1381 精确命令原件与执行证据，先以游离 MayHaveCalled 状态写入 x_exact_commands -> 必拒。
+    let ord = order("alpha", Side::Buy, 3, OrderKind::Limit { price: 100 });
+    let change = Change::Submit { order: ord };
+    let cert = crate::history_simulation::runtime::Certificate {
+        rd11_policy: sim_model.rd11_policy.clone(),
+        responsibility_refs: vec!["resp-1".into()],
+        structure_dependencies: vec!["s-1".into()],
+        market_dependencies: vec!["m-1".into()],
+        rule_revision: "rule/1".into(),
+        conditions: prof.conditions.clone(),
+    };
+    let change_hash = crate::economic_session::finance::sha256_hex(
+        canonical_json(&serde_json::to_value(&change).unwrap()).as_bytes(),
+    );
+    let cert_hash = crate::economic_session::finance::sha256_hex(
+        canonical_json(&serde_json::to_value(&cert).unwrap()).as_bytes(),
+    );
+    let exact_cmd = crate::history_simulation::runtime::ExactCommand {
+        command_id: "cmd-alpha".into(),
+        logical_order_family: "alpha".into(),
+        session_id: prof.session_id.clone(),
+        session_generation: prof.session_generation.clone(),
+        x_id: "X".into(),
+        x_epoch: 1,
+        symbol: sim_model.symbol.clone(),
+        projection_kind: sim_model.projection_kind.clone(),
+        change: change.clone(),
+        plan_hash: change_hash,
+        certificate_hash: cert_hash,
+        certificate: cert,
+    };
+    let cmd_json = canonical_json(&serde_json::to_value(&exact_cmd).unwrap());
+    let cmd_hash = crate::economic_session::finance::sha256_hex(cmd_json.as_bytes());
+    let e_reply = json!({
+        "protocol": crate::history_simulation::runtime::AUTHORITY_WIRE,
+        "session_id": prof.session_id,
+        "session_generation": prof.session_generation,
+        "authority_id": "E",
+        "authority_epoch": "1",
+        "command_id": "cmd-alpha",
+        "command_hash": cmd_hash,
+        "command": exact_cmd,
+        "state": "ReleasedExact",
+        "receipt_id": "e-rcpt-alpha",
+        "release_receipt_id": null,
+        "commit_ns": 10
+    });
+    let s_reply = json!({
+        "protocol": crate::history_simulation::runtime::AUTHORITY_WIRE,
+        "session_id": prof.session_id,
+        "session_generation": prof.session_generation,
+        "authority_id": "S",
+        "authority_epoch": "1",
+        "command_id": "cmd-alpha",
+        "command_hash": cmd_hash,
+        "command": exact_cmd,
+        "state": "ExecuteCommitted",
+        "receipt_id": "controlled-execute-alpha",
+        "release_receipt_id": "e-rcpt-alpha",
+        "commit_ns": 11
+    });
+    let accept_clock =
+        canonical_json(&json!({"received_ns": 10, "first_known_ns": 10, "commit_ns": 10}));
+    let release_ev = canonical_json(&e_reply);
+    let exec_ev = canonical_json(&json!({"reply": s_reply, "claimed_ns": 12}));
+    let mut b1 = batch(1, vec![change]);
+    b1.normalize();
+    let b1_raw = canonical_json(&serde_json::to_value(&b1).unwrap());
+    xc.execute(
+        "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES(?1,?2,?3,'MayHaveCalled',?4,?5,?6,?7)",
+        params!["cmd-alpha", &cmd_json, "e-rcpt-alpha", &b1_raw, &accept_clock, &release_ev, &exec_ev],
+    )
+    .unwrap();
+    let inflight_err = cfg2
+        .intake
+        .check_new_risk(&cfg2, &empty_image, &rel_record, "1202")
+        .unwrap_err();
+    assert!(
+        inflight_err.contains("游离执行命令")
+            || inflight_err.contains("在途")
+            || inflight_err.contains("IdentityConflict"),
+        "{inflight_err}"
+    );
+    xc.execute("DELETE FROM x_exact_commands WHERE id='cmd-alpha'", [])
+        .unwrap();
+
+    // 4) x_epoch 不匹配 ReleaseExact 目标时拒绝。
+    let wrong_epoch_record = json!({
+        "state": "ReleasedExact",
+        "owner": "B:alpha",
+        "command": {"x_id": "X", "x_epoch": 2}
+    });
+    let epoch_err = cfg2
+        .intake
+        .check_new_risk(&cfg2, &empty_image, &wrong_epoch_record, "1202")
+        .unwrap_err();
+    assert!(epoch_err.contains("writer epoch 不符"), "{epoch_err}");
+
+    // 5) 真实模拟 X 来源已排空至 b-0 且无待核责任 -> 首次实时核验通过！
+    cfg2.intake
+        .check_new_risk(&cfg2, &empty_image, &rel_record, "1202")
+        .unwrap();
+
+    // 6) 关键：核完通过后 X 通过合法 #1381 命令链推进 b-1（挂单）与 b-2（成交并产出真实 fill + fee 原件）->
+    // 下一次风控核验实时重核 x_db，立刻拦下未补录原件（没有被核清布尔位放水）。
+    xc.execute(
+        "INSERT INTO x_exact_commands(id,command,release_receipt,state,attempt_batch,accept_clock,release_evidence,execute_evidence) VALUES(?1,?2,?3,'MayHaveCalled',?4,?5,?6,?7)",
+        params!["cmd-alpha", &cmd_json, "e-rcpt-alpha", &b1_raw, &accept_clock, &release_ev, &exec_ev],
+    )
+    .unwrap();
+    sim_store::commit_batch_with_commands(&mut xc, &b1, &["cmd-alpha".to_string()]).unwrap();
+    let b2 = sim_store::commit_batch(&mut xc, &batch(2, vec![])).unwrap();
+    assert!(!b2["originals"].as_array().unwrap().is_empty(), "{b2}");
+    let advance_err = cfg2
+        .intake
+        .check_new_risk(&cfg2, &empty_image, &rel_record, "1202")
+        .unwrap_err();
+    assert!(advance_err.contains("模拟 X 原件未补录"), "{advance_err}");
+
+    // 7) 补录 b-1 全部原件后来源完整性通过，但 tb03c-book/1 诚实保留 AwaitingDependency("economic_components") -> 责任门继续拦。
+    let mut rec_rows = Vec::new();
+    let mut pend_rows = Vec::new();
+    for (i, doc) in b2["originals"].as_array().unwrap().iter().enumerate() {
+        let raw = canonical_json(doc);
+        let (_, event) =
+            crate::economic_session::book::decode(&raw, "/event", cfg2.book_rules().unwrap())
+                .unwrap();
+        let fk = crate::economic_session::book::fact_key(&event).unwrap();
+        rec_rows.push(json!({
+            "fact_key": fk,
+            "fact_hash": hash(&event),
+            "raw_utf8": raw,
+            "json_pointer": "/event",
+            "token": format!("sim-tok-{i}"),
+            "origin_message": {"source_namespace": "sim-x", "source_epoch": "1"},
+            "source_producer": {"producer_id": "X:sim", "producer_epoch": "1"},
+            "event": event,
+        }));
+        pend_rows.push(json!({
+            "fact_key": fk,
+            "token": format!("sim-tok-{i}"),
+            "scope": "B:alpha",
+            "status": "Pending",
+            "reason": {"kind": "AwaitingDependency", "on": "economic_components", "source": "history-sim"},
+        }));
+    }
+    let captured_image = json!({
+        "recorded": rec_rows,
+        "pending": pend_rows,
+        "finance": {"responsibilities": []}
+    });
+    let resp_err = cfg2
+        .intake
+        .check_new_risk(&cfg2, &captured_image, &rel_record, "1202")
+        .unwrap_err();
+    assert!(resp_err.contains("Pending"), "{resp_err}");
+
+    // 8) 多来源共同覆盖：若 manifest 除模拟 X 外还有第二个普通 CaptureExternal 主体，
+    // 即使模拟 X 全部原件均已补录，第二个主体缺少独立持久证明时仍须整次拒绝。
+    let mut m_multi = m.clone();
+    m_multi["authorized_sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "source_namespace": "other-venue",
+            "source_epoch": "1",
+            "producer_id": "V:other",
+            "producer_epoch": "1",
+            "operations": ["CaptureExternal"]
+        }));
+    let multi_path = f.dir.join("multi-manifest.json");
+    std::fs::write(&multi_path, canonical_json(&m_multi)).unwrap();
+    let mut multi_cfg = store::Config::load(&multi_path, &sim_e_db, None).unwrap();
+    multi_cfg.intake = cfg2.intake.clone();
+    let multi_err = multi_cfg
+        .intake
+        .check_new_risk(&multi_cfg, &captured_image, &rel_record, "1202")
+        .unwrap_err();
+    assert!(
+        multi_err.contains("V:other") && multi_err.contains("缺少独立持久原件与可证结束界"),
+        "{multi_err}"
+    );
 }
 
 #[path = "exact_x_e2e_tests.rs"]

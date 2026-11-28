@@ -34,6 +34,7 @@ impl Drop for UnitSpace {
 }
 fn config() -> store::Config {
     store::Config {
+        intake: Default::default(),
         manifest: json!({}),
         manifest_hash: "unit".into(),
         db: PathBuf::new(),

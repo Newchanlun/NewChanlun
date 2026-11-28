@@ -10,8 +10,17 @@
 //!   x_execution_session serve --db FILE --profile FILE --writer-epoch N
 //!   x_execution_session query --db FILE
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
+use newchan_rust::history_simulation::runtime::{
+    acquire_simulation_writer_lock, lock_frontier_exclusive, SimulationWriterLock,
+};
 use newchan_rust::session_protocol::positive;
-use newchan_rust::session_transport::process_lock;
+use newchan_rust::session_transport::{process_lock, ProcessLock};
+
+#[allow(dead_code)]
+enum XWriterLock {
+    Exclusive(ProcessLock),
+    Simulation(SimulationWriterLock),
+}
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -111,55 +120,63 @@ fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
 }
 
 /// 持锁后建库/续库：epoch 只增不减（低 epoch 为陈旧写者），profile 版本、模式、指纹与
-/// 发送面状态在同一事务落盘。
+/// 发送面状态在同一事务落盘。模拟执行域在写 `writer_epoch` 前须持前沿独占顺序锁，
+/// 与缺口态 E 核清到提交的窗口严格排序。
 fn persist(conn: &mut Connection, profile: &Profile, epoch: i64) -> Result<Value, String> {
-    let tx = conn.transaction().map_err(err)?;
-    tx.execute_batch(SCHEMA).map_err(err)?;
-    let simulation = profile.history_simulation.is_some();
-    let old_simulation = meta_get(&tx, "history_simulation")?;
-    let old_mode = meta_get(&tx, "profile_mode")?;
-    if old_mode.is_some() && (old_simulation.as_deref() == Some("true")) != simulation {
-        return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
-    }
-    if let Some(stored) = meta_get(&tx, "writer_epoch")? {
-        let stored: i64 = stored.parse().map_err(err)?;
-        if epoch < stored {
-            return Err(format!(
-                "StaleWriter：X writer_epoch={epoch} 低于已持久化的 {stored}"
-            ));
-        }
-    }
-    if let Some(simulation) = &profile.history_simulation {
-        newchan_rust::history_simulation::runtime::initialize_in_transaction(
-            &tx, simulation, epoch,
-        )?;
-    }
-    let (send_state, reason) = if profile.mode == "production" && profile.tb09_fingerprint.is_none()
     {
-        ("refused", "MissingTb09Fingerprint")
-    } else {
-        ("unsupported", "UnsupportedCapability")
-    };
-    let rows = [
-        ("writer_epoch", epoch.to_string()),
-        ("history_simulation", simulation.to_string()),
-        ("profile_revision", profile.revision.clone()),
-        ("profile_mode", profile.mode.clone()),
-        (
-            "tb09_fingerprint",
-            profile.tb09_fingerprint.clone().unwrap_or_default(),
-        ),
-        ("send_state", send_state.to_string()),
-        ("send_refusal_reason", reason.to_string()),
-    ];
-    for (key, value) in rows {
-        tx.execute(
-            "INSERT INTO x_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [key, value.as_str()],
-        )
-        .map_err(err)?;
+        let _frontier_lock = if profile.history_simulation.is_some() {
+            lock_frontier_exclusive(conn)?
+        } else {
+            None
+        };
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute_batch(SCHEMA).map_err(err)?;
+        let simulation = profile.history_simulation.is_some();
+        let old_simulation = meta_get(&tx, "history_simulation")?;
+        let old_mode = meta_get(&tx, "profile_mode")?;
+        if old_mode.is_some() && (old_simulation.as_deref() == Some("true")) != simulation {
+            return Err("IdentityConflict：模拟原件执行域不可与其他 profile 共用 X 库".into());
+        }
+        if let Some(stored) = meta_get(&tx, "writer_epoch")? {
+            let stored: i64 = stored.parse().map_err(err)?;
+            if epoch < stored {
+                return Err(format!(
+                    "StaleWriter：X writer_epoch={epoch} 低于已持久化的 {stored}"
+                ));
+            }
+        }
+        if let Some(simulation) = &profile.history_simulation {
+            newchan_rust::history_simulation::runtime::initialize_in_transaction(
+                &tx, simulation, epoch,
+            )?;
+        }
+        let (send_state, reason) =
+            if profile.mode == "production" && profile.tb09_fingerprint.is_none() {
+                ("refused", "MissingTb09Fingerprint")
+            } else {
+                ("unsupported", "UnsupportedCapability")
+            };
+        let rows = [
+            ("writer_epoch", epoch.to_string()),
+            ("history_simulation", simulation.to_string()),
+            ("profile_revision", profile.revision.clone()),
+            ("profile_mode", profile.mode.clone()),
+            (
+                "tb09_fingerprint",
+                profile.tb09_fingerprint.clone().unwrap_or_default(),
+            ),
+            ("send_state", send_state.to_string()),
+            ("send_refusal_reason", reason.to_string()),
+        ];
+        for (key, value) in rows {
+            tx.execute(
+                "INSERT INTO x_meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [key, value.as_str()],
+            )
+            .map_err(err)?;
+        }
+        tx.commit().map_err(err)?;
     }
-    tx.commit().map_err(err)?;
     query_conn(conn)
 }
 
@@ -202,7 +219,11 @@ fn run() -> Result<(), String> {
         "serve" => {
             let profile = Profile::load(Path::new(get("--profile")?))?;
             let epoch = positive(get("--writer-epoch")?, "writer_epoch")?;
-            let _lock = process_lock(db, "X")?;
+            let _lock = if profile.history_simulation.is_some() {
+                XWriterLock::Simulation(acquire_simulation_writer_lock(db)?)
+            } else {
+                XWriterLock::Exclusive(process_lock(db, "X")?)
+            };
             let (mut conn, storage) = newchan_rust::economic_session::open_durable_db(db)?;
             eprintln!("x_execution_session storage {storage}");
             let state = persist(&mut conn, &profile, epoch)?;

@@ -5,12 +5,16 @@ use crate::session_protocol::{
     canonical_json, nonnegative, positive, reply_envelope, required, sha256_hex, validate_envelope,
 };
 use crate::session_transport::{
-    process_lock, serve_unix_with_deadline, EnvelopeValidator, TransportBounds,
+    process_lock, serve_unix_with_deadline_until, EnvelopeValidator, TransportBounds,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 // #1406 C6a：分页是单独、显式授权的只读协议，不接管旧单帧读失败。
@@ -757,7 +761,24 @@ fn capture(
     e: &Value,
     ingress_response_deadline: Option<std::time::Instant>,
 ) -> Result<Value, String> {
-    let mut record = record_from_payload(config, e)?;
+    let result = (|| {
+        let record = record_from_payload(config, e)?;
+        capture_record(c, config, epoch, e, ingress_response_deadline, record)
+    })();
+    if let Err(reason) = &result {
+        config.intake.failed(reason);
+    }
+    result
+}
+
+fn capture_record(
+    c: &mut Connection,
+    config: &Config,
+    epoch: i64,
+    e: &Value,
+    ingress_response_deadline: Option<std::time::Instant>,
+    mut record: Value,
+) -> Result<Value, String> {
     let key = required(&record, "fact_key")?.to_owned();
     let tx = immediate(c)?;
     check_epoch(&tx, epoch)?;
@@ -815,6 +836,7 @@ fn capture(
     record["first_known_ns"] = json!(first);
     record["commit_ns"] = json!(ns);
     record["recorded_seq"] = json!(seq.to_string());
+    crate::economic_session::capture_continuity::verify_member(config, &record)?;
     let pending = super::tb03c_e::pending_entry(config, &image, &record, seq)?;
     image["recorded"]
         .as_array_mut()
@@ -1516,6 +1538,9 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
     let (mut c, runtime) = open(&config.db, false)?;
     check_epoch(&c, epoch)?;
     audit(&c, config)?;
+    let mut owner = config.clone();
+    owner.intake = crate::economic_session::capture_continuity::start(&mut c, config, epoch)?;
+    let config = &owner;
     let r = &config.manifest["resources"];
     let n = |k: &str| -> Result<usize, String> {
         usize::try_from(positive(required(r, k)?, k)?).map_err(err)
@@ -1534,27 +1559,138 @@ pub(super) fn serve(config: &Config, epoch: i64, e_epoch: i64) -> Result<(), Str
     } else {
         validate_v1
     };
+    static STOP_SERVE: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_serve_stop(_: libc::c_int) {
+        STOP_SERVE.store(true, Ordering::SeqCst);
+    }
+    STOP_SERVE.store(false, Ordering::SeqCst);
+    // SAFETY: async-signal-safe 处理器仅写原子标志；不设 SA_RESTART 以便 poll 立即响应停机。
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_serve_stop as *const () as libc::sighandler_t;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+    let uncertain = Arc::new(AtomicBool::new(false));
     let mut reads = ReadTransfers::default();
     let revision = config.revision()?;
-    serve_unix_with_deadline(&config.socket, bounds, validator, |e, deadline| {
-        if matches!(
-            e["payload"]["op"].as_str(),
-            Some("EconomicReadOpen" | "EconomicReadPage" | "EconomicReadClose")
-        ) {
-            handle_paged_read(&mut c, config, epoch, &runtime, e, deadline, &mut reads)
-        } else if revision == SCHEMA_V2 {
-            handle_with_deadline(&mut c, config, epoch, e_epoch, &runtime, e, Some(deadline))
-        } else {
-            // /1 金融写入口保持原有语义；只读分页使用新 transport 截止。
-            handle(&mut c, config, epoch, e_epoch, &runtime, e)
-        }
-    })
+    serve_unix_with_deadline_until(
+        &config.socket,
+        bounds,
+        validator,
+        Box::new(|| STOP_SERVE.load(Ordering::SeqCst)),
+        uncertain.clone(),
+        |e, deadline| {
+            if matches!(
+                e["payload"]["op"].as_str(),
+                Some("EconomicReadOpen" | "EconomicReadPage" | "EconomicReadClose")
+            ) {
+                handle_paged_read(&mut c, config, epoch, &runtime, e, deadline, &mut reads)
+            } else if revision == SCHEMA_V2 {
+                handle_with_deadline(&mut c, config, epoch, e_epoch, &runtime, e, Some(deadline))
+            } else {
+                // /1 金融写入口保持原有语义；只读分页使用新 transport 截止。
+                handle(&mut c, config, epoch, e_epoch, &runtime, e)
+            }
+        },
+    )?;
+    crate::economic_session::capture_continuity::finish_clean(
+        &mut c,
+        config,
+        epoch,
+        STOP_SERVE.load(Ordering::SeqCst),
+        uncertain.load(Ordering::SeqCst),
+    )
 }
+/// #1375：恢复准备读口。只出具指定 X 批的逐件接纳状态和原字节；
+/// 缺失项仍由获准来源走原 CaptureExternal。读取不得落 E 事实或清 Pending。
+fn inspect_simulation_capture_batch(
+    config: &Config,
+    batch_id: &str,
+    receipt_digest: &str,
+    x_id: &str,
+    x_epoch: i64,
+) -> Result<Value, String> {
+    let binding = &config.manifest["history_simulation_source"];
+    if !binding.is_object() {
+        return Err("SchemaUnsupported：本会话未冻结模拟 X 原件来源".into());
+    }
+    let source = json!({
+        "session_id":config.session,"session_generation":config.generation,
+        "source_namespace":required(binding,"source_namespace")?,
+        "source_epoch":required(binding,"source_epoch")?,
+        "producer_id":required(binding,"producer_id")?,
+        "producer_epoch":required(binding,"producer_epoch")?,
+        "payload":{"op":"CaptureExternal"}
+    });
+    config.authorized(&source)?;
+    let (mut c, _) = open(&config.db, true)?;
+    let tx = c.transaction().map_err(err)?;
+    audit(&tx, config)?;
+    let (seq, root, _, _) = latest(&tx)?;
+    let receipt = crate::history_simulation::intake::committed_capture_batch(
+        &config.manifest,
+        batch_id,
+        receipt_digest,
+        x_id,
+        x_epoch,
+    )?;
+    let originals = receipt["originals"]
+        .as_array()
+        .ok_or("StorageUnavailable：模拟批缺原件列表")?;
+    let mut entries = Vec::with_capacity(originals.len());
+    for doc in originals {
+        // X 的冷审已逐字比对原件表和规范化回执值。按 Capture 的同一规则派生
+        // fact_key，不另创身份，也不替调用者生成 token / message_id。
+        let raw = canonical_json(doc);
+        let (_, event) = decode(&raw, "/event", config.book_rules()?)?;
+        let key = fact_key(&event)?;
+        let recorded = row(&tx, "facts", &key)?;
+        let capture_receipt = match recorded {
+            Some(record) => {
+                if record["raw_utf8"] != raw
+                    || record["json_pointer"] != "/event"
+                    || record["source_producer"]["producer_id"] != source["producer_id"]
+                    || record["source_producer"]["producer_epoch"] != source["producer_epoch"]
+                {
+                    return Err("IdentityConflict：X 原件与 E 已接纳事实不一致".into());
+                }
+                Some(row(&tx, "receipts", &key)?.ok_or("StorageUnavailable：E 缺原接纳回执")?)
+            }
+            None => None,
+        };
+        entries.push(json!({
+            "fact_key":key,"external_fact_id":event["source"]["external_fact_id"],
+            "source_cursor":event["source"]["source_cursor"],
+            "source_event_time":event["source"]["source_event_time"],
+            "raw_utf8":raw,"json_pointer":"/event",
+            "state":if capture_receipt.is_some() {"Recorded"} else {"Missing"},
+            "receipt":capture_receipt,"pending":row(&tx,"pending",&key)?
+        }));
+    }
+    tx.commit().map_err(err)?;
+    Ok(json!({
+        "kind":"SimulationCaptureBatch","domain_id":config.domain,
+        "e_cut":cut(config,seq,&root),"x_id":x_id,"x_writer_epoch":x_epoch.to_string(),
+        "batch_id":batch_id,"bar_index":receipt["bar_index"],"batch_receipt_sha256":receipt_digest,
+        "state_content_hash":receipt["state_content_hash"],
+        "source_namespace":source["source_namespace"],"source_epoch":source["source_epoch"],
+        "producer_id":source["producer_id"],"producer_epoch":source["producer_epoch"],
+        "entries":entries,"release_eligibility":"NotEvaluated"
+    }))
+}
+
 /// 正式 owner 入口。init/recover/serve 共用同一域独占锁；不给客户端创建替代权威路径。
 pub fn cli(is_b: bool) -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or(
-        "usage: init|serve|recover --manifest FILE --db FILE [--chong ID] [--epoch N --e-epoch N]",
+        if is_b {
+            "usage: init|serve|recover --manifest FILE --db FILE --chong ID [--epoch N --e-epoch N]"
+        } else {
+            "usage: init|serve|recover --manifest FILE --db FILE [--epoch N]; inspect-simulation-capture-batch --manifest FILE --db FILE --batch-id ID --batch-receipt-sha256 HASH --x-id ID --x-epoch N"
+        },
     )?;
     let mut opts = BTreeMap::new();
     while let Some(k) = args.next() {
@@ -1563,8 +1699,22 @@ pub fn cli(is_b: bool) -> Result<(), String> {
         }
         opts.insert(k, args.next().ok_or("InvalidDomain：参数缺值")?);
     }
+    let inspect_batch = !is_b && command == "inspect-simulation-capture-batch";
+    let valid = if inspect_batch {
+        [
+            "--manifest",
+            "--db",
+            "--batch-id",
+            "--batch-receipt-sha256",
+            "--x-id",
+            "--x-epoch",
+        ]
+        .as_slice()
+    } else {
+        ["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].as_slice()
+    };
     for k in opts.keys() {
-        if !["--manifest", "--db", "--chong", "--epoch", "--e-epoch"].contains(&k.as_str()) {
+        if !valid.contains(&k.as_str()) {
             return Err(format!("InvalidDomain：未知参数{k}"));
         }
     }
@@ -1580,6 +1730,17 @@ pub fn cli(is_b: bool) -> Result<(), String> {
     )?;
     if !is_b && opts.contains_key("--chong") {
         return Err("InvalidDomain：E不能指定重".into());
+    }
+    if inspect_batch {
+        let result = inspect_simulation_capture_batch(
+            &config,
+            get("--batch-id")?,
+            get("--batch-receipt-sha256")?,
+            get("--x-id")?,
+            positive(get("--x-epoch")?, "--x-epoch")?,
+        )?;
+        println!("{}", canonical_json(&result));
+        return Ok(());
     }
     let _lock = process_lock(&config.db, &config.domain)?;
     match command.as_str() {
@@ -2069,5 +2230,144 @@ mod history_simulation_capture_tests {
         let (_, _, _, after) = latest(&c).unwrap();
         assert_eq!(after["recorded"], image["recorded"]);
         assert_eq!(after["pending"], image["pending"]);
+    }
+    #[test]
+    fn committed_capture_history_rejects_single_older_batch_and_pending_batch() {
+        let sim_space = Space::new("reconcile-sim");
+        let x_db = sim_space.0.join("x.db");
+        let mut xc = Connection::open(&x_db).unwrap();
+        let auth = |id: &str| crate::history_simulation::runtime::Authority {
+            socket: sim_space.0.join(format!("{id}.sock")).display().to_string(),
+            authority_id: id.into(),
+            authority_epoch: "1".into(),
+            schema_revision: "economic-session/1".into(),
+            reply_namespace: "ns".into(),
+            producer_id: format!("P:{id}"),
+        };
+        let prof = crate::history_simulation::runtime::Profile {
+            x_id: "X".into(),
+            session_id: "rec-sim".into(),
+            session_generation: "1".into(),
+            source_namespace: "sim-x".into(),
+            source_epoch: "1".into(),
+            model: model(),
+            socket: sim_space.0.join("x.sock").display().to_string(),
+            e: auth("E"),
+            s: auth("S"),
+            conditions: [
+                ("released-exact/1", "released-exact/1", "E.ReleaseExact"),
+                (
+                    "execute-committed/1",
+                    "execute-committed/1",
+                    "S.RequestConditionalExecution",
+                ),
+                (
+                    "simulation-local-transaction/1",
+                    "simulation-local-transaction/1",
+                    "X.OwnAttemptAndCall",
+                ),
+                ("model_coverage", "model-coverage/1", "E.ReleaseExact"),
+            ]
+            .into_iter()
+            .map(
+                |(id, cap, stage)| crate::history_simulation::runtime::Condition {
+                    condition_id: id.into(),
+                    authority_revision: cap.into(),
+                    dependency_set: vec!["dep".into()],
+                    invalidation_sources: vec!["inv".into()],
+                    required_check_stages: vec![stage.into()],
+                    evidence_refs: vec!["ev".into()],
+                    coverage_proof: "cov".into(),
+                    validator_capability: cap.into(),
+                    failure_result: "Denied".into(),
+                },
+            )
+            .collect(),
+            timeout_ms: 1000,
+            max_frame_bytes: 1_048_576,
+        };
+        xc.execute_batch("CREATE TABLE x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;")
+            .unwrap();
+        for (k, v) in [
+            ("profile_revision", "x-execution-profile/1"),
+            ("profile_mode", "simulation"),
+            ("history_simulation", "true"),
+            ("writer_epoch", "1"),
+        ] {
+            xc.execute("INSERT INTO x_meta VALUES(?1,?2)", params![k, v])
+                .unwrap();
+        }
+        {
+            let xtx = xc.transaction().unwrap();
+            crate::history_simulation::runtime::initialize_in_transaction(&xtx, &prof, 1).unwrap();
+            xtx.commit().unwrap();
+        }
+        let b0 = x::commit_batch(&mut xc, &batch(0, vec![])).unwrap();
+        let b1 = x::commit_batch(&mut xc, &batch(1, vec![])).unwrap();
+        let b0_sha = sha256_hex(canonical_json(&b0).as_bytes());
+        let b1_sha = sha256_hex(canonical_json(&b1).as_bytes());
+        let sim_manifest = json!({
+            "schema_revision": "economic-manifest/1",
+            "session_id": "rec-sim",
+            "session_generation": "1",
+            "book_revision": "tb03c-book/1",
+            "e": {"db": sim_space.0.join("e.db"), "socket": sim_space.0.join("e.sock")},
+            "chongs": [{"chong_id": "one", "symbol": "TEST", "operation_level": "1", "fixed_q": "10", "db": sim_space.0.join("b.db"), "socket": sim_space.0.join("b.sock")}],
+            "authorized_sources": [{"source_namespace": "sim-x", "source_epoch": "1", "producer_id": "X:sim", "producer_epoch": "1", "operations": ["CaptureExternal", "ResolveEvidence", "ReadView"]}],
+            "history_simulation_source": {"source_namespace": "sim-x", "source_epoch": "1", "producer_id": "X:sim", "producer_epoch": "1", "x_db": x_db, "model_content_hash": b0["model_content_hash"]},
+            "resources": {"max_frame_bytes": "1048576", "read_timeout_ms": "1000", "write_timeout_ms": "1000", "response_timeout_ms": "30000", "queue_capacity": "2", "max_connections": "2"},
+            "clock": {"kind": "System"}
+        });
+        // 1) 单一较早批 QueryBatch (b-0) 不能证明到最新批 b-1 的整段无漏报。
+        let old_batch_err = crate::history_simulation::intake::committed_capture_history(
+            &sim_manifest,
+            "X",
+            1,
+            b0["request_id"].as_str(),
+            Some(&b0_sha),
+        )
+        .unwrap_err();
+        assert!(old_batch_err.contains("完整前沿"), "{old_batch_err}");
+
+        // 2) 篡改完整回执摘要必须拒收。
+        let bad_sha = crate::history_simulation::intake::committed_capture_history(
+            &sim_manifest,
+            "X",
+            1,
+            b1["request_id"].as_str(),
+            Some(&"0".repeat(64)),
+        )
+        .unwrap_err();
+        assert!(bad_sha.contains("完整回执摘要不同"), "{bad_sha}");
+
+        // 3) pending_batch 存在时必须拒收。
+        xc.execute("INSERT INTO x_sim_meta VALUES('pending_batch','{}')", [])
+            .unwrap();
+        let pending_err = crate::history_simulation::intake::committed_capture_history(
+            &sim_manifest,
+            "X",
+            1,
+            b1["request_id"].as_str(),
+            Some(&b1_sha),
+        )
+        .unwrap_err();
+        assert!(
+            pending_err.contains("未提交") || pending_err.contains("pending"),
+            "{pending_err}"
+        );
+        xc.execute("DELETE FROM x_sim_meta WHERE k='pending_batch'", [])
+            .unwrap();
+
+        // 4) 完整结束界 b-1 核验全部批通过。
+        let hist = crate::history_simulation::intake::committed_capture_history(
+            &sim_manifest,
+            "X",
+            1,
+            b1["request_id"].as_str(),
+            Some(&b1_sha),
+        )
+        .unwrap();
+        assert_eq!(hist["batch_count"], "2");
+        assert_eq!(hist["last_request_id"], b1["request_id"]);
     }
 }

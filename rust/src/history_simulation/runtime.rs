@@ -13,6 +13,10 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub use super::store::{
+    acquire_simulation_writer_lock, lock_frontier_exclusive, FrontierGuard, SimulationWriterLock,
+};
+
 pub const WIRE: &str = "x-exact-simulation/1";
 pub const AUTHORITY_WIRE: &str = "x-exact-authority/1";
 fn hash<T: Serialize>(v: &T) -> String {
@@ -487,6 +491,16 @@ fn authority_frame(
 fn authority_connect(a: &Authority) -> Result<UnixStream, String> {
     UnixStream::connect(&a.socket).map_err(io)
 }
+fn shutdown_request_write(stream: &UnixStream) -> Result<(), String> {
+    match stream.shutdown(std::net::Shutdown::Write) {
+        Ok(()) => Ok(()),
+        // BSD/macOS 在对端读完换行、写回回复并先行关闭连接时，本端 shutdown(SHUT_WR)
+        // 会返回 ENOTCONN（ErrorKind::NotConnected）；此时请求帧已由 write_frame_observed
+        // 完整写出，继续由 read_frame 读取并验签对端回复（若对端未回则由 read_frame 失败关闭）。
+        Err(err) if err.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+        Err(err) => Err(io(err)),
+    }
+}
 fn authority_exchange(
     p: &Profile,
     a: &Authority,
@@ -501,7 +515,7 @@ fn authority_exchange(
     // 只能查询 S 的 NoRecord，永远卡住（#1407 C2，CI run 42772775704）。
     let deadline = Instant::now() + Duration::from_millis(p.timeout_ms);
     write_frame_observed(&mut stream, &frame.bytes, deadline, &mut NoObserver)?;
-    stream.shutdown(std::net::Shutdown::Write).map_err(io)?;
+    shutdown_request_write(&stream)?;
     let reply = read_frame(&mut stream, p.max_frame_bytes, deadline, json_frame)?;
     let expected = reply_envelope(
         &frame.envelope,
@@ -694,10 +708,13 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         };
         commands.push((command, release, call));
     }
-    let pending_tx = c.transaction().map_err(error)?;
-    pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
-    pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[epoch.to_string()]).map_err(error)?;
-    pending_tx.commit().map_err(error)?;
+    {
+        let _frontier_lock = store::lock_frontier_exclusive(c)?;
+        let pending_tx = c.transaction().map_err(error)?;
+        pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
+        pending_tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_epoch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[epoch.to_string()]).map_err(error)?;
+        pending_tx.commit().map_err(error)?;
+    }
     let mut executed_records = Vec::new();
     for (command, release, call) in commands {
         // AcceptExact 不产生调用权；在真正模型动作前才取得本命令 S 终态。
@@ -743,15 +760,18 @@ fn execute(c: &mut Connection, p: &Profile, epoch: i64, mut batch: Batch) -> Res
         c.execute("UPDATE x_exact_commands SET state='ExecutionReady',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND state IN ('ExecutionRequested','ExecutionReady')",params![command.command_id,encoded,canonical_json(&evidence)]).map_err(error)?;
         executed_records.push((command.command_id, evidence));
     }
-    let tx = c.transaction().map_err(error)?;
-    tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
-    for (id, evidence) in &executed_records {
-        let changed=tx.execute("UPDATE x_exact_commands SET state='MayHaveCalled',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND (state='ExecutionReady' OR (state='MayHaveCalled' AND attempt_batch=?2))",params![id,encoded,canonical_json(evidence)]).map_err(error)?;
-        if changed != 1 {
-            return Err("IdentityConflict：X 同命令调用占有冲突".into());
+    {
+        let _frontier_lock = store::lock_frontier_exclusive(c)?;
+        let tx = c.transaction().map_err(error)?;
+        tx.execute("INSERT INTO x_sim_meta(k,v) VALUES('pending_batch',?1) ON CONFLICT(k) DO UPDATE SET v=excluded.v",[&encoded]).map_err(error)?;
+        for (id, evidence) in &executed_records {
+            let changed=tx.execute("UPDATE x_exact_commands SET state='MayHaveCalled',attempt_batch=?2,execute_evidence=COALESCE(execute_evidence,?3) WHERE id=?1 AND (state='ExecutionReady' OR (state='MayHaveCalled' AND attempt_batch=?2))",params![id,encoded,canonical_json(evidence)]).map_err(error)?;
+            if changed != 1 {
+                return Err("IdentityConflict：X 同命令调用占有冲突".into());
+            }
         }
+        tx.commit().map_err(error)?;
     }
-    tx.commit().map_err(error)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_CRASH_AFTER_CLAIM")
         .ok()
@@ -864,17 +884,21 @@ pub fn initialize_in_transaction(
 }
 
 pub fn serve(c: &mut Connection, p: &Profile, epoch: i64) -> Result<(), String> {
-    let tx = c.transaction().map_err(error)?;
-    initialize_in_transaction(&tx, p, epoch)?;
-    #[cfg(test)]
-    if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
-        .ok()
-        .as_deref()
-        == Some("before")
     {
-        std::process::exit(44);
+        let _frontier_lock = store::lock_frontier_exclusive(c)?;
+        let tx = c.transaction().map_err(error)?;
+        initialize_in_transaction(&tx, p, epoch)?;
+        #[cfg(test)]
+        if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
+            .ok()
+            .as_deref()
+            == Some("before")
+        {
+            std::process::exit(44);
+        }
+        tx.commit().map_err(error)?;
     }
-    tx.commit().map_err(error)?;
+    store::ensure_frontier_lock(c)?;
     #[cfg(test)]
     if std::env::var("ISSUE1381_TEST_INIT_INTERRUPT")
         .ok()
