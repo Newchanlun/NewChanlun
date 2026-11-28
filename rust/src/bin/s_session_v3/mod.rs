@@ -62,6 +62,8 @@ mod catalog_evidence;
 mod commit;
 mod control;
 mod control_audit;
+#[cfg(issue1441_cost_stop_refusal)]
+mod cost_stop_refusal;
 #[cfg(feature = "s_incremental")]
 mod cross_request_source_cache;
 mod driver;

@@ -58,6 +58,9 @@
 //! - 所有平局按 `(timestamp, source_index)` 升序裁决；已确认结构不可回写重分解。
 
 pub mod config;
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+pub mod cost_stop;
+pub mod evidence_gate;
 /// #1603：级别塔上界与 MACD 力度参数的版本化记录（ADR 0041；#1586 C-09/C-10）。
 pub mod policy_records;
 /// #1602：场所 profile、Θ_risk 与数据 profile 的版本化记录（ADR 0041；#1586 C-06/C-08/C-17/C-18）。

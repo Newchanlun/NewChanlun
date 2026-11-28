@@ -5,7 +5,14 @@
 
 use std::fmt;
 
-use super::super::policy_records::{
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+mod qualifications;
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+pub use qualifications::WindowGap;
+#[cfg(any(test, feature = "s_session", feature = "backtest_bin"))]
+pub(crate) use qualifications::{QualifiedWindow, WindowSpan};
+
+use super::policy_records::{
     invalid, parse_header, read_str, read_u32, PolicyError, PolicyRef, ACTIVE_EVIDENCE_GATE_JSON,
     EVIDENCE_GATE_ID,
 };
@@ -154,10 +161,14 @@ fn parse_fraction(id: &'static str, name: &str, raw: &str) -> Result<(u32, u32),
 
 /// 从统一 JSON 机制读取 evidence_gate；`None` 是 RecordMissing，不是默认 v1。
 pub fn parse_evidence_gate(text: Option<&str>) -> Result<EvidenceGate, PolicyError> {
+    parse_record(text).map(|(gate, _)| gate)
+}
+
+pub(super) fn parse_record(text: Option<&str>) -> Result<(EvidenceGate, String), PolicyError> {
     let (record, fields) = parse_header(EVIDENCE_GATE_ID, text)?;
     read_str(EVIDENCE_GATE_ID, &fields, "supersedes")?;
     read_str(EVIDENCE_GATE_ID, &fields, "authorizer")?;
-    read_str(EVIDENCE_GATE_ID, &fields, "authorized_at")?;
+    let authorized_at = read_str(EVIDENCE_GATE_ID, &fields, "authorized_at")?;
     let confidence_raw = read_str(EVIDENCE_GATE_ID, &fields, "confidence")?;
     let coverage_raw = read_str(EVIDENCE_GATE_ID, &fields, "min_coverage")?;
     let block_raw = read_str(EVIDENCE_GATE_ID, &fields, "block_unit")?;
@@ -171,7 +182,7 @@ pub fn parse_evidence_gate(text: Option<&str>) -> Result<EvidenceGate, PolicyErr
         min_coverage: parse_fraction(EVIDENCE_GATE_ID, "min_coverage", &coverage_raw)?,
     };
     gate.validate()?;
-    Ok(gate)
+    Ok((gate, authorized_at))
 }
 
 pub fn active_evidence_gate() -> Result<EvidenceGate, PolicyError> {

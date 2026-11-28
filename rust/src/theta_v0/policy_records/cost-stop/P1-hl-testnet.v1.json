@@ -1,0 +1,29 @@
+{
+  "id": "#1354/cost-stop-policy",
+  "profile_id": "P1-hl-testnet",
+  "version": 1,
+  "supersedes": "none",
+  "symbol": "BTC",
+  "granularity": "1m",
+  "tower_base_ref": "tower-base/1",
+  "fee": {
+    "venue": "Hyperliquid 主 DEX 永续",
+    "tier": "Tier 0 Base rate",
+    "role": "taker",
+    "source_url": "https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees",
+    "retrieved_at": "2026-10-20",
+    "rate": { "numerator": 45, "denominator": 100000 }
+  },
+  "slippage": { "kind": "Missing" },
+  "latency_error": { "kind": "Missing" },
+  "holding": {
+    "kind": "Missing",
+    "start_level": 0,
+    "designated_source": "https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding"
+  },
+  "theta": { "numerator": 2, "denominator": 1 },
+  "evidence_gate_ref": "#1677/evidence-gate/v1",
+  "authorizer_ref": "https://github.com/xy7365527-lang/NewChanlun/issues/1559#issuecomment-6310844461",
+  "authorized_at": "2026-10-21",
+  "valid_through": "2027-10-21"
+}
