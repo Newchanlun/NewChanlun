@@ -1,5 +1,5 @@
 - id: "B-1"
-  title: "级别升级规则冲突与分离（规则甲/乙正文冲突，规则丙同级别分解单列）"
+  title: "三套级别升级规则在不同前提下的输出分离（规则甲 / 规则乙 / 规则丙）"
   target_modules:
     - "Chan.Defs.Level"
     - "Chan.Audit.Literal.SignalsAndLevels"
@@ -8,7 +8,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "围绕单一中枢持续震荡时，原典一级正文对级别升级给出两套直接冲突的规则：规则甲（018:40/020:34/020:44，无两个同级中枢波动区间重叠则延伸无上限、永不升级）与规则乙（033:16/092:22，延伸满九段即升格高一级中枢）；另 038:26 由作者显式“可以制定”的规则丙（同级别分解不定义延伸、每三段切分为盘整+盘整）属可选分解方案，不冒称作者断言三者逐项等价。待下游 Chan/Audit/Math 证伪甲乙同级判定一致命题 b1_ruleAAndRuleBAgreeOnLevelLiteral，并给出三规则分离见证 b1_threeLevelRulesSeparated。"
+  exact_proposition: "原典在不同规则与前提下给出三套输出互异的级别升级表述：规则甲（018:40/020:34 开盘封涨停的时间延长例示 / 020:44，不限段数仅看连续两同级中枢波动区间重叠）、规则乙（033:16 为消除多义性所设的延伸限段规则与 092:22 超过 9 个数据升级）及规则丙（038:26 由作者显式“可以制定”的同级别分解规则，不定义延伸而每三段切分为盘整+盘整）。三者处于各自不同前提与规则设定下而对同一段数输入给出不同输出（撤回将 033:16 与 020:34 写成同一划分同一前提下直接矛盾的说法）。待下游 Chan/Audit/Math 检验甲乙输出一致性 b1_ruleAAndRuleBAgreeOnLevelLiteral 并证成三套规则分离见证 b1_threeLevelRulesSeparated。"
   citations:
     - cite: "018:40"
       tier: 1
@@ -82,10 +82,10 @@
     - "Chan.Audit.Literal.b1_ruleC_sameLevelDecompLiteral"
     - "Chan.Audit.Literal.b1_ruleAAndRuleBAgreeOnLevelLiteral"
     - "Chan.Audit.Literal.b1_threeLevelRulesSeparated"
-  history_revision: "统一高一级中枢唯一定义为“三个连续本级别走势类型存在公共重叠”，将“延伸满九段升级（3+3+3）”确立为规范化进位公理以消解规则甲（020:44）与规则乙（033:16/092:22）的正文冲突；038:26 规则丙作为作者显式制定的可选同级别分解方案单列。"
+  history_revision: "统一高一级中枢唯一定义为“三个连续本级别走势类型存在公共重叠”，将“延伸满九段升级（3+3+3）”确立为规范化进位公理，以统一 020:34/020:44、033:16/092:22 与 038:26 在不同规则前提下的级别输出（038:26 同级别分解作为可选方案单列）。"
 
 - id: "B-2"
-  title: "答疑 019:1058“三段相连必有重叠”为假，并与正文 067:16 同线段前提分离"
+  title: "答疑 019:1058“三段相连必有重叠”为假，并与正文 067:16 同线段不破前低前提分离"
   target_modules:
     - "Chan.Defs.Center"
     - "Chan.Audit.Literal.OrderAndCenter"
@@ -94,7 +94,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "二级旁证答疑 019:1058 宣称首尾相连且方向交替的 N 字三段必然有重叠、且不可能仅有边界单点重叠（随后在答疑 031:912 被作者自行否定）；一级正文 067:16 讨论的 Si 与 Si+1 已限定属于同一条向上笔开始的未破坏线段（并受 065:48 首三笔重叠前提约束），不得与答疑 019:1058 的无约束三段混同。待下游 Chan/Audit/Math 仅对答疑字面断言 b2_reply019ConnectedThreeAlwaysOverlapLiteral 与 b2_reply019NoBoundaryOnlyOverlapLiteral 构造形式化反例，而将 067:16 的同线段前提 b2_lesson67SameUpSegAdjacentPair 单独保留为带终止规则前提的待证引理。"
+  exact_proposition: "二级旁证答疑 019:1058 宣称首尾相连且方向交替的 N 字三段必然有重叠、且不可能仅有边界单点重叠（随后在答疑 031:912 被作者自行否定）；一级正文 067:16 讨论的 Si 与 Si+1 已限定属于同一条向上笔开始的未破坏线段（b2_lesson67SameUpSegAdjacentPair 保留“回落笔不破前向上笔低点 s1.lo ≤ x1.lo”，不人为附加后一向上笔必须达到前高的条件，合法容纳如 0→10→4→8），不得与答疑 019:1058 的无约束三段混同。待下游 Chan/Audit/Math 仅对答疑字面断言 b2_reply019ConnectedThreeAlwaysOverlapLiteral 与 b2_reply019NoBoundaryOnlyOverlapLiteral 构造形式化反例。"
   citations:
     - cite: "065:48"
       tier: 1
@@ -128,10 +128,10 @@
     - "Chan.Audit.Literal.b2_reply019ConnectedThreeAlwaysOverlapLiteral"
     - "Chan.Audit.Literal.b2_reply019NoBoundaryOnlyOverlapLiteral"
     - "Chan.Audit.Literal.b2_lesson67SameUpSegAdjacentPair"
-  history_revision: "答疑 019:1058“三段相连必有重叠”不作恒真式，主线 Chan/Defs/ 中三段重叠一律显式写为数据判定谓词；正文 067:16 保留其“属于同一未破坏线段”的前提，作为带终止规则前提的待证引理单列。"
+  history_revision: "答疑 019:1058“三段相连必有重叠”不作恒真式，主线 Chan/Defs/ 中三段重叠一律显式写为数据判定谓词；正文 067:16 保留其同线段不破前低前提（不附加人为新高条件），作为带终止规则前提的待证引理单列。"
 
 - id: "B-3"
-  title: "五个核心谓词等号边界口径冲突（020:60 含等号三买卖 vs 054:24 边界相触属震荡）"
+  title: "五个核心谓词等号边界口径冲突（同列表首次回试绑定下 020:60 含等号三买卖 vs 054:24 触及属震荡）"
   target_modules:
     - "Chan.Defs.Order"
     - "Chan.Defs.Center"
@@ -141,7 +141,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "在满足 020:60/020:62 完整领域前提（真实离开中枢并首尾衔接首次回试，已与纯价格分量 b3_priceNoBreakZg/b3_priceNoBreakZd 严格区分）下，正文 020:60 对第三类买点字面写作“低点不跌破 ZG”（含等号 ≥），其对偶卖点允许回抽高点等于 ZD；而正文 054:24 明确判定 d1=g2 触及边界即属中枢震荡、必须严格 d1>g2 才构成第三类卖点。同时中枢重叠、包含关系、背驰力度与数值相等五个谓词的等号口径散见各处。待下游 Chan/Audit/Math 在合法离开与首次回试前提下证伪 b3_literalThirdDisjointFromOscillation。"
+  exact_proposition: "在同一条已完成次级别走势列表 segs 上按连续下标 (i, i + 1) 严格绑定真实越界离开段（向上须 endPrice > ZG、向下须 endPrice < ZD，杜绝起终点仍在核内的段被认作离开）与紧接的首次回试段（所有 j < i 均仍触及中枢核心，杜绝第二次回试冒充首次回试，并与纯价格分量 b3_priceNoBreakZg/b3_priceNoBreakZd 严格区分）的前提下，正文 020:60 对第三类买点字面写作“低点不跌破 ZG”（含等号 ≥），其对偶卖点允许回抽高点等于 ZD；而正文 054:24 明确判定 d1=g2 触及边界即属中枢震荡、必须严格 d1>g2 才构成第三类卖点。同时中枢重叠、包含关系、背驰力度与数值相等五个谓词的等号口径散见各处。待下游 Chan/Audit/Math 在同列表首次离开-回试前提下证伪 b3_literalThirdDisjointFromOscillation。"
   citations:
     - cite: "020:56"
       tier: 1
@@ -187,13 +187,13 @@
     - "Chan.Audit.Literal.CenterCore"
     - "Chan.Audit.Literal.b3_priceNoBreakZg"
     - "Chan.Audit.Literal.b3_priceNoBreakZd"
-    - "Chan.Audit.Literal.b3_validUpLeaveAndFirstRetest"
-    - "Chan.Audit.Literal.b3_validDownLeaveAndFirstRetest"
-    - "Chan.Audit.Literal.b3_thirdBuyLiteral"
-    - "Chan.Audit.Literal.b3_thirdSellLiteral"
+    - "Chan.Audit.Literal.b3_validUpLeaveAndFirstRetestAt"
+    - "Chan.Audit.Literal.b3_validDownLeaveAndFirstRetestAt"
+    - "Chan.Audit.Literal.b3_thirdBuyAtLiteral"
+    - "Chan.Audit.Literal.b3_thirdSellAtLiteral"
     - "Chan.Audit.Literal.b3_touchesCenterOscillation"
     - "Chan.Audit.Literal.b3_literalThirdDisjointFromOscillation"
-  history_revision: "统一写死五个谓词的等号边界口径——中枢重叠取闭区间（单点亦算）、第三类买卖点在满足真实离开与首次回试前提下取严格不等（低点 > ZG / 高点 < ZD）、K 线包含取非严格（一端相等即包含）、背驰力度取“不大于”、价格取绝对精确比较。"
+  history_revision: "统一写死五个谓词的等号边界口径——中枢重叠取闭区间（单点亦算）、第三类买卖点在同列表连续下标 (i, i + 1) 真实越界离开与首次回试前提下取严格不等（低点 > ZG / 高点 < ZD）、K 线包含取非严格（一端相等即包含）、背驰力度取“不大于”、价格取绝对精确比较。"
 
 - id: "B-4"
   title: "走势分解“唯一性”与“多样性”并存导致买卖点依赖所选分解"
@@ -314,7 +314,7 @@
   history_revision: "主线抽象核对递归基底做参数化处理，抽象为任意产出“方向交替区间序列”的构造器，分型-笔-线段、三根 K 线重叠与三笔同价成交均作为具体实例接入。"
 
 - id: "B-6"
-  title: "线段划分在第 67 课宣称定稿后多次补丁且存在三处不闭合（含第一种情况分界点禁包含冲突）"
+  title: "线段划分演进与边界规格（区分 067:20 同特征序列规则与 071:18,40,42 跨界待定规则）"
   target_modules:
     - "Chan.Defs.Segment"
     - "Chan.Audit.Literal.PenAndSegment"
@@ -322,8 +322,8 @@
   disposition: "定义"
   delivery_state: "待证反例陈述"
   audit_status: null
-  target_audit_status: "已否证"
-  exact_proposition: "线段定义在一级正文 067:48 宣称精确化定稿后仍经 71/78/81 课持续补丁，且存在三处不闭合：（1）一级正文 067:20 把特征序列元素视同一般 K 线做方向正确的包含合并，与 071:42 要求第一种情况假设转折点前后两元素禁止跨界包含合并相冲突（b6_case1IgnoreBoundaryBanEquivLiteral 在两侧共用同一方向正确算法 mergeBarsDirectional 且限定合法第一种情况分界点 b6_validCase1Boundary 时，有无跨界合并成为唯一差异）；（2）二级旁证答疑 067:194“第一种情况任何三笔构成破坏”与一级正文 071:30“第三笔须破第一笔终点”及答疑 081:222 待破坏顶点取法表述不一；（3）二级旁证答疑 078:206 承认划分依赖起点而无收敛证明，且缺口存在一级正文 064:26（突然逆势缺口当一段）与二级旁证 075:137（退回笔/线段内部）两种处理。待下游 Chan/Audit/Math 证伪 b6_case1IgnoreBoundaryBanEquivLiteral。"
+  target_audit_status: "已分离"
+  exact_proposition: "线段定义在一级正文 067:48 宣称精确化定稿后仍经 71/78/81 课持续补丁与细化：（1）明确区分 067:20“同一特征序列内按一般 K 线方法做包含处理”与 071:18,40,42“假设转折点前后两元素因待定而不属同一特征序列故禁跨界包含”的适用范围差异（不将两课误写为直接文本矛盾）；在两侧共用同一方向正确追踪算法且限定合法第一种情况分界点 b6_validCase1Boundary 时，b6_case1IgnoreBoundaryBanEquivLiteral 严格比较**指定候选分界点位置 `before.length`** 上的顶分型判定（绝不扫描序列其余无关位置），以检验忽略跨界禁令与遵守分界点禁包含是否给出不同结果；（2）二级旁证答疑 067:194“第一种情况任何三笔构成破坏”与一级正文 071:30“第三笔须破第一笔终点”及答疑 081:222 待破坏顶点取法表述不一；（3）二级旁证答疑 078:206 承认划分依赖起点而无收敛证明，且缺口存在一级正文 064:26（突然逆势缺口当一段）与二级旁证 075:137（退回笔/线段内部）两种处理。待下游 Chan/Audit/Math 检验 b6_case1IgnoreBoundaryBanEquivLiteral。"
   citations:
     - cite: "057:30"
       tier: 1
@@ -360,6 +360,11 @@
       source_tag: "[一级正文]"
       admit_id: 1066
       quote: "上面两种情况，就给出所有线段划分的标准。显然，出现特征序列的分型，是线段结束的前提条件。本课，就是把前面“线段破坏的充要条件就是被另一个线段破坏”精确化了。因此，以后关于线段的划分，都以此精确的定义为基础。"
+    - cite: "071:18"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 1132
+      quote: "注意，特征序列的元素包含关系，首先的前提是这元素都在一特征序列里，如果两个不同的特征序列之间的元素，讨论包含关系是没意义的。"
     - cite: "071:26"
       tier: 1
       source_tag: "[一级正文]"
@@ -431,15 +436,16 @@
       admit_id: null
       quote: "跳空不改变任何事情，如果这缺口在线段里，还是线段；在笔里，还是笔。"
   literal_lean_defs:
-    - "Chan.Audit.Literal.mergeBarsDirectional"
+    - "Chan.Audit.Literal.mergeTrackedDirectional"
+    - "Chan.Audit.Literal.b6_hasTopFractalAtRaw"
     - "Chan.Audit.Literal.b6_mergeCharSeqGlobalLiteral"
     - "Chan.Audit.Literal.b6_mergeCharSeqSplitAtBoundary"
     - "Chan.Audit.Literal.b6_validCase1Boundary"
     - "Chan.Audit.Literal.b6_case1IgnoreBoundaryBanEquivLiteral"
-  history_revision: "线段划分改写为输入“笔序列 + 起点”的确定性双情况状态机，使用方向正确的包含合并并写死第一种情况分界点禁包含与第二种情况允许包含的范围；将缺口统一退回 K 线层处理登记为项目形式化选择（并注明 064:26 原文列有突然逆势缺口当一段的另一种处理）。"
+  history_revision: "线段划分改写为输入“笔序列 + 起点”的确定性双情况状态机，使用方向正确的包含合并并写死 067:20 同特征序列内合并与 071:18,40,42 第一种情况分界点禁包含的范围；将缺口统一退回 K 线层处理登记为项目形式化选择（并注明 064:26 原文列有突然逆势缺口当一段的另一种处理）。"
 
 - id: "B-7"
-  title: "笔定义存在老笔/新笔/6根/不重合多套规则（需参数化分离，不冒称逐项等价）"
+  title: "笔定义存在老笔/新笔/6根/不重合多套规则（带真实原始极值下标追踪的参数化分离）"
   target_modules:
     - "Chan.Defs.Pen"
     - "Chan.Audit.Literal.PenAndSegment"
@@ -448,7 +454,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "原典成笔规则先后出现老笔（一级正文 062:26/077:38，包含处理后顶底分型间至少 1 根独立 K 线，即合并后总根数 ≥ 7）、新笔（二级旁证 081:110，明确说明放松条件：包含处理后不共用 K 线且原始顶底极值间至少 3 根 K 线；081:160 说明个人仍用老标准，未宣称每个候选跨度逐项等价）、6 根基本 K 线单位（一级正文 106:16）以及分型不重合表述（二级旁证 099:56）；同时 077:54 未交代相等同类分型保留后的后续归属（077:44 不等号写反单列于 B-42）。待下游 Chan/Audit/Math 基于真实原始 K 线序列给出新老笔规则分离见证 b7_oldNewPenRuleSeparated。"
+  exact_proposition: "原典成笔规则先后出现老笔（一级正文 062:26/077:38，包含处理后顶底分型间至少 1 根独立 K 线，即合并后总根数 ≥ 7）、新笔（二级旁证 081:110，明确说明放松条件：包含处理后不共用 K 线且顶底分型中心真实最高/最低原始 K 线间至少 3 根 K 线；081:160 说明个人仍用老标准，未宣称逐项等价）、6 根基本 K 线单位（一级正文 106:16）以及分型不重合表述（二级旁证 099:56）；同时 077:54 未交代相等同类分型保留后的后续归属（077:44 不等号写反单列于 B-42）。Lean 侧用 TrackedKBar 在包含合并中显式追踪每根合并 K 线的真实极值原始下标 (loRawIdx, hiRawIdx) 与覆盖区间 [rawStart, rawEnd]，新笔间隔直接按分型中心合并 K 线的 hiRawIdx - loRawIdx 计算，彻底杜绝冒用同价其他原始 K 线下标。待下游 Chan/Audit/Math 证成新老笔规则分离见证 b7_oldNewPenRuleSeparated。"
   citations:
     - cite: "062:26"
       tier: 1
@@ -511,12 +517,14 @@
       admit_id: null
       quote: "因为笔的最基本条件就是顶和底分型之间必须有不重合的部分"
   literal_lean_defs:
-    - "Chan.Audit.Literal.b7_validPenEndpointsFromBarsBool"
+    - "Chan.Audit.Literal.TrackedKBar"
+    - "Chan.Audit.Literal.b7_validPenFromBarsBool"
+    - "Chan.Audit.Literal.b7_newPenGapFromBars"
     - "Chan.Audit.Literal.b7_oldPenFromBars"
     - "Chan.Audit.Literal.b7_newPenFromBars"
     - "Chan.Audit.Literal.b7_lesson106PenFromBars"
     - "Chan.Audit.Literal.b7_oldNewPenRuleSeparated"
-  history_revision: "成笔规则基于真实 K 线序列参数化为 PenRule（包含处理后最少根数、原始极值间最少间隔）以显式分离老笔与新笔，并用含回溯的确定性算法补齐同类分型筛选与相等保留的空白规则。"
+  history_revision: "成笔规则基于带真实原始极值下标追踪的 K 线序列参数化为 PenRule（包含处理后最少根数、分型中心真实极值原始下标间隔）以显式分离老笔与新笔，并用含回溯的确定性算法补齐同类分型筛选与相等保留的空白规则。"
 
 - id: "B-8"
   title: "精度与容差比较：实盘 0.08 点翻转结论，两值容差不满足等价关系额外传递性要求"
@@ -596,7 +604,7 @@
   history_revision: "主线价格比较采用精确序与精确相等，取整或量化作为显式单调预处理映射参数传入；两值容差因不满足等价关系所需的额外传递性要求，不作为比较底座。"
 
 - id: "B-9"
-  title: "方向合法的相邻非极值端点线段经独立标准化后折线断开"
+  title: "符合 078:22,42,50 笔破坏结构的端点非极值相邻线段经独立标准化后折线可能断开"
   target_modules:
     - "Chan.Defs.Order"
     - "Chan.Defs.Segment"
@@ -606,13 +614,23 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "正文 078:58 与 078:60 宣称当线段最高低点不在端点时，可将每条线段标准化为端点即极值并形成“延续不断、首尾相连的折线”；但 070:48 与 078:42 明确允许线段端点不是极值。即使严格强制原始线段满足 078:20 的方向一致性（向上段起点严低于终点、向下段终点严低于起点，由 directedSegValid 与 b9_adjacentValidConnectedSegs 保障），只要端点非极值，独立标准化仍会使相邻段端点断开。待下游 Chan/Audit/Math 证伪 b9_standardizedAlwaysConnectedLiteral。"
+  exact_proposition: "正文 078:58 与 078:60 宣称当线段最高低点不在端点时，可将每条线段标准化为端点即极值并形成“延续不断、首尾相连的折线”；但 070:48 与 078:42 明确允许线段端点不是极值。端点非极值时独立标准化并非必然断开（若相邻两段极值恰相等仍可相接），但在完全符合 078:20 方向一致性与 078:22,50 / 071:30 相邻线段破坏结构的真实笔序列载体（PenStroke 与 b9_adjacentDestroyedSegPair）上，标准化后可能断开（如前上段 (0→15→10→16) 与后下段 (16→8→20→6) 标准化后端点 16 ≠ 20）。待下游 Chan/Audit/Math 证伪 b9_standardizedStrokeSegsAlwaysConnectedLiteral 与 b9_standardizedAlwaysConnectedLiteral。"
   citations:
     - cite: "078:20"
       tier: 1
       source_tag: "[一级正文]"
       admit_id: 1212
       quote: "同样，正如同一笔不可能出现顶低于底的情况，同一线段中，两端的一顶一底，顶肯定要高于底，如果你划出一个不符合这基本要求的线段，那肯定是划错了。"
+    - cite: "078:22"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 1213
+      quote: "由于图形不断延续，因此，除非是新股上市后最开始的一段，否则任何一段都是破坏前一段的，如果你的划分，不能保证前面每一段都是被后一段破坏，那么这划分肯定不对。线段的破坏是可以逆时间传递的，也就是说被后线段破坏的线段，一定破坏前线段，如果违反这个原则，那线段的划分一定有问题。"
+    - cite: "078:50"
+      tier: 2
+      source_tag: "[二级旁证]"
+      admit_id: null
+      quote: "注意，这个例子中有一个最关键的前提，就是线段B已经确认线段破坏了他前面的线段，如果线段B对前面线段的破坏都没确认，那就先确认，这里的分析都不适用了。"
     - cite: "078:58"
       tier: 1
       source_tag: "[一级正文]"
@@ -640,10 +658,14 @@
       quote: "三个小括弧里的1分钟中枢重叠构成了大括弧里的5分钟高一级别中枢。中枢的区间是[d2，g5]，注意，这时候，就要把1分钟的走势当成线段，小括弧里的都是线段，高低点就是这线段的端点。"
   literal_lean_defs:
     - "Chan.Audit.Literal.directedSegValid"
+    - "Chan.Audit.Literal.PenStroke"
+    - "Chan.Audit.Literal.b9_segFromStrokes"
+    - "Chan.Audit.Literal.b9_adjacentDestroyedSegPair"
     - "Chan.Audit.Literal.b9_adjacentValidConnectedSegs"
     - "Chan.Audit.Literal.b9_standardizeSegLiteral"
+    - "Chan.Audit.Literal.b9_standardizedStrokeSegsAlwaysConnectedLiteral"
     - "Chan.Audit.Literal.b9_standardizedAlwaysConnectedLiteral"
-  history_revision: "直接修订抽象核输入结构——由“首尾相连的折线”改为“方向交替的闭区间序列”，仅依赖方向与值域 [低, 高]，消除方向合法但端点非极值线段独立标准化导致的折线断开。"
+  history_revision: "直接修订抽象核输入结构——由“首尾相连的折线”改为“方向交替的闭区间序列”，仅依赖方向与值域 [低, 高]，消除符合 078:22,42,50 破坏结构的端点非极值线段独立标准化后可能导致的折线断开。"
 
 - id: "B-10"
   title: "第二类买点不同版本、操作退出保护与稳妥策略的精确分离"
@@ -655,7 +677,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "原典第二类买点涉及定义来源与操作条件的演进分离：均线期 014:28 给出女上位第一吻回调定义（b10_maSecondBuyDef），013:26 的“跌破前面男上位最低位则在反弹中出清”属操作退出保护（b10_maSecondBuyExitTrigger）而非否定 014:28 成立；答疑 052:516 给出不破低点的版本一定义，086:80 则明确将“不破第一类买点就介入”定性为稳妥操作办法（b10_secondBuyNoBreakCriterion）；正文 053:28/057:40 写作不创新低或盘整背驰，至正文 101:22/101:32 定型为允许低于一买的版本四纯位置定义（b10_secondBuyV4PositionDef），且 053:30“必成更大中枢”在版本四下需补重叠前提。待下游 Chan/Audit/Math 给出版本分离见证 b10_v1AndV4Separated。"
+  exact_proposition: "原典第二类买点涉及定义来源与操作条件的演进分离：均线期 014:28 给出女上位第一吻回调定义（b10_maSecondBuyDef），013:26 在女上位第一吻该缠绕上下文（isFemaleFirstKiss = true）中规定“跌破前面男上位最低位则在反弹中出清”，属操作退出保护（b10_maSecondBuyExitTrigger）而非否定 014:28 成立；答疑 052:516 给出不破低点的版本一定义，086:80 则明确将“不破第一类买点就介入”定性为稳妥操作办法（b10_secondBuyNoBreakCriterion）；正文 053:28/057:40 写作不创新低或盘整背驰，至正文 101:22/101:32 定型为允许低于一买的版本四纯位置定义（b10_secondBuyV4PositionDef），且 053:30“必成更大中枢”在版本四下需补重叠前提。待下游 Chan/Audit/Math 给出版本分离见证 b10_v1AndV4Separated。"
   citations:
     - cite: "014:28"
       tier: 1
@@ -724,7 +746,7 @@
     - "Chan.Audit.Literal.b10_secondBuyNoBreakCriterion"
     - "Chan.Audit.Literal.b10_secondBuyV4PositionDef"
     - "Chan.Audit.Literal.b10_v1AndV4Separated"
-  history_revision: "第二类买卖点采第 101 课版本四纯位置定义（允许二买低于一买）并按强弱三分法刻画，与答疑 052:516 不破低点表述及 013:26/086:80 操作保护/稳妥策略分离；“必成更大级别中枢”改写为带重叠前提的条件定理。"
+  history_revision: "第二类买卖点采第 101 课版本四纯位置定义（允许二买低于一买）并按强弱三分法刻画，与答疑 052:516 不破低点表述及 013:26 女上位第一吻缠绕退出保护 / 086:80 稳妥策略分离；“必成更大级别中枢”改写为带重叠前提的条件定理。"
 
 - id: "B-11"
   title: "第三类买卖点要件分散补齐及名称外借到单一价位与分型边沿"
@@ -814,7 +836,7 @@
   delivery_state: "已转主线定义"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "原典在 020:62 早期即已明言第三类买卖点后并不必然是趋势、也有进入更大级别盘整的可能，但 020:62/021:22/054:60 及二级旁证 053:151（限定于上涨股票、日线级别）/080:110 仍作出必然赢利、100% 安全、100% 获利或必然转折的强保证；至晚期正文 107:22 明确收缩为不保证更高高点、可能连手续费都不够的“只有相对的理论上的绝对安全性，而没有具体操作上的绝对安全性”。强收益断言与可证的弱结构结论之间须严格分离。"
+  exact_proposition: "原典在 020:62 早期即已明言第三类买卖点后并不必然是趋势、也有进入更大级别盘整的可能，但 020:62/021:22/054:60 及二级旁证 053:151（限定于上涨股票、日线级别）/080:110 仍作出必然赢利、100% 安全、100% 获利或必然转折的强保证；至晚期正文 107:22 明确针对“如果你一定要等上下上都完成才抛出”的具体卖出策略指出，在奔走型反弹下后上高点可能不高于前上高点甚至连手续费都不够，因而该操作“注定是只有相对的理论上的绝对安全性，而没有具体操作上的绝对安全性”。强收益断言与可证弱结构结论之间须严格分离。"
   citations:
     - cite: "020:62"
       tier: 1
@@ -872,7 +894,7 @@
       admit_id: null
       quote: "这次反弹的技术性由此可见，昨天中午强调最恶劣情况下，最基本升幅已经达到，结果大盘无情选择最恶劣的情况，这是理论所允许，感情所必须接受的。"
   literal_lean_defs: []
-  history_revision: "主线买卖点安全性定理限定在明确前提下仅保留弱结构结论（若其后形成该级别中枢，则存在不低于买入价的时刻），将早期“100% 获利”及操作性收益断言剥离出定理。"
+  history_revision: "主线买卖点安全性定理限定在明确前提下仅保留弱结构结论（若其后形成该级别中枢，则存在不低于买入价的时刻），将早期“100% 获利”及操作性收益断言（含 107:22“等上下上都完成才抛出”的具体卖出策略限制）剥离出定理。"
 
 - id: "B-13"
   title: "买卖点完备性定理与中枢震荡买卖点、多回试点的名称与结构分离"
@@ -997,7 +1019,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "正文 043:30 与 056:50 明确指出当下进入背驰段并不一定最终演化成背驰，小级别延伸可使其摆脱背驰；079:52 仅陈述“如果合力最终的结果把可能的背驰给破坏了，就证明这地方没出现背驰”，并未把“未被破坏”直接定义为“事后已转折”，故不得将其登记为作者字面同义反复。此处在 Lean 侧通过三元观测结构 DivergenceObs 分离前瞻信号、未被破坏与事后转折，仅把 b16_conflatedPostHocGuardExample 登记为防止实现混用的逻辑边界示例，待下游 Chan/Audit/Math 证成分离见证 b16_exAnteAndExPostSeparated。"
+  exact_proposition: "正文 043:30 明确指出当下进入背驰段并不一定演化成背驰，小级别延伸可使其最终摆脱背驰；正文 056:50 仅说明 529 当天尾盘前尚不能由区间套确认（其同行后句实际因晚间突发消息立刻确认了背驰，故不将 056:50 归为事后被破坏且未转折实例）；079:52 仅陈述“如果合力最终的结果把可能的背驰给破坏了，就证明这地方没出现背驰”，并未把“未被破坏”直接定义为“事后已转折”，故不得将其登记为作者字面同义反复。此处在 Lean 侧通过三元观测结构 DivergenceObs 分离前瞻信号、未被破坏与事后转折，仅把 b16_conflatedPostHocGuardExample 登记为防止实现混用的逻辑边界示例，待下游 Chan/Audit/Math 证成对应 043:30 的分离见证 b16_exAnteAndExPostSeparated。"
   citations:
     - cite: "043:30"
       tier: 1
@@ -1198,7 +1220,7 @@
   history_revision: "背驰比较段规定由规范分解 can(w) 唯一给出，并将力度函数抽象为独立接口（MACD 柱面积作为其具体实现之一）。"
 
 - id: "B-20"
-  title: "合法多级区间套定位链与 056:66 小转大反例推翻“每级必有同级背驰”"
+  title: "区间套定位链：分列 027:44,46 存在性“可以通过”与项目加强全称“每层必背驰”"
   target_modules:
     - "Chan.Defs.Nesting"
     - "Chan.Audit.Literal.DynamicsAndAudit"
@@ -1206,8 +1228,8 @@
   disposition: "定义"
   delivery_state: "待证反例陈述"
   audit_status: null
-  target_audit_status: "已否证"
-  exact_proposition: "027:44 与 027:46 陈述大级别转折点可以通过逐级寻找次级别背驰段的区间套程序定位；在严格限定为合法多级定位链（b20_validMultiLevelNestChain：至少两级、顶层非退化且已进入大级别背驰段、各级严格降级且时间区间逐级包含，排除单条退化记录）的前提下，一级正文 056:66 作者自举标准反例指出大背驰段内部完全可以不必有同级背驰而走小级别转大级别。待下游 Chan/Audit/Math 证伪强版本命题 b20_everyLevelMustDivergeLiteral。"
+  target_audit_status: "已分离"
+  exact_proposition: "027:44 与 027:46 陈述大级别转折点“可以通过”不同级别背驰段逐级收缩至最低级别来确定（存在性表述，记为 b20_existsAllDivNestChainForTurn）；在严格绑定同一目标转折时刻 turnT、强制相邻层级别连续递降（next.level + 1 = prev.level）并落到最低级别 0、且每层时间区间真包含并严格收缩的合法定位链 b20_validMultiLevelNestChain 前提下，一级正文 056:66 自举小转大实盘结构推翻项目加强全称命题“任一合法逐级定位链每层必有同级背驰”（b20_everyValidNestChainHasAllSameLevelDivProposal）。待下游 Chan/Audit/Math 证伪该加强全称命题并与存在性表述清晰分离。"
   citations:
     - cite: "027:44"
       tier: 1
@@ -1237,8 +1259,9 @@
   literal_lean_defs:
     - "Chan.Audit.Literal.NestLevelRecord"
     - "Chan.Audit.Literal.b20_validMultiLevelNestChain"
-    - "Chan.Audit.Literal.b20_everyLevelMustDivergeLiteral"
-  history_revision: "区间套改写为纯结构的嵌套时间区间引理，将“每一子级均存在同级别背驰”单列为附加前提，显式容纳 056:66 小级别转大级别转折。"
+    - "Chan.Audit.Literal.b20_existsAllDivNestChainForTurn"
+    - "Chan.Audit.Literal.b20_everyValidNestChainHasAllSameLevelDivProposal"
+  history_revision: "区间套改写为绑定目标转折时刻、连续逐级降级至 0 级且区间严格收缩的纯结构嵌套时间区间引理，分列 027:44,46 存在性“可以通过逐级定位”与强全称“每层必背驰”，显式容纳 056:66 小级别转大级别转折。"
 
 - id: "B-21"
   title: "“小转大”存在两种不同语境定义（小背驰引发大转折 vs 第二中枢反向三买反转）"
@@ -1319,7 +1342,7 @@
   history_revision: "明确分开完成时形态学趋势定义（017:46，已完成走势含同向不重叠同级中枢 ≥ 2）与形成时前瞻条件（107:30,32，第一中枢后三买且非背驰向上，另立为 TrendForming）。"
 
 - id: "B-23"
-  title: "走势完成后必接级别冲突：043:20 至少同级 vs 099:30 无前提至少大一级别中枢震荡"
+  title: "走势完成后必接级别边界：043:20 至少同级 vs 099:30 依赖活性前提的大一级别中枢震荡"
   target_modules:
     - "Chan.Defs.Level"
     - "Chan.Audit.Literal.SignalsAndLevels"
@@ -1328,7 +1351,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "043:20 与 086:78 给出的下界是某级别走势完成后必然接至少同级别的另一走势类型；而 099:30 宣称“一个走势级别完成后必然面临至少大一级别的中枢震荡”。尊重 099:24 允许后续 f\\g\\h 独立成枢而不要求刚结束的 t1 必须是成枢第一段（由 b23_existsHigherCenterAnywhereBool 在任意连续三段窗口搜寻），分立两个严格可反驳命题：（1）无缺口首尾相连但仅走出两段后续走势时仍可无高一级中枢（b23_twoFollowUpWavesForceHigherCenterLiteral，说明大一级中枢依赖后续走出至少 3 段同级走势的活性前提）；（2）允许 033:24 跳空缺口连接时，即便后续给出任意长度（≥ 3 段）交替走势并在任意三段窗口搜寻，单边梯级走势仍无高一级中枢（b23_withGapsAnyLengthForcesHigherCenterLiteral）。待下游 Chan/Audit/Math 分别证伪。"
+  exact_proposition: "043:20 与 086:78 给出走势完成后必然接至少同级走势类型的下界；而 099:30 宣称“一个走势级别完成后必然面临至少大一级别的中枢震荡”。撤除截短 2–3 段有限前缀与任意四段悬空断开的写法：在无缺口且满足后续至少走出 3 段已完成交替同级走势（活性前提）时，高一级中枢确实必然成立（契合 099:24 允许后续 f\\g\\h 独立成枢，b23_existsHigherCenterAnywhereBool）；但若不引入活性公理，允许 t1 完成后走入 018:42/020:36/033:24 所允许的无限延伸同级反向趋势（相邻两中枢间仅以连接段或 033:24 缺口 b 相隔、波动区间严格互不重叠，b23_validUnendingDownTrendAfter），则依 020:44 大一级别中枢永不形成。待下游 Chan/Audit/Math 证伪无活性前提命题 b23_unconditionalHigherCenterWithoutLivenessLiteral。"
   citations:
     - cite: "043:20"
       tier: 1
@@ -1350,6 +1373,26 @@
       source_tag: "[一级正文]"
       admit_id: 1425
       quote: "由此可见，因为划分中的这种情况，我们就很明确地知道，走势的最大特点就是，连接中枢的走势级别一定小于中枢，换言之，一个走势级别完成后必然面临至少大一级别的中枢震荡。例如，一个5分钟的上涨结束后，必然至少要有一个30分钟的中枢震荡，这就是任何走势的必然结论，没有任何走势可以逃脱。"
+    - cite: "018:42"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 194
+      quote: "同样，面对趋势，形成两个依次同向的缠中说禅走势中枢后，任何趋势都可以随时结束而完美，但也可以不断地延伸下去，形成更多的中枢。"
+    - cite: "020:36"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 254
+      quote: "换言之，走势中枢的延伸与不断产生新的走势中枢并相应围绕波动互不重叠而形成趋势，在这两种情况下"
+    - cite: "020:36"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 255
+      quote: "一定不可能形成更大级别的走势中枢。"
+    - cite: "020:44"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 259
+      quote: "缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。"
     - cite: "033:24"
       tier: 1
       source_tag: "[一级正文]"
@@ -1358,11 +1401,12 @@
   literal_lean_defs:
     - "Chan.Audit.Literal.CompletedWave"
     - "Chan.Audit.Literal.b23_validAltWaveSeqBool"
-    - "Chan.Audit.Literal.b23_validAltWaveSeqWithGapsBool"
     - "Chan.Audit.Literal.b23_existsHigherCenterAnywhereBool"
-    - "Chan.Audit.Literal.b23_twoFollowUpWavesForceHigherCenterLiteral"
-    - "Chan.Audit.Literal.b23_withGapsAnyLengthForcesHigherCenterLiteral"
-  history_revision: "走势类型完成后主线仅证同级别交替性定理（对齐 043:20）；099:30“至少大一级别中枢震荡”显式补充“后续走出至少三段无缺口同级交替走势（含 099:24 后续 f\\g\\h 独立成枢）”或三段重叠前提后作条件定理。"
+    - "Chan.Audit.Literal.LevelCenterBand"
+    - "Chan.Audit.Literal.b23_validUnendingDownTrendAfter"
+    - "Chan.Audit.Literal.b23_hasOverlappingCenterPair"
+    - "Chan.Audit.Literal.b23_unconditionalHigherCenterWithoutLivenessLiteral"
+  history_revision: "走势类型完成后主线仅证同级别交替性定理（对齐 043:20）；099:30“至少大一级别中枢震荡”显式声明依赖活性公理（排除 018:42/020:36 反向趋势无止境延续，保证后续至少走出三段无缺口已完成同级走势，含 099:24 后续 f\\g\\h 独立成枢）后作条件定理。"
 
 - id: "B-24"
   title: "“走势必完美”在不同课次承载多个不同层面命题，需按语义拆分命名"
@@ -1414,7 +1458,7 @@
   history_revision: "主线不再使用多义统称“走势必完美”，将其承载的不同层面陈述拆分为四个独立命名命题：活性公理、结构下界定理（注 022:686 已自明三段与至少一中枢等价）、级别无关性（总缝规则 #804）、规范分解唯一性定理。"
 
 - id: "B-25"
-  title: "均线/MACD 辅助口径定位（含 103:32 例外恢复及 M14 项目加强逐点同号命题）"
+  title: "均线/MACD 辅助口径定位（含 103:32 例外恢复及 M14 非退化参数域逐点同号加强命题）"
   target_modules:
     - "Chan.Audit.Literal.DynamicsAndAudit"
     - "#2323"
@@ -1422,7 +1466,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "作者在 072:26（及二级旁证 052:458/031:368）称早期均线系统与本理论无关，但后续 106:18/106:22 及解盘仍作经验辅助并依已有走势拟合均线参数；103:22 的 MACD 零轴防狼术属面向初学者的傻瓜化回避纪律，同课已准入正文 103:32 明确给出“技术高点完全可以在背驰的情况下介入”的操作例外，故不与第一类买点构成直接逻辑冲突。关于 M14：063:24 与 050:18 讨论的是先选定比较段后的 MACD 累加与近似观察效果，并未宣称逐点柱号恒等；m14_pointwiseSignEquivStrengthenedProposal 显式标为项目审计提出的加强检验命题（补齐合法参数域 k ≥ 2、1 ≤ fast < slow、1 ≤ sig 与严格调大约束），仅用于界定严格代数意义下细周期调大参数与大周期下采样的分离界限，不冒称用它否证原句本身。"
+  exact_proposition: "作者在 072:26（及二级旁证 052:458/031:368）称早期均线系统与本理论无关，但后续 106:18/106:22 及解盘仍作经验辅助并依已有走势拟合均线参数；103:22 的 MACD 零轴防狼术属面向初学者的傻瓜化回避纪律，同课已准入正文 103:32 明确给出“技术高点完全可以在背驰的情况下介入”的操作例外，故不与第一类买点构成直接逻辑冲突。关于 M14：063:24 与 050:18 讨论的是先选定比较段后的 MACD 累加与近似观察效果，并未宣称逐点柱号恒等；m14_pointwiseSignEquivStrengthenedProposal 显式标为项目审计提出的加强检验命题（在严格非退化参数域 k ≥ 2、1 ≤ fast < slow、sig > 1 且 sig' > 1 下，排除 EMA_1(DIF)=DIF 致柱恒为零的退化情形），仅用于界定严格代数意义下细周期调大参数与大周期下采样的分离界限，不冒称用它否证原句本身。"
   citations:
     - cite: "072:26"
       tier: 1
@@ -1690,7 +1734,7 @@
   history_revision: "将基底构造器与规范分解规则作为可替换参数纳入架构，剔除缺乏目标函数的“现行设计唯一最好”断言。"
 
 - id: "B-30"
-  title: "自称“纯公理化类几何系统”却无公理清单，且作者自承“数学化”非数学证明"
+  title: "自称“纯公理化类几何系统”却缺显式公理表（修正 105:436,438 对象归属）"
   target_modules:
     - "Chan.Defs.Axioms"
     - "#2323"
@@ -1698,7 +1742,7 @@
   delivery_state: "已转主线定义"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "作者在 030:32 与二级旁证 105:622 宣称理论是纯公理化类几何系统，又在二级旁证 105:436/105:438 与正文 072:36 自承“数学化证明不是数学证明”“没有数学公理化哪有纯数学证明”“理论与理论的证明是两回事”；原典未列出显式公理表。"
+  exact_proposition: "作者在正文 030:32（及二级旁证 105:622）宣称理论是完全的数学公理化 / 纯公理化类几何系统，072:36 又指出“理论和理论的证明那是两回事情”，但全库未列出显式公理清单。注：二级旁证 105:436 与 105:438 原文讨论的是历史循环与六道轮回的类比性“数学化证明”及历史公理化思路，并非作者承认股票理论只有类比证明，此处仅作作者本人关于“公理化是纯数学证明前提”的方法论旁证，不混同对象归属。"
   citations:
     - cite: "030:32"
       tier: 1
@@ -1726,7 +1770,7 @@
       admit_id: null
       quote: "不过可以用下面可能会让很多人背过气去的话结尾：本ID的经济理论如同股票理论一样，同样是可以涵盖一切曾有的经济理论，而且是一个纯公理化的类几何系统。"
   literal_lean_defs: []
-  history_revision: "补齐显式公理清单（活性公理、基底公理、进位公理、动力学假设），并将每条原典断言归类标注为“定义 / 可证 / 公理 / 不可证”。"
+  history_revision: "补齐显式公理清单（活性公理、基底公理、进位公理、动力学假设），并将每条原典断言归类标注为“定义 / 可证 / 公理 / 不可证”（注 105:436,438 原文论历史循环与六道轮回类比，仅作公理化方法论旁证）。"
 
 - id: "B-31"
   title: "背驰必转折缺乏严格证明，分列 033:26 单对离开局部论证与 M19b D0 全局加强模型"
@@ -1738,7 +1782,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "原典在一级正文 072:34/104:28 与二级旁证 029:328/028:488/046:84/064:393 多次宣称背驰可严格证明却未给出形式证明；033:26 针对同一中枢一对离开 (b, c) 的局部说理使用严格“比……弱”（fc < fb），并未直接假设覆盖任意时刻与力度的全局单调、对称与时间平移不变。本条将二者严格分列，均不登记为作者字面同义反复：（1）原典局部论证（B31PairwiseLeaveCase）在无额外动力学公设时不强制后段回拉（b31_localPairwiseArgumentUnforced）；（2）项目审计为剖析充分公设而抽取的 M19b D0 全局加强模型（M19bD0StrengthenedPullbackModel）在装入三条未证公设且采用严格不等 fc < fb 后形成形式封闭（m19bD0_strengthenedPullbackClosure）。待下游 Chan/Audit/Math 分别验证。"
+  exact_proposition: "原典在一级正文 072:34/104:28 与二级旁证 029:328/028:488/046:84/064:393 多次宣称背驰可严格证明却未给出形式证明；033:26 针对同一中枢一对离开 (b, c) 的局部说理使用严格“比……弱”（fc < fb），并未直接假设覆盖任意时刻与力度的全局单调、对称与时间平移不变。本条将二者严格分列，均不登记为作者字面同义反复：（1）原典局部论证在无额外动力学公设约束的模型中存在赋值使后段未被拉回（b31_localPairwiseArgumentUnforced，明确标为无约束模型的逻辑可能性见证，非实盘实证样本）；（2）项目审计为剖析充分公设而抽取的 M19b D0 全局加强模型（M19bD0StrengthenedPullbackModel）在装入三条未证公设且采用严格不等 fc < fb 后形成形式封闭（m19bD0_strengthenedPullbackClosure）。待下游 Chan/Audit/Math 分别验证。"
   citations:
     - cite: "033:26"
       tier: 1
@@ -1781,7 +1825,7 @@
     - "Chan.Audit.Literal.b31_localPairwiseArgumentUnforced"
     - "Chan.Audit.Literal.M19bD0StrengthenedPullbackModel"
     - "Chan.Audit.Literal.m19bD0_strengthenedPullbackClosure"
-  history_revision: "撤除“背驰必转折存在原典严格证明”的假定，区分 033:26 单对离开局部论证与 M19b D0 全局加强公设，将力度抽为接口、背驰回拉结论显式归入动力学公理或经验待检验命题。"
+  history_revision: "撤除“背驰必转折存在原典严格证明”的假定，区分 033:26 单对离开局部论证（及其无约束模型逻辑可能性见证）与 M19b D0 全局加强公设，将力度抽为接口、背驰回拉结论显式归入动力学公理或经验待检验命题。"
 
 - id: "B-32"
   title: "唯一分解自称已被绝对证明并类比进位记数法，却缺进位规则与形式记号定义"
@@ -1792,7 +1836,7 @@
   delivery_state: "已转主线定义"
   audit_status: null
   target_audit_status: "已分离"
-  exact_proposition: "084:30/101:56/102:20/102:38 宣称已用 100% 理论推导绝对证明类似自然数进位记数法的唯一分解 a1A1+a5A5+a30A30；但进位记数法唯一性依赖明确的进位界限（原典恰在 B-1 存在正文规则甲/乙冲突），且记号 a1A1+a5A5+a30A30 本身未定义。"
+  exact_proposition: "084:30/101:56/102:20/102:38 宣称已用 100% 理论推导绝对证明类似自然数进位记数法的唯一分解 a1A1+a5A5+a30A30；但进位记数法唯一性依赖明确的进位界限（原典在 B-1 不同规则前提下输出不同），且记号 a1A1+a5A5+a30A30 本身未定义。"
   citations:
     - cite: "084:30"
       tier: 1
@@ -1965,7 +2009,7 @@
   history_revision: null
 
 - id: "B-36"
-  title: "分型边沿确认与成笔充分条件分离（108:18 闭合破底追踪；撤除 080:30 价格上界）"
+  title: "分型边沿站稳确认与成笔分离（以首次破底为严格观察终点；区分项目站稳标准与 108:18 原句）"
   target_modules:
     - "Chan.Defs.Pen"
     - "Chan.Audit.Literal.PenAndSegment"
@@ -1974,7 +2018,7 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "080:30 在“离开就是唯一的选择”之后紧接明列顶分型后“1、形成笔；2、不形成笔”，并未承诺此后不创新高，因此仅说明其把操作离场决策建立在必要条件（080:28）上而不为其建立价格上界反驳；对 108:18“有效站住分型区间上边沿，就意味着底部构造成功并至少展开一笔一上行情”（及二级旁证 104:282 跌破边沿必成笔），原文未定义“有效站住”，此处在显式因果站稳确认条件（全段守住上边沿且严格站上）下，严格分开有效确认、行情演化直至实际跌破底分型最低点闭合失败（杜绝拿截短上涨前缀反驳最终结论）与方向正确包含合并后的不共用顶分型/成笔确认。待下游 Chan/Audit/Math 证伪闭合命题 b36_standAboveEdgeEnsuresPenBeforeFailureLiteral。"
+  exact_proposition: "080:30 在“离开就是唯一的选择”之后紧接明列顶分型后“1、形成笔；2、不形成笔”，并未承诺此后不创新高，故不建价格上界反驳（仅记 080:28 为顶点与顶分型的必要条件）。对 108:18“有效站住分型区间上边沿，就意味着底部构造成功并至少展开一笔一上行情”（及二级旁证 104:282），原文未定义“有效站住”；Lean 侧明确区分项目选定的因果站稳确认标准（b36_allHoldAtOrAboveEdge + b36_hasBarStandingAboveEdge）与 108:18 原句，并通过 b36_takeThroughFirstBreak 将首次跌破 k2.lo 严格锁定为观察终点再做包含合并与不共用顶分型检查，既杜绝截短上涨前缀的假反例，又保证破底之后追加的任何 K 线绝不改变结论；同时主线亦不把“站稳上边沿”错写为老笔成笔的必要条件。待下游 Chan/Audit/Math 证伪 b36_standAboveEdgeEnsuresPenBeforeFailureLiteral。"
   citations:
     - cite: "080:28"
       tier: 1
@@ -2003,13 +2047,14 @@
       quote: "今天低开后，在60分钟刚好跌破顶分型的下边，早上那标准的回抽，极端显然地上不了3613点，因此确认这对顶分型下边的跌破是有效的，因此后面的下跌就顺理成章了，为什么？因为向下要形成笔。"
   literal_lean_defs:
     - "Chan.Audit.Literal.b36_bottomFractalUpperEdge"
+    - "Chan.Audit.Literal.b36_takeThroughFirstBreak"
     - "Chan.Audit.Literal.b36_allHoldAtOrAboveEdge"
     - "Chan.Audit.Literal.b36_closedPostStandFailureTrace"
     - "Chan.Audit.Literal.b36_standAboveEdgeEnsuresPenBeforeFailureLiteral"
-  history_revision: "主线将分型边沿跌破/站稳严格限定为成笔的必要条件，分开有效确认、行情展开与成笔确认，成笔充分条件必须连同包含处理与 K 线根数间隔一并写全（注 080:30 原文后句已明列形成笔与不形成笔两种选择）。"
+  history_revision: "主线将 080:28“所有顶点必然是顶分型”仅作顶点与顶分型的必要条件（080:30 后句亦明列形成笔与不形成笔），并将 108:18 的分型边沿站稳确认、行情演化至首次破底闭合与成笔确认彻底分立——既不把站稳上边沿当作老笔/新笔的充分条件，也不错写为老笔成笔的必要条件。"
 
 - id: "B-37"
-  title: "基于实际次级震荡区间中点 Zn 的无活性前提“必越出中枢区间”断言"
+  title: "中枢震荡中点 Zn 监控窗口区分（n ≤ 9 vs n > 9 升级）与剥离升级前提后的边界模型"
   target_modules:
     - "Chan.Defs.Axioms"
     - "Chan.Audit.Literal.DynamicsAndAudit"
@@ -2017,8 +2062,8 @@
   disposition: "定义"
   delivery_state: "待证反例陈述"
   audit_status: null
-  target_audit_status: "已否证"
-  exact_proposition: "092:18 将 Zn 定义为实际次级震荡区间的中点，092:22 说明其计数超过 9 个将引发次级别升级，092:16 与 092:24 则以“否则永远不会出现第三类买卖点，这显然是不可能的”为论据断言 Zn 最终肯定越出中枢区间 [A, B]。在基于实际次级震荡区间 SubOscillation（要求非退化且与 [a, b] 重叠）诱导中点 Zn 的模型下，若未显式引入活性公理（或 092:22 升级切换规则），满足全部围绕中枢前提的震荡流仍可使全部中点恒落于 [a, b] 内。待下游 Chan/Audit/Math 证伪 b37_unconditionalOscillationExitLiteral。"
+  target_audit_status: "已分离"
+  exact_proposition: "092:18 将 Zn 定义为实际次级震荡区间中点，092:22 明确限定同级监控窗口不超过 9 个数据（n ≤ 9 属同级窗口，超过 9 次 n > 9 则次级别升级切换，记为 B37MonitorPhase / b37_classifyOscillationCount），092:24 则断言 Zn 最终必越出 [A, B]。在基于实际次级震荡区间 SubOscillation 的模型下，严格区分两项结论：（1）在 092:22 的同级 9 次窗口内，全部 9 次中点 Zn 可始终不越界直到触发升级（b37_withinNineWindowMayStayInside）；（2）删去 092:22 满 9 次升级规则与活性公理后的无限等震荡流（b37_noUpgradeBoundaryModelExitProposal）明确标为项目剥离升级前提后的边界模型，用于刻画活性与升级规则的必要作用，不冒称直接否证保留升级规则的 092:24 原句。待下游 Chan/Audit/Math 分别验证。"
   citations:
     - cite: "092:16"
       tier: 1
@@ -2044,11 +2089,14 @@
     - "Chan.Audit.Literal.SubOscillation"
     - "Chan.Audit.Literal.b37_validSubOscillation"
     - "Chan.Audit.Literal.b37_midpointExitsBand"
-    - "Chan.Audit.Literal.b37_unconditionalOscillationExitLiteral"
-  history_revision: "基于实际次级震荡区间中点 Zn 将“必越出中枢区间”改写为条件命题（若震荡在同级内结束则必越界），无条件版本显式声明依赖活性公理（或 092:22 满九段升级切换）。"
+    - "Chan.Audit.Literal.B37MonitorPhase"
+    - "Chan.Audit.Literal.b37_classifyOscillationCount"
+    - "Chan.Audit.Literal.b37_withinNineWindowMayStayInside"
+    - "Chan.Audit.Literal.b37_noUpgradeBoundaryModelExitProposal"
+  history_revision: "在 092:18,22,24 同级监控窗口内显式区分满 9 次（n ≤ 9）与超过 9 次升级切换（n > 9），主线将 Zn 必越出中枢区间改写为条件命题（若同级震荡未升级且终结则必越界），并显式声明剥离升级规则后的无限震荡仅属边界模型。"
 
 - id: "B-38"
-  title: "分类不穷尽：020:58 前后两不同中枢遗漏核心重叠；093:26–30 文本缺失第二项"
+  title: "分类不穷尽：020:58 同级别前中枢破坏后新成中枢仍遗漏核心重叠；093:26–30 文本缺第二项"
   target_modules:
     - "Chan.Defs.Center"
     - "Chan.Audit.Literal.OrderAndCenter"
@@ -2057,8 +2105,13 @@
   delivery_state: "待证反例陈述"
   audit_status: null
   target_audit_status: "已否证"
-  exact_proposition: "020:58 走势中枢中心定理二对前后同级别两个不同中枢（在 b38_sequentialDistinctCenters 中严格强制两中枢均非退化且 c1.endT < c2.startT，排除同一中枢传入两次）仅列举后 GG < 前 DD、后 DD > 前 GG 以及两核心严格分离但外缘重叠三项，遗漏了两不同中枢核心区间 [ZD, ZG] 本身重叠或单点相触的全部情形；另独立登记 093:26 正文写“有两种可能的情形，一、……”后直接跳至 093:30“三、……”，文本确缺第二项。待下游 Chan/Audit/Math 证伪 b38_centerTheorem2ExhaustiveLiteral。"
+  exact_proposition: "020:58 走势中枢中心定理二对前后同级别的两个中枢仅列举后 GG < 前 DD、后 DD > 前 GG 以及两核心严格分离但外缘重叠三项。在 CenterMetrics 增设 level 字段强制 c1.level = c2.level，并在 B38SequentialCentersTrace / b38_validSequentialDestroyedCenters 中显式要求前中枢 c1 经 018:64 严格第三类离开-回试破坏终结且其后由独立三段次级别走势重算新成同级中枢 c2（彻底杜绝相同价格指标仅换时间冒充两中枢）的完整前提下，新中枢 c2 仍可回落并与 c1 核心区间 [ZD, ZG] 重叠或单点相触，使 020:58 三分支全不覆盖；另独立登记 093:26 正文写“有两种可能的情形，一、……”后直接跳至 093:30“三、……”，文本确缺第二项。待下游 Chan/Audit/Math 证伪 b38_centerTheorem2ExhaustiveLiteral。"
   citations:
+    - cite: "018:64"
+      tier: 1
+      source_tag: "[一级正文]"
+      admit_id: 200
+      quote: "某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。"
     - cite: "020:58"
       tier: 1
       source_tag: "[一级正文]"
@@ -2076,12 +2129,13 @@
       quote: "三、如果市场最终选择（1，1），那么这个（1，0）区间就有着极为重要的意义。这区间上下两段的（1，1），就可以进行力度比较，一旦出现后一段力度小于前一段，就是一个明确的见顶信号，然后根据对应的走势类型进行区间套定位，真正的高点就逃不掉了。"
   literal_lean_defs:
     - "Chan.Audit.Literal.CenterMetrics"
-    - "Chan.Audit.Literal.b38_sequentialDistinctCenters"
+    - "Chan.Audit.Literal.B38SequentialCentersTrace"
+    - "Chan.Audit.Literal.b38_validSequentialDestroyedCenters"
     - "Chan.Audit.Literal.b38_centerRelDownLiteral"
     - "Chan.Audit.Literal.b38_centerRelUpLiteral"
     - "Chan.Audit.Literal.b38_centerRelHigherLiteral"
     - "Chan.Audit.Literal.b38_centerTheorem2ExhaustiveLiteral"
-  history_revision: "修订前后两个不同同级别中枢相对位置分类，改用区间全序完备枚举核心重叠、外缘重叠与完全分离全部情形；并独立补记 093:26 正文缺失的第二类情形。"
+  history_revision: "修订同级别且前中枢经第三类破坏终结后新成独立中枢的相对位置分类，改用区间全序完备枚举核心重叠、外缘重叠与完全分离全部情形；并独立补记 093:26 正文缺失的第二类情形。"
 
 - id: "B-39"
   title: "解盘陈述中绝对模态词“必然”与经验概率词“通常”“基本”“90%”并置"
@@ -2137,7 +2191,7 @@
   history_revision: null
 
 - id: "B-41"
-  title: "登记作者自行更正或推翻的 12 个实盘与图例候选判例（待回归核验）"
+  title: "登记 12 个实盘与图例候选判例（含 025:282,284 读者提问由作者澄清定义口径，待回归核验）"
   target_modules:
     - "Chan.Audit.Cases"
     - "#2323"
@@ -2145,7 +2199,7 @@
   delivery_state: "待实证回归"
   audit_status: "判例记录"
   target_audit_status: "判例记录"
-  exact_proposition: "此处登记原典中 12 处作者事后自认不严谨、笔误、改稿遗漏、数据源差异或划分严重错误的候选判例（涵盖驰宏锌锗定义变更、周线中枢、GG/ZG 混淆、点位/代码/卖点低点笔误、068:96 同花顺分段更正、080:220 严重错误、081:22/26/30 课图与 0.08 点成笔更正、102:426 成笔纠正），待后续结合独立历史行情数据逐案导入 Audit 回归核验（当前仅作候选判例台账登记，尚未完成回归集载入）。"
+  exact_proposition: "此处登记原典中 12 处候选判例供后续结合独立历史行情数据逐案导入 Audit 回归核验（当前仅作台账登记，尚未完成回归集载入）：其中 025:282,284 为读者提出驰宏锌锗两中枢外缘重叠疑问后，由作者澄清高低点旧定义向精确中枢定义的口径切换（不混称为作者自认划错）；其余 11 处为作者自行更正不严谨表述、笔误、改稿遗漏、数据源差异或划分错误（周线中枢、GG/ZG 混淆、点位/代码/卖点低点笔误、068:96 同花顺分段更正、080:220 严重错误、081:22/26/30 课图与 0.08 点成笔更正、102:426 成笔纠正）。"
   citations:
     - cite: "081:22"
       tier: 1
@@ -2162,6 +2216,11 @@
       source_tag: "[一级正文]"
       admit_id: 1257
       quote: "另外，提一个问题，今天走势的划分，有一些特别的地方，本ID下午说的，有点问题，主要出在，1017的低点5386.47比前一分钟的5386.39点高，所以顶分型的顶在1017那时间，所以那里就是一笔，但图形上粗略看顶在16分那点，下午写东西太快，没有仔细去比较，晚上回来，仔细对比一下数据，才发现那里应该构成一笔，所以整个划分就要有点改变，也就是今天形成1分钟中枢了，该中枢前面一段很简单，关键是第二、三段，究竟怎么划的，能正确划出的，对线段划分也就有点及格了，明天下午再公布答案，可以对比一下。"
+    - cite: "025:282"
+      tier: 2
+      source_tag: "[二级旁证]"
+      admit_id: null
+      quote: "我发现600497在05年3月14日开始到05年7月27日结束的下跌趋势中,两个日线中枢的外缘是重叠的."
     - cite: "025:284"
       tier: 2
       source_tag: "[二级旁证]"

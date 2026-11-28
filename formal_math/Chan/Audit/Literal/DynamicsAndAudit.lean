@@ -36,19 +36,18 @@ instance instDecidableB16ConflatedPostHocGuardExample (obs : DivergenceObs) :
   inferInstanceAs (Decidable (
     obs.exAnteSignal = true ∧ obs.notDestroyedLater = true ∧ obs.exPostTurned = true))
 
-/-- B-16 因果前瞻信号与事后转折的分离见证命题：存在截至当下已进入疑似背驰段、但事后被小级别延伸破坏而未发生转折的观测记录（忠实对应 `043:30` 与 `056:50`）。
-引文：[043:30]「例如，一个30分钟的走势类型，在30分钟级别进入背驰段，当然，这个背驰段并不一定就演化成背驰，因为，小级别的延伸足以使得大级别最终摆脱背驰，这与当下的走势判断相关。」
-引文：[056:50]「因为529那天，虽然30分钟明显进入背驰段，但由于当天尾盘是高收的，所以用区间套定理并不能确认当时就是背驰了，毕竟还有第二天的走势。」 -/
+/-- B-16 因果前瞻信号与事后转折的分离见证命题：存在截至当下已进入疑似背驰段、但事后因小级别延伸摆脱背驰而未发生转折的观测记录（忠实对应 `043:30`；注：`056:50` 仅说明 529 当天尾盘前尚不能由区间套确认，其同行后句实际因晚间突发消息立刻确认了背驰，故不将 `056:50` 当作事后被破坏且未转折的实例）。
+引文：[043:30]「例如，一个30分钟的走势类型，在30分钟级别进入背驰段，当然，这个背驰段并不一定就演化成背驰，因为，小级别的延伸足以使得大级别最终摆脱背驰，这与当下的走势判断相关。」 -/
 def b16_exAnteAndExPostSeparated : Prop :=
   ∃ obs : DivergenceObs,
     obs.exAnteSignal = true ∧ obs.notDestroyedLater = false ∧ obs.exPostTurned = false
 
-/-! ### B-20：合法多级区间套定位链与 `056:66` 小转大反例 -/
+/-! ### B-20：绑定目标转折时刻、连续逐级降级至 0 级且区间严格收缩的区间套定位链 -/
 
 /-- 多级别区间套逐级定位中的单级记录。
 引文：[027:46]「换言之，某大级别的转折点，先找到其背驰段，然后在次级别图里，找出相应背驰段在次级别里的背驰段，将该过程反复进行下去，直到最低级别，相应的转折点就在该级别背驰段确定的范围内。」 -/
 structure NestLevelRecord where
-  /-- 级别序号（越大表示级别越高）。 -/
+  /-- 级别序号（越大表示级别越高，最低级别为 `0`）。 -/
   level : Nat
   /-- 本级背驰段/转折区间起始时刻。 -/
   startT : Nat
@@ -60,42 +59,49 @@ structure NestLevelRecord where
   turnedBySmallToLarge : Bool
   deriving Repr, DecidableEq
 
-/-- 递归校验多级嵌套链的逐级降级、时间闭区间逐级包含及每层转折合法性。
-引文：[056:66]「这个例子说明，一个大的盘整背驰段的内部结构，完全可以不必有该级别的背驰，完全可以小级别转大级别，昨天的图上就有这样一个标准的例子。」 -/
-def b20_validNestTailBool : List NestLevelRecord → Bool
-  | [] => false
-  | [r] =>
-    decide (r.startT ≤ r.endT) && (r.hasSameLevelDiv || r.turnedBySmallToLarge)
-  | r1 :: r2 :: rest =>
-    decide (r1.startT ≤ r1.endT) &&
-    (r1.hasSameLevelDiv || r1.turnedBySmallToLarge) &&
-    decide (r2.level < r1.level) &&
-    decide (r1.startT ≤ r2.startT) &&
-    decide (r2.endT ≤ r1.endT) &&
-    b20_validNestTailBool (r2 :: rest)
-
-/-- 合法的多级区间套定位链谓词：
-1. 至少包含 2 个级别（真正执行了从大级别向次级别的逐级定位，排除单条退化记录）；
-2. 顶层为非退化时间区间（`startT < endT`）且自身已进入大级别背驰段（`hasSameLevelDiv = true`）；
-3. 各级严格降级、时间区间逐级包含，且每级均存在本级背驰或小级别转大级别转折。
+/-- 递归校验针对同一目标转折时刻 `turnT` 的多级嵌套链：
+1. 每层时间闭区间均包含 `turnT`（`startT ≤ turnT ≤ endT`）且具有合法转折来源（同级背驰或小转大）；
+2. 相邻层级别严格连续递降一步（`r2.level + 1 = r1.level`）；
+3. 相邻层时间区间真包含并严格收缩（`r1.startT ≤ r2.startT ∧ r2.endT ≤ r1.endT ∧ (r1.startT < r2.startT ∨ r2.endT < r1.endT)`）；
+4. 末尾必须落到最低级别 `level = 0` 且定位包含 `turnT`。
 引文：[027:46]「换言之，某大级别的转折点，先找到其背驰段，然后在次级别图里，找出相应背驰段在次级别里的背驰段，将该过程反复进行下去，直到最低级别，相应的转折点就在该级别背驰段确定的范围内。」
 引文：[056:66]「这个例子说明，一个大的盘整背驰段的内部结构，完全可以不必有该级别的背驰，完全可以小级别转大级别，昨天的图上就有这样一个标准的例子。」 -/
-def b20_validMultiLevelNestChainBool : List NestLevelRecord → Bool
+def b20_validNestTailBool (turnT : Nat) : List NestLevelRecord → Bool
+  | [] => false
+  | [r] =>
+    decide (r.level = 0) &&
+    decide (r.startT ≤ turnT) &&
+    decide (turnT ≤ r.endT) &&
+    (r.hasSameLevelDiv || r.turnedBySmallToLarge)
+  | r1 :: r2 :: rest =>
+    decide (r1.startT ≤ turnT) &&
+    decide (turnT ≤ r1.endT) &&
+    (r1.hasSameLevelDiv || r1.turnedBySmallToLarge) &&
+    decide (r2.level + 1 = r1.level) &&
+    decide (r1.startT ≤ r2.startT) &&
+    decide (r2.endT ≤ r1.endT) &&
+    (decide (r1.startT < r2.startT) || decide (r2.endT < r1.endT)) &&
+    b20_validNestTailBool turnT (r2 :: rest)
+
+/-- 绑定目标转折时刻 `turnT` 的合法多级区间套定位链谓词（布尔版）：
+至少两级、顶层非退化（`startT < endT`）且自身已进入大级别背驰段（`hasSameLevelDiv = true`），并逐级连续降级至 `level = 0` 且区间严格收缩围绕同一转折时刻 `turnT`。
+引文：[027:46]「换言之，某大级别的转折点，先找到其背驰段，然后在次级别图里，找出相应背驰段在次级别里的背驰段，将该过程反复进行下去，直到最低级别，相应的转折点就在该级别背驰段确定的范围内。」 -/
+def b20_validMultiLevelNestChainBool (turnT : Nat) : List NestLevelRecord → Bool
   | r1 :: r2 :: rest =>
     decide (r1.startT < r1.endT) &&
     r1.hasSameLevelDiv &&
-    b20_validNestTailBool (r1 :: r2 :: rest)
+    b20_validNestTailBool turnT (r1 :: r2 :: rest)
   | _ => false
 
-/-- 合法多级区间套定位链谓词（`Prop` 版）。
+/-- 绑定目标转折时刻 `turnT` 的合法多级区间套定位链谓词（`Prop` 版）。
 引文：[056:66]「这个例子说明，一个大的盘整背驰段的内部结构，完全可以不必有该级别的背驰，完全可以小级别转大级别，昨天的图上就有这样一个标准的例子。」 -/
-def b20_validMultiLevelNestChain (chain : List NestLevelRecord) : Prop :=
-  b20_validMultiLevelNestChainBool chain = true
+def b20_validMultiLevelNestChain (turnT : Nat) (chain : List NestLevelRecord) : Prop :=
+  b20_validMultiLevelNestChainBool turnT chain = true
 
 /-- `b20_validMultiLevelNestChain` 的可判定实例。 -/
-instance instDecidableB20ValidMultiLevelNestChain (chain : List NestLevelRecord) :
-    Decidable (b20_validMultiLevelNestChain chain) :=
-  inferInstanceAs (Decidable (b20_validMultiLevelNestChainBool chain = true))
+instance instDecidableB20ValidMultiLevelNestChain (turnT : Nat) (chain : List NestLevelRecord) :
+    Decidable (b20_validMultiLevelNestChain turnT chain) :=
+  inferInstanceAs (Decidable (b20_validMultiLevelNestChainBool turnT chain = true))
 
 /-- 检查多级定位链中每一级是否均出现同级别背驰段。
 引文：[027:44]「定理：某大级别的转折点，可以通过不同级别背驰段的逐级收缩范围而确定。」 -/
@@ -103,14 +109,23 @@ def b20_allLevelsHaveSameLevelDiv : List NestLevelRecord → Bool
   | [] => true
   | r :: rest => r.hasSameLevelDiv && b20_allLevelsHaveSameLevelDiv rest
 
-/-- B-20 强版本区间套断言：在任意从大级别背驰段出发的合法多级定位链中，所有次级层面均必出现同级别背驰。
-所刻画确切命题：`027:44,46` 陈述转折点“可以通过”逐级找背驰段定位，此处严格限定为至少两级且顶层为非退化大级别背驰段的合法定位链；即便在此完整前提下，`056:66` 的小转大实盘例子依然证伪“每级必有同级背驰”。
+/-- B-20 原文 `027:44,46` 存在性阅读（“可以通过”逐级寻找背驰段确定）：在给定候选定位链集合 `chains` 中，**存在**至少一条通往目标转折时刻 `turnT`、逐级连续降级至 `0` 级并严格收缩的合法定位链，其每一层均具备同级别背驰段。
 引文：[027:44]「定理：某大级别的转折点，可以通过不同级别背驰段的逐级收缩范围而确定。」
-引文：[027:46]「换言之，某大级别的转折点，先找到其背驰段，然后在次级别图里，找出相应背驰段在次级别里的背驰段，将该过程反复进行下去，直到最低级别，相应的转折点就在该级别背驰段确定的范围内。」
+引文：[027:46]「换言之，某大级别的转折点，先找到其背驰段，然后在次级别图里，找出相应背驰段在次级别里的背驰段，将该过程反复进行下去，直到最低级别，相应的转折点就在该级别背驰段确定的范围内。」 -/
+def b20_existsAllDivNestChainForTurn (turnT : Nat) (chains : List (List NestLevelRecord)) : Prop :=
+  ∃ chain : List NestLevelRecord,
+    chain ∈ chains ∧
+    b20_validMultiLevelNestChain turnT chain ∧
+    b20_allLevelsHaveSameLevelDiv chain = true
+
+/-- B-20 项目加强全称检验命题（显式区分于 `027:44,46` 的存在性表述“可以通过”）：对任意目标转折时刻 `turnT` 与任意合法逐级降级至 `0` 级且严格收缩的多级定位链，该链每一层均必出现同级别背驰段。
+所刻画确切命题：清晰分列 `027:44,46` 的存在性定位表述（`b20_existsAllDivNestChainForTurn`）与加强全称命题“任一合法逐级定位链每层必有同级背驰”；即使严格绑定同一 `turnT`、强制连续降级 `next.level + 1 = prev.level` 落到 `0` 级且区间真包含严格收缩，`056:66` 的小转大实盘结构依然证伪后者。
+引文：[027:44]「定理：某大级别的转折点，可以通过不同级别背驰段的逐级收缩范围而确定。」
 引文：[056:66]「这个例子说明，一个大的盘整背驰段的内部结构，完全可以不必有该级别的背驰，完全可以小级别转大级别，昨天的图上就有这样一个标准的例子。」 -/
-def b20_everyLevelMustDivergeLiteral : Prop :=
-  ∀ chain : List NestLevelRecord,
-    b20_validMultiLevelNestChain chain → b20_allLevelsHaveSameLevelDiv chain = true
+def b20_everyValidNestChainHasAllSameLevelDivProposal : Prop :=
+  ∀ (turnT : Nat) (chain : List NestLevelRecord),
+    b20_validMultiLevelNestChain turnT chain →
+    b20_allLevelsHaveSameLevelDiv chain = true
 
 /-! ### B-31 与 M19b D0：分列 `033:26` 单对离开局部论证与 M19b D0 全局加强模型 -/
 
@@ -136,7 +151,8 @@ structure B31PairwiseLeaveCase where
   upPulledBack : Bool
   deriving Repr, DecidableEq
 
-/-- B-31 原典 `033:26` 局部论证条件与结论的分离检验：同一中枢下前段向下离开被拉回、且后段向上离开严格弱于前段（`upLeaveForce < downLeaveForce`），在无额外动力学公设约束时仍可出现后段未被拉回的实证样本。
+/-- B-31 无约束模型逻辑可能性见证：在不附加额外动力学公设的自由模型中，逻辑上存在赋值使同一中枢的前段向下离开被拉回、后段向上离开严格弱于前段（`upLeaveForce < downLeaveForce`）且后段未被拉回。
+所刻画确切命题：明确标注此为**无约束模型的逻辑可能性见证**（说明若不补齐显式动力学公设，结论不能从纯逻辑推出），并非实盘实证样本。
 引文：[033:26]「所谓顶背驰，就是最后这个中枢，向上离开比向下离开要弱，而中枢有这样的特性，就是对无论向上或向下离开的，都有相同的回拉作用，既然向上离开比向下离开要弱，而向下离开都能拉回中枢，那向上的离开当然也能拉回中枢里，对于b+B+c向上的走势，这就构成顶背驰，而对于b+B+c向下的走势，就构成底背驰。」
 引文：[104:28]「具体怎么样，以后慢慢说来。」 -/
 def b31_localPairwiseArgumentUnforced : Prop :=
@@ -167,7 +183,7 @@ def m19bD0_strengthenedPullbackClosure : Prop :=
   ∀ (m : M19bD0StrengthenedPullbackModel) (t1 t2 : Nat) (fb fc : Int),
     m.pulledBack t1 .down fb → fc < fb → m.pulledBack t2 .up fc
 
-/-! ### M14 / B-25：精确有理数 MACD 与项目提出的逐点同号加强命题 -/
+/-! ### M14 / B-25：精确有理数 MACD 与项目提出的逐点同号加强命题（排除 `sig = 1` 退化） -/
 
 /-- 精确有理数表示 `num / (denPred + 1)`（分母恒正）。
 注意：`ExactRat` 上派生 `DecidableEq` 判定的是**表示相等**（分子、分母字段逐位一致，例如 `1/2 ≠ 2/4`）；**数值相等**请使用交叉相乘谓词 `ExactRat.valEq`。
@@ -299,26 +315,27 @@ instance instDecidableM14SeriesSignAgree :
   | [], _ :: _ => isFalse (fun h => h)
   | _ :: _, [] => isFalse (fun h => h)
 
-/-- M14 / B-25 项目提出的逐点同号加强检验命题（在合法参数域 `k ≥ 2`、`1 ≤ fast < slow`、`1 ≤ sig` 下，检验是否存在严格调大的 1 分钟参数 `fast' > fast, slow' > slow, sig' ≥ sig` 且 `fast' < slow'`，使任意价格序列在每个大周期收盘时刻的柱号与大周期柱号完全一致）。
-所刻画确切命题：显式标注此为**项目审计提出的加强检验命题**——`063:24` 与 `050:18` 原文讨论的是选定比较段后的 MACD 累加与近似观察效果，并未宣称逐点柱号恒等；本命题仅刻画“1 分钟调大参数与大周期收盘下采样在严格代数意义上不等价（盘中混叠敏感性）”的可证分离界限，不冒称用它否证原句本身。
+/-- M14 / B-25 项目提出的逐点同号加强检验命题（在严格非退化参数域 `k ≥ 2`、`1 ≤ fast < slow`、`sig > 1` 且 `sig' > 1` 下，排除 `EMA_1(DIF) = DIF` 致柱恒为零的退化情形，检验是否存在严格调大的细周期参数使任意价格序列在每个大周期收盘时刻的柱号与大周期柱号完全一致）。
+所刻画确切命题：显式标注此为**项目审计提出的加强检验命题**——`063:24` 与 `050:18` 原文讨论的是选定比较段后的 MACD 累加与近似观察效果，并未宣称逐点柱号恒等；本命题仅刻画非退化参数域下细周期调大参数与大周期下采样在严格代数意义上的分离界限，不冒称用它否证原句本身。
 引文：[063:24]「日线的背驰，其实在1分钟图上也可以看出来，只不过是需要把所有相应对比段的MACD都加起来进行处理，这样当然是不切实际的，因此就可以看日线图的MACD，在理论上没有任何特别之处，只是为了方便，如果用1分钟的MACD把参数调到足够大，效果其实是一样的」
 引文：[050:18]「虽然由于MACD与K线价格相关，所以一般情况下，30分钟级别的走势变化，经常对应在30分钟的MACD上，但这不能因此而改变先根据中枢与走势运动的分析，然后选出需要比较力度的走势段，最后才用MACD辅助判断的顺序原则。」 -/
 def m14_pointwiseSignEquivStrengthenedProposal (k fast slow sig : Nat) : Prop :=
   k ≥ 2 →
   1 ≤ fast →
   fast < slow →
-  1 ≤ sig →
+  sig > 1 →
   ∃ fast' slow' sig' : Nat,
     fast < fast' ∧
     slow < slow' ∧
     fast' < slow' ∧
+    sig' > 1 ∧
     sig ≤ sig' ∧
     ∀ ps : List Int,
       m14_seriesSignAgree
         (m14_downsample k (m14_macdHistSeries fast' slow' sig' ps))
         (m14_macdHistSeries fast slow sig (m14_downsample k ps))
 
-/-! ### B-37：由实际次级震荡区间生成的 `Zn` 中点序列与无活性前提检验 -/
+/-! ### B-37：区分 `092:22` 满 9 次窗口（`n ≤ 9`）与超过 9 次升级（`n > 9`），并单列剥离升级前提后的边界模型 -/
 
 /-- 围绕中枢 `[a, b]` 运行的一次实际次级震荡区间 `[lo, hi]`。
 引文：[092:18]「一个中枢确立后，中枢区间的一半位置，称为震荡中轴Z。而每一个次级震荡区间的一半位置，依次用Zn表示，当然，最标准的状态，就是Zn刚好就是Z，但这是很特殊的例子。」 -/
@@ -350,12 +367,35 @@ instance instDecidableB37MidpointExitsBand (a b : Int) (o : SubOscillation) :
     Decidable (b37_midpointExitsBand a b o) :=
   inferInstanceAs (Decidable (o.lo + o.hi < 2 * a ∨ o.lo + o.hi > 2 * b))
 
-/-- B-37 无活性前提字面断言（基于实际次级震荡生成的 `Zn` 中点序列）：对任意非退化中枢 `[a, b]`（`a < b`）及任意由合法围绕 `[a, b]` 震荡构成的次级震荡流 `osc : Nat → SubOscillation`，必然存在某次震荡 `n` 使其实际中点 `Zn` 越出 `[a, b]`。
-所刻画确切命题：`092:24` 以“否则永远不会出现第三类买卖点，这显然是不可能的”为理由推出 `Zn` 必越出 `[A, B]`；在未显式引入活性公理（或 `092:22` 满 9 段升级切换至更大级别监控对象）时，满足全部围绕中枢前提的实际震荡流（如反复在 `[a, b]` 内部波动）即可使全部中点 `Zn` 恒落于 `[a, b]` 内。
+/-- B-37 `092:22` 同级监控计数阶段分类：严格区分同级窗口内（`count ≤ 9`）与超过 9 次触发次级别升级（`count > 9`）。
+引文：[092:22]「当然，只要有波动，就可以用类似中枢、走势类型之类的手段去分析，不过Zn的数量不会过于庞大，不会超过9个数据，超过了，次级别就要升级了，所以这样的分析意义不大。」 -/
+inductive B37MonitorPhase where
+  /-- 处于原级别中枢震荡监控窗口内（`count ≤ 9`）。 -/
+  | withinNineCount (count : Nat)
+  /-- 超过 9 次触发次级别升级，监控对象切换至高一级别（`count > 9`）。 -/
+  | upgradedBeyondNine (count : Nat)
+  deriving Repr, DecidableEq
+
+/-- 按 `092:22` 界限将震荡次数归入 `n ≤ 9`（同级窗口）或 `n > 9`（升级切换）。
+引文：[092:22]「当然，只要有波动，就可以用类似中枢、走势类型之类的手段去分析，不过Zn的数量不会过于庞大，不会超过9个数据，超过了，次级别就要升级了，所以这样的分析意义不大。」 -/
+def b37_classifyOscillationCount (count : Nat) : B37MonitorPhase :=
+  if count ≤ 9 then .withinNineCount count else .upgradedBeyondNine count
+
+/-- B-37 同级 9 次窗口内未越界见证命题：在 `092:22` 规定的同级监控窗口（满 9 次 `n < 9`，对应 1..9 个 `Zn` 数据）内，存在合法围绕 `[a, b]` 的实际次级震荡流使全部 9 次中点 `Zn` 均落于 `[a, b]` 内，直到第 10 次（`n > 9`）触发升级切换前均未发生越界。
+引文：[092:22]「当然，只要有波动，就可以用类似中枢、走势类型之类的手段去分析，不过Zn的数量不会过于庞大，不会超过9个数据，超过了，次级别就要升级了，所以这样的分析意义不大。」
+引文：[092:24]「一般来说，这个指标是一个监视。这里，存在着一种必然的关系，就是最终，Zn肯定要超越A或B，为什么？如果不这样，就永远不会出现第三类买卖点了，这显然是不可能的。」 -/
+def b37_withinNineWindowMayStayInside : Prop :=
+  ∃ (a b : Int) (osc : Nat → SubOscillation),
+    a < b ∧
+    (∀ n : Nat, n < 9 →
+      b37_validSubOscillation a b (osc n) ∧ ¬ b37_midpointExitsBand a b (osc n))
+
+/-- B-37 项目剥离升级规则与活性公理后的边界检验模型（明确标为项目边界模型，不冒称直接否证保留 `092:22` 升级切换规则的 `092:24` 原句）：若删去 `092:22`“超过 9 次即升级切换”与活性公理，检验无限围绕 `[a, b]` 的实际次级震荡流是否必有某次中点 `Zn` 越界。
+所刻画确切命题：`092:22` 已显式说明 `Zn` 超过 9 个数据后次级别就要升级；因此“无限次同级等震荡永不越界”仅存在于项目显式剥离 `092:22` 升级规则与活性公理后的边界模型中，用于标定主线活性公理与升级规则的必要作用，不冒称直接否证原句。
 引文：[092:18]「一个中枢确立后，中枢区间的一半位置，称为震荡中轴Z。而每一个次级震荡区间的一半位置，依次用Zn表示，当然，最标准的状态，就是Zn刚好就是Z，但这是很特殊的例子。」
 引文：[092:22]「当然，只要有波动，就可以用类似中枢、走势类型之类的手段去分析，不过Zn的数量不会过于庞大，不会超过9个数据，超过了，次级别就要升级了，所以这样的分析意义不大。」
 引文：[092:24]「一般来说，这个指标是一个监视。这里，存在着一种必然的关系，就是最终，Zn肯定要超越A或B，为什么？如果不这样，就永远不会出现第三类买卖点了，这显然是不可能的。」 -/
-def b37_unconditionalOscillationExitLiteral : Prop :=
+def b37_noUpgradeBoundaryModelExitProposal : Prop :=
   ∀ (a b : Int) (osc : Nat → SubOscillation),
     a < b →
     (∀ n : Nat, b37_validSubOscillation a b (osc n)) →
