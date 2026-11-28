@@ -55,51 +55,54 @@ def nineAt (xs : List (Seg P)) (i : Nat) : Bool :=
     | some a, some b, some c => decide (overlapsList a.range [b.range,c.range])
     | _, _, _ => false
 
-/-- 前枢的触核延伸结束后，沿同一个核找首次严格回试破坏。
-连续离开计入块内，跳空离开从下一块起算。 -/
-def thirdEventEnd? (xs : List (Seg P)) (seed : Nat) : Option Nat := do
-  let z ← Center.window? xs seed (seed + extRun xs seed)
-  let next ← xs[z.stop]?
-  if decide (z.extendsWith next) then none else
-    let start := z.stop - 1
-    ((List.range (xs.length - (start + 1))).map (start + ·)).findSome? fun k => do
-      let leave ← xs[k]?
-      let back ← xs[k+1]?
-      let (third, gap) := match leave.dir with
-        | .up => (decide (z.thirdBuyEvent leave back), decide (z.leavesUp leave))
-        | .down => (decide (z.thirdSellEvent leave back), decide (z.leavesDown leave))
-      if third then some (if gap then k else k + 1) else none
-
-/-- 离开后的第一个新枢起点；允许以回试段作为第一成核段。
-不等待第三类事件时，仍须先走完前枢的触核延伸。 -/
-def firstReturnFrom (xs : List (Seg P)) (z : Center P) (requireThird : Bool) : Option Nat :=
-  let complete := z.departureIndex? .up xs <|> z.departureIndex? .down xs
-  let leave :=
-    if requireThird then complete
-    else if (xs[z.stop]?).any (fun s => decide (z.extendsWith s)) then none
-    else complete <|>
-      [z.stop - 1, z.stop].find? (fun k => (xs[k]?).any fun s =>
-        match s.dir with
-        | .up => if k == z.stop then decide (z.leavesUp s) else decide (z.core.hi < s.range.hi)
-        | .down => if k == z.stop then decide (z.leavesDown s) else decide (s.range.lo < z.core.lo))
-  leave.bind (fun k => firstSeedFrom xs (k+1))
-
-/-- 途径二：前后枢的核分离、波动区间相交。可选上界只约束后枢延伸。
+/-- 途径二：前后枢的核分离、波动区间相交。
 
 [020:44] 缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。
 [二级旁证 095:86] 次好的，就是在这里形成5分钟中枢后再出现第三类买点，这里有两种途径，一种是9次级别的震荡扩展出5分钟，一种是先1分钟的第三类卖点后底背驰上来再出来5分钟。这里就构成了N次必然的短线机会。
 -/
-def returningCenter (xs : List (Seg P)) (z : Center P) (j : Nat)
-    (requireThird : Bool) (bound : Option Nat := none) : Bool :=
-  match firstReturnFrom xs z requireThird with
+def expandsWith (z next : Center P) : Bool :=
+  match relPos z.zone next.zone with
+  | .expansionUp | .expansionDown => true
+  | _ => false
+
+/-- 只看离开后首个成核的中枢；波动相交可以在该枢延伸时确立。 -/
+def hasExpansionAfter (xs : List (Seg P)) (z : Center P) (k : Nat) : Bool :=
+  match firstSeedFrom xs (k + 1) with
   | none => false
-  | some n =>
-    match Center.window? xs n j with
+  | some n => (List.range (extRun xs n - 2)).any fun extra =>
+    (Center.window? xs n (n + 3 + extra)).any (expandsWith z)
+
+/-- 从最大延伸前枢的末段起，按固定核逐段找首个闭合事件。
+连续离开计入块内，跳空离开从下一块起算；标志位说明该离开之后是否出现扩展后枢。
+不要求第三类事件时，同一位置的越核离开也可由扩展后枢确认为闭合。 -/
+def firstBreakOrExpand? (xs : List (Seg P)) (seed : Nat)
+    (requireThird : Bool) : Option (Nat × Bool) := do
+  let z ← Center.window? xs seed (seed + extRun xs seed)
+  let next ← xs[z.stop]?
+  if decide (z.extendsWith next) then none else
+    let start := z.stop - 1
+    ((List.range (xs.length - start)).map (start + ·)).findSome? fun k => do
+      let leave ← xs[k]?
+      let (crosses, gap, third) := match leave.dir with
+        | .up => (decide (z.core.hi < leave.range.hi), decide (z.leavesUp leave),
+            (xs[k+1]?).any (fun back => decide (z.thirdBuyEvent leave back)))
+        | .down => (decide (leave.range.lo < z.core.lo), decide (z.leavesDown leave),
+            (xs[k+1]?).any (fun back => decide (z.thirdSellEvent leave back)))
+      let cutEnd := if gap then k else k + 1
+      if third then some (cutEnd, hasExpansionAfter xs z k)
+      else if !requireThird && crosses && hasExpansionAfter xs z k then some (cutEnd, true)
+      else none
+
+/-- 成核档和触核延伸档保留原途径二：在块尾取证，前后枢各至多九段。 -/
+def earlyTimingPullback (xs : List (Seg P)) (seed j : Nat) : Bool :=
+  (List.range 7).any fun extra =>
+    match Center.window? xs seed (seed + 3 + extra) with
     | none => false
-    | some next => bound.all (fun b => decide (next.cover.length ≤ b)) &&
-        match relPos z.zone next.zone with
-        | .expansionUp | .expansionDown => true
-        | _ => false
+    | some z =>
+      ((z.departureIndex? .up xs <|> z.departureIndex? .down xs).bind
+        (fun k => firstSeedFrom xs (k + 1))).any fun n =>
+        (Center.window? xs n j).any fun next =>
+          decide (next.cover.length ≤ 9) && expandsWith z next
 
 /-- 普通入口的第一成核点。 -/
 def carrySeed? (p : CarryNineParams) (xs : List (Seg P)) (start : Nat) : Option Nat :=
@@ -125,26 +128,28 @@ def carryStart (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i : 
     | _, _ => i
 termination_by structural past
 
-/-- 普通块与升级块均可合法；升级只使用在块尾已经出现的证据。
+/-- 普通块与升级块均可合法。第三类事件档在同一离开切点检查后枢扩展证据。
 九段满足进位几何时，普通块须在九段前结束；三凸包不相交时则继续按普通时机封块。 -/
 def carryClass (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat := do
   let seed ← carrySeed? p xs (carryStart p xs past i)
   if j > xs.length || j < seed + 3 then none else
-    let nine := nineEnd? p xs seed == some j
-    let pullback := (List.range 7).any fun n =>
-      match Center.window? xs seed (seed+3+n) with
-      | none => false
-      | some z => returningCenter xs z j true (some 9)
-    if nine || pullback then some 1
-    else if j ≥ seed + 9 && nineAt xs seed then none
+    let nineBlocksOrdinary := j ≥ seed + 9 && nineAt xs seed
+    if nineEnd? p xs seed == some j then some 1
     else match p.timing with
-    | .seeded => if j == seed + 3 then some 0 else none
-    | .coreBroken =>
-      match Center.window? xs seed j, xs[j]? with
-      | some z, some leave => if decide (¬ z.extendsWith leave) then some 0 else none
-      | _, _ => none
     | .thirdEvent =>
-      if thirdEventEnd? xs seed == some j then some 0 else none
+      let (cutEnd, expanded) ← firstBreakOrExpand? xs seed true
+      if j != cutEnd then none
+      else if expanded then some 1
+      else if nineBlocksOrdinary then none else some 0
+    | .seeded | .coreBroken =>
+      if earlyTimingPullback xs seed j then some 1
+      else if nineBlocksOrdinary then none
+      else if p.timing == .seeded then
+        if j == seed + 3 then some 0 else none
+      else
+        match Center.window? xs seed j, xs[j]? with
+        | some z, some leave => if decide (¬ z.extendsWith leave) then some 0 else none
+        | _, _ => none
 
 /-- 优先确立的升级占优；其他升级和普通成块仍可作为合法分解。 -/
 def carryScore (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat :=

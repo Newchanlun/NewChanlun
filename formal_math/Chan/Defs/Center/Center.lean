@@ -137,6 +137,7 @@ def departureIndex? (z : Center P) (d : Dir) (xs : List (Seg P)) : Option Nat :=
   [z.stop - 1, z.stop].find? (z.thirdAt d xs)
 
 /-- 任一方向发生第三类事件即破坏；未发生时不假定它终将出现。
+这里只定义给定中枢位置的静态性质；块尾定位统一走 `Level/CarryNine` 的 `firstBreakOrExpand?` 扫描器。
 
 [018:64] 某级别“缠中说禅走势中枢”的破坏，当且仅当一个次级别走势离开该“缠中说禅走势中枢”后，其后的次级别回抽走势不重新回到该“缠中说禅走势中枢”内。
 -/
