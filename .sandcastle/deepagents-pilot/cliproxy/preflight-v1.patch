@@ -1801,10 +1801,10 @@ index 0000000..9cdebe2
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..394c777 100644
+index e69de29..9d72e20 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1673 @@
+@@ -0,0 +1,1734 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -3475,11 +3475,72 @@ index e69de29..394c777 100644
 +			if code, body := sealLaunch(srv, lSlashAuth, sSlashAuth); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
 +				t.Fatalf("seal after authenticated POST /v1/responses/ = (%d, %s), want (409, rejected)", code, body)
 +			}
++
++			// 6. Astra P1 #1 (PR #2280 R91): real http.Server (srv.server with DisableGeneralOptionsHandler)
++			//    MUST route raw HTTP/1.1 `OPTIONS *` through the auth + taint guard instead of Go's built-in
++			//    globalOptionsHandler bypassing srv.Handler().
++			ln, err := net.Listen("tcp", "127.0.0.1:0")
++			if err != nil {
++				t.Fatalf("listen: %v", err)
++			}
++			serveDone := make(chan error, 1)
++			go func() {
++				serveDone <- srv.server.Serve(ln)
++			}()
++			t.Cleanup(func() {
++				_ = srv.server.Close()
++				<-serveDone
++			})
++			sendRawOptionsStar := func(headers string) string {
++				t.Helper()
++				conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
++				if err != nil {
++					t.Fatalf("dial: %v", err)
++				}
++				defer conn.Close()
++				_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
++				rawReq := "OPTIONS * HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n" + headers + "\r\n"
++				if _, err := io.WriteString(conn, rawReq); err != nil {
++					t.Fatalf("write OPTIONS *: %v", err)
++				}
++				respBytes, err := io.ReadAll(conn)
++				if err != nil {
++					t.Fatalf("read OPTIONS *: %v", err)
++				}
++				return string(respBytes)
++			}
++
++			// Ordinary OPTIONS * (no review header) retains Go's default 200 OK.
++			if resp := sendRawOptionsStar(""); !strings.HasPrefix(resp, "HTTP/1.1 200 ") {
++				t.Fatalf("ordinary OPTIONS * response = %q, want 200", resp)
++			}
++
++			// Unauthenticated OPTIONS * carrying review launch header MUST NOT taint existing launch.
++			lOptUnauth := "review-e4010101-2222-4333-8444-5555555550" + suffix + "7"
++			sOptUnauth := "019d0000-0000-7000-8000-e401010100" + suffix + "7"
++			runCleanTurn(srv, lOptUnauth, sOptUnauth)
++			if resp := sendRawOptionsStar(fmt.Sprintf("%s: %s\r\nSession-Id: %s\r\n", preflightreceipt.ReviewHeader, lOptUnauth, sOptUnauth)); !strings.HasPrefix(resp, "HTTP/1.1 200 ") {
++				t.Fatalf("unauthenticated OPTIONS * response = %q, want 200", resp)
++			}
++			if code, body := sealLaunch(srv, lOptUnauth, sOptUnauth); code != http.StatusOK {
++				t.Fatalf("unauthenticated OPTIONS * tainted launch: seal = (%d, %s), want 200", code, body)
++			}
++
++			// Authenticated OPTIONS * carrying review launch header MUST return 400 and taint launch.
++			lOptAuth := "review-e4010101-2222-4333-8444-5555555550" + suffix + "8"
++			sOptAuth := "019d0000-0000-7000-8000-e401010100" + suffix + "8"
++			runCleanTurn(srv, lOptAuth, sOptAuth)
++			if resp := sendRawOptionsStar(fmt.Sprintf("Authorization: Bearer test-key\r\n%s: %s\r\nSession-Id: %s\r\n", preflightreceipt.ReviewHeader, lOptAuth, sOptAuth)); !strings.HasPrefix(resp, "HTTP/1.1 400 ") {
++				t.Fatalf("authenticated OPTIONS * response = %q, want 400", resp)
++			}
++			if code, body := sealLaunch(srv, lOptAuth, sOptAuth); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
++				t.Fatalf("seal after authenticated OPTIONS * = (%d, %s), want (409, rejected)", code, body)
++			}
 +		})
 +	}
 +}
 diff --git a/internal/api/server.go b/internal/api/server.go
-index 099b5dd..d10efc0 100644
+index 099b5dd..94f957c 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
 @@ -198,6 +198,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
@@ -3490,20 +3551,25 @@ index 099b5dd..d10efc0 100644
  	engine.Use(corsMiddleware())
  	engine.Use(s.responseCompressionMiddleware())
  	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
-@@ -268,7 +269,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+@@ -267,9 +268,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 
  	// Create HTTP server
  	s.server = &http.Server{
- 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+-		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 -		Handler:           wrapUnconsumedRequestBodyHandler(engine),
-+		Handler:           wrapUnconsumedRequestBodyHandler(s.wrapPreflightDisallowedHTTPHandler(engine)),
- 		ReadHeaderTimeout: muxSniffDeadline,
+-		ReadHeaderTimeout: muxSniffDeadline,
++		Addr:                         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
++		Handler:                      wrapUnconsumedRequestBodyHandler(s.wrapPreflightDisallowedHTTPHandler(engine)),
++		ReadHeaderTimeout:            muxSniffDeadline,
++		DisableGeneralOptionsHandler: true,
  	}
  
+ 	return s
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
-index 9450038..c088078 100644
+index 9450038..f73cd1c 100644
 --- a/internal/api/server_middleware.go
 +++ b/internal/api/server_middleware.go
-@@ -485,6 +485,50 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+@@ -485,6 +485,67 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
  	return accessAuthMiddleware(manager, false)
  }
  
@@ -3533,18 +3599,35 @@ index 9450038..c088078 100644
 +		return nil
 +	}
 +	reject := middleware.NewDisallowedPreflightOrReviewRejecter()
++	writeDefaultGeneralOptions := func(w http.ResponseWriter, r *http.Request) bool {
++		if r != nil && r.Method == http.MethodOptions && r.RequestURI == "*" {
++			w.Header().Set("Content-Length", "0")
++			w.WriteHeader(http.StatusOK)
++			return true
++		}
++		return false
++	}
 +	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +		if r == nil || !middleware.HasPreflightOrReviewHeader(r.Header) || middleware.IsAllowedPreflightOrReviewEntry(r) {
++			if writeDefaultGeneralOptions(w, r) {
++				return
++			}
 +			next.ServeHTTP(w, r)
 +			return
 +		}
 +		if s != nil && s.accessManager != nil {
 +			if _, authErr := s.accessManager.Authenticate(r.Context(), r); authErr != nil {
++				if writeDefaultGeneralOptions(w, r) {
++					return
++				}
 +				next.ServeHTTP(w, r)
 +				return
 +			}
 +		}
 +		if reject(w, r) {
++			return
++		}
++		if writeDefaultGeneralOptions(w, r) {
 +			return
 +		}
 +		next.ServeHTTP(w, r)
@@ -8399,10 +8482,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..986797a 100644
+index e69de29..2f6129a 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,14117 @@
+@@ -0,0 +1,14226 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -11265,7 +11348,7 @@ index e69de29..986797a 100644
 +		return false
 +	}
 +	scheme := strings.ToLower(u.Scheme)
-+	return (scheme == "http" || scheme == "https") && u.Host != ""
++	return (scheme == "http" || scheme == "https") && strings.TrimSpace(u.Hostname()) != ""
 +}
 +
 +func isValidWebSearchAction(rawAction json.RawMessage) bool {
@@ -15237,6 +15320,12 @@ index e69de29..986797a 100644
 +		"schema": receiptJSONString,
 +		"key":    receiptJSONString,
 +	}
++	stageSealMarkerJSONKeys = map[string]receiptJSONKind{
++		"schema":      receiptJSONString,
++		"launch":      receiptJSONString,
++		"started_ns":  receiptJSONInt64,
++		"seal_sha256": receiptJSONString,
++	}
 +)
 +
 +func validExactReceiptJSONKind(raw []byte, kind receiptJSONKind) bool {
@@ -18293,6 +18382,16 @@ index e69de29..986797a 100644
 +			turnDeadline = launchDeadline
 +		}
 +	}
++	if ctxDeadline, ok := ctx.Deadline(); ok {
++		if !ctxDeadline.After(now) {
++			entry.mu.Unlock()
++			failAndReleaseReservationEntryNonBlocking(entry, turnSeq, false, 0, holdsSlot)
++			return ctx, nil, ErrUnavailable
++		}
++		if ctxDeadline.Before(turnDeadline) {
++			turnDeadline = ctxDeadline
++		}
++	}
 +	entry.mu.Unlock()
 +
 +	c := &Collector{
@@ -18679,20 +18778,32 @@ index e69de29..986797a 100644
 +}
 +
 +const stagingKeySchema = "cliproxy-staging-key-v1"
++const stageSealMarkerSchema = "cliproxy-stage-seal-v1"
 +
 +type stagingKeyFile struct {
 +	Schema string `json:"schema"`
 +	Key    string `json:"key"`
 +}
 +
++type stageSealMarker struct {
++	Schema     string `json:"schema"`
++	Launch     string `json:"launch"`
++	Started    int64  `json:"started_ns"`
++	SealSHA256 string `json:"seal_sha256"`
++}
++
 +const maxStagingCreateRetries = 8
 +
 +var (
-+	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker|pending-key)-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
-+	stagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
-+	stageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
-+	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}(?:-[0-9a-f]{32})?$`)
-+	stagingOrphanAge    = 5 * time.Minute
++	stagingFilePattern        = regexp.MustCompile(`^(?:pending|pending-marker|pending-key)-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
++	signedStagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker)-[0-9]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}$`)
++	stagingDirPattern         = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
++	signedStagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}$`)
++	stageSealDirPattern       = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
++	signedStageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}$`)
++	reclaimDirPattern         = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}(?:-[0-9a-f]{32})?$`)
++	signedReclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}-[0-9a-f]{32}$`)
++	stagingOrphanAge          = 5 * time.Minute
 +
 +	activeStagingMu sync.Mutex
 +	activeStaging   = make(map[string]int)
@@ -19258,6 +19369,24 @@ index e69de29..986797a 100644
 +	return stagingRoot.Remove(name) == nil
 +}
 +
++func readVerifiedStageSealMarkerFile(subRoot *os.Root) (verifiedLeafChild, string, int64, string, bool) {
++	raw, dev, ino, hasID, ok := readPrivateRegularFileInSubdir(subRoot, "producer.json", 4096)
++	if !ok {
++		return verifiedLeafChild{}, "", 0, "", false
++	}
++	var sm stageSealMarker
++	if decodeExactReceiptJSON(raw, stageSealMarkerJSONKeys, &sm) == nil &&
++		sm.Schema == stageSealMarkerSchema && ValidReviewLaunch(sm.Launch) && sm.Started > 0 && isSHA256Hex(sm.SealSHA256) {
++		return verifiedLeafChild{name: "producer.json", dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, sm.Launch, sm.Started, sm.SealSHA256, true
++	}
++	var rm reviewReservationMarker
++	if decodeExactReceiptJSON(raw, reviewMarkerJSONKeys, &rm) == nil &&
++		rm.Schema == ReviewSchema && ValidReviewLaunch(rm.Launch) && rm.Started > 0 {
++		return verifiedLeafChild{name: "producer.json", dev: dev, ino: ino, hasID: hasID, sha256: sha256Hex(string(raw))}, rm.Launch, rm.Started, "", true
++	}
++	return verifiedLeafChild{}, "", 0, "", false
++}
++
 +func cleanSignedPartialStageSealDir(stagingRoot *os.Root, name string, subRoot *os.Root, subDev, subIno uint64, hasSubID bool, children []os.DirEntry) bool {
 +	names := make(map[string]struct{}, len(children))
 +	for _, ch := range children {
@@ -19284,26 +19413,39 @@ index e69de29..986797a 100644
 +		if _, ok1 := names["producer.json"]; !ok1 {
 +			return false
 +		}
-+		if _, ok2 := names["seal.pending.json"]; !ok2 {
-+			return false
-+		}
-+		markerCh, owner, _, okM := readVerifiedStagingMarkerFile(subRoot)
++		markerCh, owner, _, expectedSealSHA, okM := readVerifiedStageSealMarkerFile(subRoot)
 +		if !okM || !ValidReviewLaunch(owner) {
 +			return false
 +		}
-+		raw, dev, ino, hasID, okP := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "seal.pending.json", maxReviewReceiptBytes)
-+		if !okP || !isTruncatedJSONObjectPrefix(raw) {
-+			return false
++		if _, ok2 := names["seal.pending.json"]; ok2 {
++			raw, dev, ino, hasID, okP := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "seal.pending.json", maxReviewReceiptBytes)
++			if !okP || !isTruncatedJSONObjectPrefix(raw) {
++				return false
++			}
++			if !removeVerifiedFileInSubdirMode(subRoot, "seal.pending.json", dev, ino, hasID, sha256Hex(string(raw)), maxReviewReceiptBytes, true) {
++				return false
++			}
++			if !removeVerifiedFileInSubdir(subRoot, markerCh.name, markerCh.dev, markerCh.ino, markerCh.hasID, markerCh.sha256, 4096) {
++				return false
++			}
++			return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
 +		}
-+		if !removeVerifiedFileInSubdirMode(subRoot, "seal.pending.json", dev, ino, hasID, sha256Hex(string(raw)), maxReviewReceiptBytes, true) {
-+			return false
++		if _, ok3 := names["seal.sha256"]; ok3 && expectedSealSHA != "" {
++			sRaw, sDev, sIno, sHasID, okS := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "seal.sha256", 64)
++			if !okS || len(sRaw) >= 64 || !strings.HasPrefix(expectedSealSHA, string(sRaw)) {
++				return false
++			}
++			if !removeVerifiedFileInSubdirMode(subRoot, "seal.sha256", sDev, sIno, sHasID, sha256Hex(string(sRaw)), 64, true) {
++				return false
++			}
++			if !removeVerifiedFileInSubdir(subRoot, markerCh.name, markerCh.dev, markerCh.ino, markerCh.hasID, markerCh.sha256, 4096) {
++				return false
++			}
++			return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
 +		}
-+		if !removeVerifiedFileInSubdir(subRoot, markerCh.name, markerCh.dev, markerCh.ino, markerCh.hasID, markerCh.sha256, 4096) {
-+			return false
-+		}
-+		return removeVerifiedEmptyStagingSubdir(stagingRoot, name, subRoot, subDev, subIno, hasSubID)
++		return false
 +	case 3:
-+		markerCh, markerLaunch, markerStarted, okM := readVerifiedStagingMarkerFile(subRoot)
++		markerCh, markerLaunch, markerStarted, expectedSealSHA, okM := readVerifiedStageSealMarkerFile(subRoot)
 +		if !okM || !ValidReviewLaunch(markerLaunch) {
 +			return false
 +		}
@@ -19316,6 +19458,9 @@ index e69de29..986797a 100644
 +			return false
 +		}
 +		pendingSHA := sha256Hex(string(pRaw))
++		if expectedSealSHA != "" && pendingSHA != expectedSealSHA {
++			return false
++		}
 +		sRaw, sDev, sIno, sHasID, okS := readPrivateRegularFileInSubdirAllowEmpty(subRoot, "seal.sha256", 64)
 +		if !okS || len(sRaw) >= 64 || !strings.HasPrefix(pendingSHA, string(sRaw)) {
 +			return false
@@ -19349,6 +19494,7 @@ index e69de29..986797a 100644
 +	verified := make(map[string]verifiedLeafChild, len(children))
 +	var markerLaunch string
 +	var markerStarted int64
++	var expectedSealSHA string
 +	var pendingLaunch string
 +	var pendingStarted int64
 +	var pendingSHA string
@@ -19360,13 +19506,14 @@ index e69de29..986797a 100644
 +		cname := child.Name()
 +		switch cname {
 +		case "producer.json":
-+			ch, owner, started, ok := readVerifiedStagingMarkerFile(subRoot)
++			ch, owner, started, expSHA, ok := readVerifiedStageSealMarkerFile(subRoot)
 +			if !ok || !ValidReviewLaunch(owner) {
 +				strictOK = false
 +				break
 +			}
 +			markerLaunch = owner
 +			markerStarted = started
++			expectedSealSHA = expSHA
 +			hasMarker = true
 +			verified[cname] = ch
 +		case "seal.pending.json":
@@ -19413,6 +19560,9 @@ index e69de29..986797a 100644
 +	if pendingLaunch != "" && (pendingLaunch != markerLaunch || pendingStarted != markerStarted) {
 +		return false
 +	}
++	if pendingSHA != "" && expectedSealSHA != "" && pendingSHA != expectedSealSHA {
++		return false
++	}
 +	launch := markerLaunch
 +	if hasSeal {
 +		var matched bool
@@ -19420,6 +19570,24 @@ index e69de29..986797a 100644
 +			// When seal.pending.json is still present in stage-seal-*, seal.sha256 MUST match it directly;
 +			// contradicting staged files are preserved untouched rather than explained away via <launch>.
 +			matched = (sealDigest == pendingSHA)
++		} else if expectedSealSHA != "" {
++			if sealDigest == expectedSealSHA {
++				if rootHandle == nil {
++					matched = true
++				} else if lSub, _, lerr := openVerifiedSubdir(rootHandle, launch); lerr == nil {
++					for _, target := range []string{"seal.pending.json", "receipt.json"} {
++						if raw, _, _, _, ok := readPrivateRegularFileInSubdir(lSub, target, maxReviewReceiptBytes); ok && sha256Hex(string(raw)) == sealDigest {
++							matched = true
++							break
++						}
++					}
++					_ = lSub.Close()
++				} else if errors.Is(lerr, os.ErrNotExist) {
++					// Launch dir was already expired/reclaimed after seal.pending.json moved out;
++					// seal.sha256 matches stage-seal's own producer.json seal_sha256 independently.
++					matched = true
++				}
++			}
 +		} else if rootHandle != nil {
 +			if lSub, _, lerr := openVerifiedSubdir(rootHandle, launch); lerr == nil {
 +				for _, target := range []string{"seal.pending.json", "receipt.json"} {
@@ -19721,6 +19889,13 @@ index e69de29..986797a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
++			hasTag := signedStagingFilePattern.MatchString(name)
++			signedOwner := hasTag && hasStagingKey && verifyStagingFileName(stagingKey, name)
++			if hasTag && !signedOwner {
++				// Signed-format name whose HMAC does not match this root's .staging-key
++				// (e.g. from another receipt root) MUST NOT fall back to content-only deletion.
++				continue
++			}
 +			maxB := int64(maxReviewReceiptBytes)
 +			if strings.HasPrefix(name, "pending-marker-") {
 +				maxB = 4096
@@ -19734,7 +19909,7 @@ index e69de29..986797a 100644
 +				}
 +				continue
 +			}
-+			if hasStagingKey && verifyStagingFileName(stagingKey, name) {
++			if signedOwner {
 +				raw, fDev, fIno, fHasID, okP := readPrivateRegularFileInSubdirAllowEmpty(stagingRoot, name, maxB)
 +				if okP && isTruncatedJSONObjectPrefix(raw) && removeVerifiedFileInSubdirMode(stagingRoot, name, fDev, fIno, fHasID, sha256Hex(string(raw)), maxB, true) {
 +					removed++
@@ -19750,12 +19925,16 @@ index e69de29..986797a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
++			hasTag := signedStagingDirPattern.MatchString(name)
++			signedOwner := hasTag && hasStagingKey && verifyStagingDirName(stagingKey, "stage-dir", name)
++			if hasTag && !signedOwner {
++				continue
++			}
 +			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
 +			if oerr != nil {
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			signedOwner := hasStagingKey && verifyStagingDirName(stagingKey, "stage-dir", name)
 +			children, truncC, cerr := readDirCapped(subRoot, 1)
 +			if cerr != nil || truncC {
 +				_ = subRoot.Close()
@@ -19802,12 +19981,16 @@ index e69de29..986797a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
++			hasTag := signedStageSealDirPattern.MatchString(name)
++			signedOwner := hasTag && hasStagingKey && verifyStagingDirName(stagingKey, "stage-seal", name)
++			if hasTag && !signedOwner {
++				continue
++			}
 +			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
 +			if oerr != nil {
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			signedOwner := hasStagingKey && verifyStagingDirName(stagingKey, "stage-seal", name)
 +			if cleanOrphanStageSealDir(rootHandle, stagingRoot, name, subRoot, subDev, subIno, hasSubID, signedOwner) {
 +				removed++
 +			} else {
@@ -19823,12 +20006,16 @@ index e69de29..986797a 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
++			hasTag := signedReclaimDirPattern.MatchString(name)
++			signedOwner := hasTag && hasStagingKey && verifyStagingDirName(stagingKey, "reclaim", name)
++			if hasTag && !signedOwner {
++				continue
++			}
 +			subRoot, subFI, oerr := openVerifiedSubdir(stagingRoot, name)
 +			if oerr != nil {
 +				continue
 +			}
 +			subDev, subIno, hasSubID := statDevIno(subFI)
-+			signedOwner := hasStagingKey && verifyStagingDirName(stagingKey, "reclaim", name)
 +			if cleanOrphanReclaimDir(stagingRoot, name, subRoot, subDev, subIno, hasSubID, signedOwner) {
 +				removed++
 +			} else {
@@ -22019,7 +22206,12 @@ index e69de29..986797a 100644
 +				}
 +			}
 +		}
-+		markerBytes, merr := marshalReservationMarker(e.launch, e.started)
++		markerBytes, merr := json.Marshal(stageSealMarker{
++			Schema:     stageSealMarkerSchema,
++			Launch:     e.launch,
++			Started:    e.started,
++			SealSHA256: sealedDigest,
++		})
 +		if merr != nil {
 +			cleanupSealStage(false, false)
 +			return fail(false, ErrUnavailable)
@@ -22379,7 +22571,7 @@ index e69de29..986797a 100644
 +	if c.review != nil {
 +		canPublish := !c.invalid && !c.attemptFailed && !c.sealed && c.handlerDone && c.lifecycleDone && c.active == 0 && c.bodies == 0 && c.executions > 0 && len(c.receipt.Routes) > 0
 +		if canPublish {
-+			if time.Now().After(c.deadline) {
++			if time.Now().After(c.deadline) || (c.turnCtx != nil && errors.Is(c.turnCtx.Err(), context.DeadlineExceeded)) {
 +				c.invalid = true
 +				canPublish = false
 +			} else {
@@ -22521,10 +22713,10 @@ index e69de29..986797a 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..639c2f5 100644
+index e69de29..52e1bd8 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,17729 @@
+@@ -0,0 +1,17936 @@
 +package preflightreceipt
 +
 +import (
@@ -40012,9 +40204,11 @@ index e69de29..639c2f5 100644
 +		{"search_empty_queries", `{"type":"search","queries":[]}`},
 +		{"open_page_missing_url", `{"type":"open_page"}`},
 +		{"open_page_non_http_url", `{"type":"open_page","url":"javascript:alert(1)"}`},
++		{"open_page_port_only_host", `{"type":"open_page","url":"https://:443/"}`},
 +		{"find_missing_url", `{"type":"find","pattern":"foo"}`},
 +		{"find_missing_pattern", `{"type":"find","url":"https://example.com/a"}`},
 +		{"find_in_page_blank_pattern", `{"type":"find_in_page","url":"https://example.com/a","pattern":" "}`},
++		{"find_in_page_port_only_host", `{"type":"find_in_page","url":"http://:80/docs","pattern":"foo"}`},
 +	}
 +	for i, tc := range badActions {
 +		l1 := fmt.Sprintf("review-e5010101-2222-4333-8444-555555551%03d", i+1)
@@ -40251,6 +40445,211 @@ index e69de29..639c2f5 100644
 +	for _, preserved := range []string{signedCompleteForeign, unsignedEmpty, unsignedTrunc} {
 +		if _, err := os.Lstat(preserved); err != nil {
 +			t.Fatalf("non-producer or unsigned staging file %s was deleted instead of preserved: %v", preserved, err)
++		}
++	}
++}
++
++func TestBeginReviewReservedClampsToEarlierContextDeadlineAndRejectsLatePublish(t *testing.T) {
++	// Sol P1 #1 (PR #2280 R91): BeginReviewReserved MUST clamp c.deadline to ctx.Deadline() when
++	// earlier than now + ReviewTurnTimeout so a turn finishing past the original middleware deadline
++	// cannot publish into a sealable receipt.
++	root := filepath.Join(t.TempDir(), "r91-deadline-clamp")
++	launch := "review-e7010101-2222-4333-8444-555555555501"
++	sess := "019d0000-0000-7000-8000-e70101010101"
++
++	origDeadline := time.Now().Add(150 * time.Millisecond)
++	turnCtx, turnCancel := context.WithDeadline(context.Background(), origDeadline)
++	defer turnCancel()
++
++	pend, err := BeginPendingReviewContext(turnCtx, root, launch)
++	if err != nil {
++		t.Fatal(err)
++	}
++	res, err := ReserveReviewContext(turnCtx, root, launch, pend.TurnSeq())
++	if err != nil {
++		pend.Release()
++		t.Fatal(err)
++	}
++	res.SetTurnSeq(pend.TurnSeq())
++	res.AttachPendingSlot(pend)
++	pend.Release()
++
++	ctx, c, err := BeginReviewReserved(turnCtx, res, sess, "gpt-6.2-sol")
++	if err != nil {
++		res.Release()
++		t.Fatal(err)
++	}
++	if c.Deadline().After(origDeadline) {
++		c.HandlerDone(false)
++		t.Fatalf("collector deadline %v exceeded original turnCtx deadline %v", c.Deadline(), origDeadline)
++	}
++	ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++	if err != nil {
++		c.HandlerDone(false)
++		t.Fatal(err)
++	}
++	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{
++			StatusCode: 200,
++			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
++			Body:       io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{"id":"resp_late","status":"completed","model":"gpt-6.2-sol","output":[{"id":"msg_late","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n")),
++			TLS:        verifiedTLSState("chatgpt.com"),
++		}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		e.End()
++		c.HandlerDone(false)
++		t.Fatal(err)
++	}
++	raw, _ := io.ReadAll(resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c, raw)
++	e.End()
++	c.Complete(true)
++
++	// Wait until original turnCtx deadline passes BEFORE HandlerDone(true).
++	time.Sleep(time.Until(origDeadline) + 40*time.Millisecond)
++	c.HandlerDone(true)
++
++	// Drain finalize worker and verify the late turn was NOT published into a sealable receipt.
++	drainDeadline := time.Now().Add(2 * time.Second)
++	for {
++		reviewMu.Lock()
++		drainCancelFailLocked()
++		busy := int(finalizeWorkers.Load()) + failurePersistWorkers + pendingReviewTotal
++		reviewMu.Unlock()
++		if busy == 0 {
++			break
++		}
++		if time.Now().After(drainDeadline) {
++			t.Fatalf("timed out draining late-turn finalize worker")
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if st, dig := SealReviewWithDigest(root, launch, sess); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest after past-deadline HandlerDone = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++}
++
++func TestStageSealSelfContainedReclaimAndWrongRootSignedFilePreserved(t *testing.T) {
++	// Sol P2 #2 + Astra P2 #2 (PR #2280 R91):
++	// 1. An interrupted stage-seal-* carrying stageSealMarker (with seal_sha256) + matching seal.sha256
++	//    MUST remain reclaimable even after <root>/<launch> has already been expired and reclaimed.
++	// 2. A signed-format pending-* file (or stage-dir-*) whose HMAC was produced by a DIFFERENT root's
++	//    key MUST NOT be deleted on restart sweep even when its JSON content is a valid receipt/marker.
++	root := filepath.Join(t.TempDir(), "r91-stageseal-and-crossroot")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		lease.Close()
++		t.Fatal(err)
++	}
++	key, ok := readStagingKey(lease.dir)
++	if !ok {
++		_ = stagingRoot.Close()
++		lease.Close()
++		t.Fatalf("readStagingKey failed")
++	}
++	stagingPath := filepath.Join(root, ".staging")
++	ancient := time.Now().Add(-time.Hour)
++	launch := "review-e8010101-2222-4333-8444-555555555501"
++	sealedDigest := sha256Hex(`{"sealed":"self-contained"}`)
++
++	// 1a. Interrupted stage-seal-* with self-contained seal_sha256 while <root>/<launch> does NOT exist -> MUST reclaim.
++	okStageSealName := signStagingDirName(key, fmt.Sprintf("stage-seal-%d-1-1111111111111111", os.Getpid()))
++	okStageSealPath := filepath.Join(stagingPath, okStageSealName)
++	if err := os.Mkdir(okStageSealPath, 0700); err != nil {
++		t.Fatal(err)
++	}
++	smRaw, _ := json.Marshal(stageSealMarker{Schema: stageSealMarkerSchema, Launch: launch, Started: ancient.UnixNano(), SealSHA256: sealedDigest})
++	if err := os.WriteFile(filepath.Join(okStageSealPath, "producer.json"), smRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(okStageSealPath, "seal.sha256"), []byte(sealedDigest), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// 1b. Mismatched stage-seal-* where seal.sha256 disagrees with stageSealMarker.SealSHA256 -> MUST preserve.
++	badStageSealName := signStagingDirName(key, fmt.Sprintf("stage-seal-%d-2-2222222222222222", os.Getpid()))
++	badStageSealPath := filepath.Join(stagingPath, badStageSealName)
++	if err := os.Mkdir(badStageSealPath, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(badStageSealPath, "producer.json"), smRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(badStageSealPath, "seal.sha256"), []byte(strings.Repeat("a", 64)), 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	// 2. Signed-format pending-* file AND stage-dir-* signed with a DIFFERENT root's key, carrying valid JSON -> MUST preserve.
++	otherKey := bytes.Repeat([]byte{0x42}, 32)
++	if bytes.Equal(otherKey, key) {
++		otherKey[0] = 0x43
++	}
++	otherSignedFileName := signStagingFileName(otherKey, fmt.Sprintf("pending-%d-3-3333333333333333", os.Getpid()))
++	otherSignedFilePath := filepath.Join(stagingPath, otherSignedFileName)
++	validRecRaw, _ := json.Marshal(Receipt{
++		Schema:   Schema,
++		Session:  "preflight-e8010101-2222-4333-8444-555555555501",
++		Started:  ancient.UnixNano(),
++		Finished: ancient.UnixNano(),
++		Complete: true,
++		Routes:   []string{"claude@api.anthropic.com"},
++	})
++	if err := os.WriteFile(otherSignedFilePath, validRecRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	otherSignedDirName := signStagingDirName(otherKey, fmt.Sprintf("stage-dir-%d-4-4444444444444444", os.Getpid()))
++	otherSignedDirPath := filepath.Join(stagingPath, otherSignedDirName)
++	if err := os.Mkdir(otherSignedDirPath, 0700); err != nil {
++		t.Fatal(err)
++	}
++	validMarkerRaw, _ := json.Marshal(reviewReservationMarker{Schema: ReviewSchema, Launch: launch, Started: ancient.UnixNano()})
++	if err := os.WriteFile(filepath.Join(otherSignedDirPath, "producer.json"), validMarkerRaw, 0600); err != nil {
++		t.Fatal(err)
++	}
++
++	_ = stagingRoot.Close()
++	lease.Close()
++
++	// Evict rootLocks entry to simulate cold restart sweep.
++	rootLockMu.Lock()
++	if h := rootLocks[root]; h != nil {
++		delete(rootLocks, root)
++		h.refs--
++		if h.refs == 0 {
++			_ = h.file.Close()
++			if h.dir != nil {
++				_ = h.dir.Close()
++			}
++			if h.parentFD != nil {
++				_ = h.parentFD.Close()
++			}
++		}
++	}
++	rootLockMu.Unlock()
++
++	lease2, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lease2.Close()
++
++	if _, err := os.Lstat(okStageSealPath); !os.IsNotExist(err) {
++		t.Fatalf("self-contained interrupted stage-seal dir survived restart sweep after launch vanished: %v", err)
++	}
++	for _, preserved := range []string{badStageSealPath, otherSignedFilePath, otherSignedDirPath} {
++		if _, err := os.Lstat(preserved); err != nil {
++			t.Fatalf("mismatched or wrong-root-HMAC staging entry %s was deleted instead of preserved: %v", preserved, err)
 +		}
 +	}
 +}
