@@ -78,6 +78,17 @@ def IsGlobalCanonical (pref : GlobalPref)
   ValidDecomp t = true ∧
     ∀ other : LevelTower r dir base, ValidDecomp other = true → ¬ pref other.cuts t.cuts
 
+/-- #2320 裁定二 §2.4–§2.5：全局重组偏好只比较原始切点表，不读取证书。
+偏好族须随附保序不变、镜像等变和严格偏序（反自反、传递）的证明。
+所得规范分解不产生在线确认，也不要求唯一。
+
+[099:26] 如果后面包括d+e+f延伸出9段，然后又直接上去了，划分中，必须首先保证5分钟中枢的成立。换言之，划分的原则很明确，就是必须保证中枢的确立，在这前提下，可以根据结合律，使得连接中枢的走势保持最完美的形态。
+-/
+def IsGlobalCanonicalBy
+    (onBase : {A : Type u} → [LinearOrder A] → AltSeq A → GlobalPref)
+    (_laws : GlobalPrefLaws onBase) (t : LevelTower r dir base) : Prop :=
+  IsGlobalCanonical (onBase base) t
+
 /-- 合法且满足调用方所选声明式规范的塔。
 [038:18] 显然，一个好的分解，其分解规则下，必须保证分解的唯一性，否则这种分解就绝对不可能是好的分解。
 [101:52] 所谓走势必完美，就是本ID所给出的分型、笔、线段、不同级别走势类型所对应的递归函数，能将行情的任何走势唯一地分解。 -/

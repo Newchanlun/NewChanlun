@@ -137,7 +137,8 @@ def nineEnd? (p : CarryNineParams) (xs : List (Seg P)) (seed : Nat) : Option Nat
 def carryStart (p : CarryNineParams) (i : Nat) : Nat :=
   if p.entry == .requireEntry then i + 1 else i
 
-/-- #2320 封顶：延伸满九段必截，三凸包是否相交只决定该块是否升级。
+/-- #2320 裁定三 §3.4、§3.5 反例 2、§3.6：单段脱核档延伸满九段必截，
+三凸包相交才记为升级；三段成核对照档没有真升级时不取九段封顶块。
 未满九段时保留途径二，且合并前后枢的块也须满足块内单核延伸界。 -/
 def carryClass (p : CarryNineParams) (xs : List (Seg P)) (_past : List Nat)
     (i j : Nat) : Option Nat := do
@@ -146,7 +147,8 @@ def carryClass (p : CarryNineParams) (xs : List (Seg P)) (_past : List Nat)
     let cap := seed + 9
     if cap ≤ j && (Center.window? xs seed cap).isSome then
       if j != cap then none
-      else if nineEnd? p xs seed == some j then some 1 else some 0
+      else if nineEnd? p xs seed == some j then some 1
+      else if p.timing == .seeded then none else some 0
     else if earlyTimingPullback xs seed j && blockExtWithin p.carryBound (xs.extract i j) then some 1
     else if cap ≤ j then none
     else match p.timing with
@@ -156,7 +158,7 @@ def carryClass (p : CarryNineParams) (xs : List (Seg P)) (_past : List Nat)
         | some z, some leave => if decide (¬ z.extendsWith leave) then some 0 else none
         | _, _ => none
 
-/-- 块在完整九段处封顶后，后续回拉不能再改写该切点。 -/
+/-- 判断首核是否连续延伸到九段边界；不判定该边界在所选档位是否合法。 -/
 def atCarryCap (p : CarryNineParams) (xs : List (Seg P)) (i j : Nat) : Bool :=
   (carrySeed? p xs (carryStart p i)).any fun seed =>
     j == seed + 9 && (Center.window? xs seed j).isSome
@@ -165,11 +167,12 @@ def atCarryCap (p : CarryNineParams) (xs : List (Seg P)) (i j : Nat) : Bool :=
 def carryScore (p : CarryNineParams) (xs : List (Seg P)) (past : List Nat) (i j : Nat) : Option Nat :=
   match carryClass p xs past i j with
   | some 1 => some (if (List.range j).any (fun t => carryClass p xs past i t == some 1) then 1 else 2)
-  | some 0 => some (if p.timing == .seeded && atCarryCap p xs i j then 1 else 0)
+  | some 0 => some 0
   | _ => none
 
 /-- 显式选择三处策略；波动回拉和九段路径共享占优次序。
-首个升级和占优的九段封顶块可确认。九段前的普通候选仍可能让位于途径二，不先确认。
+首个升级可确认；仅单段脱核档还可确认没有更早升级的普通九段封顶块。
+九段前的普通候选仍可能让位于途径二，不先确认。
 
 [057:42] 显然，这10个线段，已经组成了一个更高级别的5分钟中枢，结合方式如下：（12+23+34）+（45+56+67）+（78+89+910），该中枢的区间是[4015，4122]。这一点其实由6这个第三类卖点的存在以及后面的背驰，就可以知道，这中枢级别的扩展，是必然的。
 [020:44] 缠中说禅走势级别延续定理二：更大级别缠中说禅走势中枢产生，当且仅当围绕连续两个同级别缠中说禅走势中枢产生的波动区间产生重叠。
@@ -178,7 +181,7 @@ def carryNineRule (p : CarryNineParams) : BlockRule where
   rank _ xs past i j := carryScore p xs past i j
   confirmed _ xs past i j :=
     carryScore p xs past i j == some 2 ||
-      (atCarryCap p xs i j &&
+      (p.timing == .coreBroken && atCarryCap p xs i j &&
         !(List.range j).any (fun t => carryClass p xs past i t == some 1))
 
 end Chan.Defs.Level
