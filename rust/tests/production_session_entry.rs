@@ -341,21 +341,21 @@ fn launcher_manifest(
     )
 }
 
-fn spawn_launcher(manifest: &Path) -> Child {
-    assert!(
-        std::env::var_os(CREDENTIAL_KEY).is_none(),
-        "测试进程环境不得含哨兵键"
-    );
-    Command::new(launcher_bin())
+fn launcher_command(manifest: &Path) -> Command {
+    let mut command = Command::new(launcher_bin());
+    command
         .arg("--manifest")
         .arg(manifest)
         .env_remove(CREDENTIAL_KEY)
         .env_remove(THETA_DIAGNOSTIC.0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
+}
+
+fn spawn_launcher(manifest: &Path) -> Child {
+    launcher_command(manifest).spawn().unwrap()
 }
 
 fn ppid(pid: u32) -> Option<u32> {
@@ -439,7 +439,7 @@ fn stop(launcher: &mut Child) -> std::process::ExitStatus {
 }
 
 /// 域进程出现在 launcher 名下不等于已持锁/建库/开 socket；就绪类断言一律限时轮询。
-fn eventually(what: &str, ready: impl Fn() -> bool) {
+fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !ready() {
         assert!(Instant::now() < deadline, "{what} 未就绪");
@@ -1071,4 +1071,258 @@ fn production_launcher_does_not_forward_theta_diagnostic_switch() {
     eventually("S socket", || space.path("s.sock").exists());
     assert_s_environ_lacks_theta_diagnostic(&kids);
     assert_eq!(stop(&mut launcher).code(), Some(0));
+}
+
+fn observe_credential_open(path: &Path) -> std::fs::File {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY：返回的新 fd 由 File 独占；路径在调用期间以 NUL 结尾并保持有效。
+    unsafe {
+        let fd = libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK);
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        let file = std::fs::File::from_raw_fd(fd);
+        assert!(
+            libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_OPEN) >= 0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        file
+    }
+}
+
+fn x_serve(profile: &Path, db: &Path) -> Command {
+    let mut command = Command::new(x_bin());
+    command
+        .args(["serve", "--db"])
+        .arg(db)
+        .arg("--profile")
+        .arg(profile)
+        .args(["--writer-epoch", "1"]);
+    command
+}
+
+#[test]
+fn invalid_x_credential_key_refuses_before_side_effects() {
+    let base = "NC_X_VENUE_CREDENTIAL";
+    let cases = [
+        ("missing", None),
+        ("null", Some(Value::Null)),
+        ("non-string", Some(json!(42))),
+        ("empty", Some(json!(""))),
+        ("path", Some(json!("PATH"))),
+        ("separator", Some(json!("PATH=fixture"))),
+        ("leading-separator", Some(json!("=fixture"))),
+        ("suffix-separator", Some(json!(format!("{base}_A=B")))),
+        ("nul", Some(json!(format!("{base}_A\0B")))),
+        ("space", Some(json!(format!(" {base}_Fixture")))),
+        ("trailing-space", Some(json!(format!("{base}\t")))),
+        ("non-ascii", Some(json!(format!("{base}_甲")))),
+        ("process-control", Some(json!("LD_PRELOAD"))),
+        ("ordinary", Some(json!("VENUE_FIXTURE_KEY"))),
+        ("different-case", Some(json!(base.to_ascii_lowercase()))),
+        ("missing-separator", Some(json!(format!("{base}A")))),
+        ("empty-suffix", Some(json!(format!("{base}_")))),
+        ("underscore-first", Some(json!(format!("{base}__A")))),
+        ("punctuation", Some(json!(format!("{base}_A-B")))),
+        (
+            "65-bytes",
+            Some(json!(format!("{base}_{}", "x".repeat(64 - base.len())))),
+        ),
+    ];
+    for (revision, section, other) in [
+        (
+            "x-execution-profile/1",
+            "credential_scope",
+            "credential_source",
+        ),
+        (
+            "x-execution-profile/2",
+            "credential_source",
+            "credential_scope",
+        ),
+    ] {
+        for mode in ["simulation", "dry-run", "experiment", "production"] {
+            let space = Space::new();
+            let s_db = space.s_db();
+            let x_db = space.path("x.db");
+            let xp = space.path("x-profile.json");
+            let file = space.path("credential.txt");
+            std::fs::write(&file, CREDENTIAL_VALUE).unwrap();
+            let mut watched = observe_credential_open(&file);
+            let manifest = launcher_manifest(
+                &space,
+                mode,
+                &declaration("TestOnlyStructure", DECLARED_NS),
+                &s_db,
+                &space.path("limits.json"),
+                &xp,
+            );
+            for (label, key) in &cases {
+                let context = format!("{revision}/{mode}/{label}");
+                let mut profile = json!({"profile_revision":revision,"mode":mode});
+                profile[section] = json!({"file":file});
+                profile[other] = json!({"env":base,"file":file});
+                if let Some(key) = key {
+                    profile[section]["env"] = key.clone();
+                }
+                write_json(&xp, &profile);
+                let launcher = run_refusal(
+                    Command::new(launcher_bin())
+                        .arg("--manifest")
+                        .arg(&manifest),
+                );
+                let standalone = run_refusal(&mut x_serve(&xp, &x_db));
+                let (a, b) = (
+                    String::from_utf8(launcher.stderr).unwrap(),
+                    String::from_utf8(standalone.stderr).unwrap(),
+                );
+                // launcher 把错误包装为 JSON；单启 X 原样输出。同一字段、同一静态错误。
+                let mut lines = a.lines();
+                let event: Value = serde_json::from_str(
+                    lines
+                        .next()
+                        .unwrap()
+                        .strip_prefix("production_session ")
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(event["event"], "refused", "{context}");
+                assert_eq!(event["error"].as_str(), Some(b.trim_end()), "{context}");
+                assert_eq!(lines.next(), Some(b.trim_end()), "{context}");
+                assert_eq!(lines.next(), None, "{context}");
+                assert!(
+                    b.starts_with(&format!("InvalidDomain：{section}.env 必须是 ")),
+                    "{context}"
+                );
+                assert!(b.contains("64 字节"), "{context}");
+                if let Some(name) = key
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                {
+                    assert!(!b.contains(name), "{context}");
+                }
+                assert_eq!(launcher.status.code(), Some(2), "{context}");
+                assert_eq!(standalone.status.code(), Some(2), "{context}");
+                assert!(
+                    launcher.stdout.is_empty() && standalone.stdout.is_empty(),
+                    "{context}"
+                );
+                for target in [
+                    s_db.clone(),
+                    space.path("e.db"),
+                    space.path("b.db"),
+                    x_db.clone(),
+                    space.path("x.db.writer.lock"),
+                    space.path("launcher-state"),
+                ] {
+                    assert!(!target.exists(), "{context}: {}", target.display());
+                }
+                assert_eq!(
+                    watched.read(&mut [0; 256]).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock,
+                    "{context}"
+                );
+            }
+            std::fs::read(&file).unwrap();
+            assert!(
+                watched.read(&mut [0; 256]).unwrap() > 0,
+                "观察器必须能侦测打开"
+            );
+        }
+    }
+}
+
+#[test]
+fn valid_x_credential_keys_keep_injection_and_startup() {
+    let base = "NC_X_VENUE_CREDENTIAL";
+    let longest = format!("{base}_{}", "A_9".repeat(14));
+    assert_eq!(longest.len(), 64);
+    for key in [base, "NC_X_VENUE_CREDENTIAL_9Mixed_case", &longest] {
+        let space = Space::new();
+        let (manifest, _) = simulation(&space, "experiment", true);
+        let xp = space.path("x-profile.json");
+        let mut profile: Value = serde_json::from_slice(&std::fs::read(&xp).unwrap()).unwrap();
+        profile["credential_scope"]["env"] = json!(key);
+        write_json(&xp, &profile);
+        let db = space.path("x.db");
+        let started = |db: &Path| {
+            meta(db, "SELECT value FROM x_meta WHERE key='writer_epoch'").as_deref() == Some("1")
+        };
+        let launcher_log = space.path("launcher.stderr");
+        let mut launcher = launcher_command(&manifest)
+            .env_remove(key)
+            .stderr(std::fs::File::create(&launcher_log).unwrap())
+            .spawn()
+            .unwrap();
+        let isolated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let kids = wait_domains(&mut launcher);
+            eventually("launcher 启动 X serving", || {
+                let stderr = std::fs::read_to_string(&launcher_log).unwrap();
+                assert!(launcher.try_wait().unwrap().is_none(), "{stderr}");
+                stderr.contains("x_execution_session serving")
+            });
+            assert!(started(&db));
+            let has_key = |pid| {
+                let name = format!("{key}=");
+                environ(pid)
+                    .split('\0')
+                    .any(|entry| entry.starts_with(&name))
+            };
+            assert!(!has_key(launcher.id()));
+            for (name, pid) in kids {
+                assert_eq!(has_key(pid), name == "x_execution_session", "{name}");
+            }
+        }));
+        let status = launcher
+            .try_wait()
+            .unwrap()
+            .unwrap_or_else(|| stop(&mut launcher));
+        let stderr = std::fs::read_to_string(&launcher_log).unwrap();
+        isolated.unwrap();
+        assert_eq!(status.code(), Some(0), "{stderr}");
+
+        let standalone = space.path("standalone.db");
+        let log = space.path("standalone.stderr");
+        let mut x = x_serve(&xp, &standalone)
+            .env(key, CREDENTIAL_VALUE)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap();
+        let serving = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eventually("单启 X serving", || {
+                let stderr = std::fs::read_to_string(&log).unwrap();
+                assert!(x.try_wait().unwrap().is_none(), "{stderr}");
+                stderr.contains("x_execution_session serving")
+            });
+            assert!(started(&standalone));
+        }));
+        if x.try_wait().unwrap().is_none() {
+            x.kill().unwrap();
+            x.wait().unwrap();
+        }
+        serving.unwrap();
+
+        // /2 的键验证可通过，运行版本仍须等 ADR 0062 实装，不得按 /1 启动。
+        profile["profile_revision"] = json!("x-execution-profile/2");
+        profile["credential_source"] = profile["credential_scope"].take();
+        profile["credential_scope"] = json!({"env":"LEGACY_FIELD_MUST_NOT_BE_READ"});
+        write_json(&xp, &profile);
+        for out in [
+            run_refusal(
+                Command::new(launcher_bin())
+                    .arg("--manifest")
+                    .arg(&manifest),
+            ),
+            run_refusal(&mut x_serve(&xp, &space.path("unreleased.db"))),
+        ] {
+            assert_eq!(out.status.code(), Some(2));
+            assert!(String::from_utf8(out.stderr)
+                .unwrap()
+                .contains("VersionUnsupported：尚未启用 x-execution-profile/2"));
+        }
+    }
 }

@@ -12,13 +12,13 @@
 //!   x_execution_session submit|cancel --db FILE      （恒 UnsupportedCapability）
 use newchan_rust::session_protocol::positive;
 use newchan_rust::session_transport::process_lock;
+use newchan_rust::x_execution_profile::{credential_injection, REVISION_V1};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-const PROFILE_REVISION: &str = "x-execution-profile/1";
 const MODES: [&str; 4] = ["simulation", "dry-run", "experiment", "production"];
 const SCHEMA: &str =
     "CREATE TABLE IF NOT EXISTS x_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);";
@@ -40,26 +40,13 @@ impl Profile {
             .map_err(|e| format!("InvalidDomain：读执行 profile 失败：{e}"))?;
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| format!("InvalidDomain：执行 profile JSON 解析失败：{e}"))?;
-        let revision = v["profile_revision"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if revision != PROFILE_REVISION {
-            return Err(format!(
-                "VersionUnsupported：执行 profile 版本 `{revision}` 不是 {PROFILE_REVISION}"
-            ));
-        }
+        let credential_env = credential_injection(&v)?.env.to_owned();
         let mode = v["mode"]
             .as_str()
             .filter(|m| MODES.contains(m))
             .ok_or(
                 "InvalidDomain：执行 profile mode 必须是 simulation|dry-run|experiment|production",
             )?
-            .to_string();
-        let credential_env = v["credential_scope"]["env"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or("InvalidDomain：执行 profile 缺 credential_scope.env")?
             .to_string();
         let opt = |key: &str| -> Result<Option<String>, String> {
             match &v[key] {
@@ -87,7 +74,7 @@ impl Profile {
         };
         Ok(Self {
             history_simulation,
-            revision,
+            revision: REVISION_V1.to_owned(),
             mode,
             endpoint: opt("endpoint")?,
             credential_env,
