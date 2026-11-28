@@ -171,28 +171,41 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          # #297：nautilus_trader 的 manylinux wheel 单体 182.5 MB，冷装占安装段大头。
-          #   pip 的 HTTP cache 兜住它 ⟹ 二次跑起该 wheel 不再走网络。
-          cache: pip
-          cache-dependency-path: pyproject.toml
+
+      - name: Cache uv
+        # #297：nautilus_trader 的 manylinux wheel 单体 182.5 MB，冷装占安装段大头。
+        #   uv cache 兜住所有 wheel 并在同盘硬链安装，二次跑起安装段从 ~52 s 降到数秒。
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py313-${{ hashFiles('pyproject.toml') }}
+          restore-keys: uv-${{ runner.os }}-py313-
+
+      - name: Cache newchan_rust wheel
+        id: newchan-rust-wheel-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/newchan-rust-wheel
+          key: newchan-rust-wheel-${{ runner.os }}-py313-dev1-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/pyproject.toml', 'rust/src/**') }}
 
       # #297：newchan_rust 是本仓 rust/ 的 PyO3 扩展（maturin backend，
       #   rust/Cargo.toml crate-type = ["cdylib","rlib"]）。默认 feature 的依赖树只有
-      #   28 个 crate（nautilus-* 全是 optional，仅 nautilus/backtest_bin feature 才拉），
-      #   本机 macOS arm64 实测冷编译（registry 已暖）11.7s、target 产物 92 MB。
-      #   ⟹ 缓存 registry + target 后二次跑接近零成本；CI ubuntu 2 核未实测，
-      #   照实预估首跑 1.5–3 min（含 crates.io 下载 + maturin wheel 拉取）。
+      #   28 个 crate（nautilus-* 全是 optional，仅 nautilus/backtest_bin feature 才拉）。
+      #   仅在 wheel 缓存未命中（rust/ 变动）时恢复 cargo 缓存并以 dev + debug=0 编 wheel。
       #   前提：GitHub 托管 ubuntu runner 镜像自带 Rust 工具链（cargo/rustc stable），
       #   本步不另装；若某天镜像去掉 Rust，这里需补 rust-toolchain 安装步。
       - name: Cache cargo (registry + newchan_rust target)
+        if: steps.newchan-rust-wheel-cache.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cache/newchan-rust-target
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-dev1-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-dev1-${{ runner.os }}-
+            cargo-${{ runner.os }}-
 
       - name: Install dependencies
         # #297 collection error 双真因（票体误并为一因，这里分列）：
@@ -207,32 +220,33 @@ jobs:
         #
         # 装法取舍（两案，取 A）：
         #   A. 预编 wheel（本步采用）——PyPI 已发 cp313 manylinux_2_35_x86_64 wheel
-        #      （1.229.0，182.5 MB；ubuntu-latest glibc ≥ 2.35 满足），一行 pip install
+        #      （1.229.0，182.5 MB；ubuntu-latest glibc ≥ 2.35 满足），一行安装
         #      即可，**完全绕开 nautilus 的 Rust 源码编译**。
         #   B. 源码编译（未采用）——sdist 9 MB，但要拉 nautilus 全 Rust workspace，
         #      CI 上分钟级到十分钟级，无收益。
         #   版本锁 1.229.0：对齐本机上游克隆 ~/Projects/NewChanlun/nautilus_trader 的版本，
         #   避免 CI 随 PyPI 最新版（现 1.230.0）漂移。requires-python <3.15,>=3.12 与本 job 的 3.13 相容。
-        #
-        # 本机实测耗时（macOS arm64 / Python 3.13.9 / pip cache 暖；CI ubuntu 2 核会更慢）：
-        #   pip install -e ".[test]"            1m16s
-        #   pip install nautilus_trader==1.229  17.7s（含 156 MB macOS wheel 下载）
-        #   pip install ./rust（maturin 冷编）   11.7s
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]" pytest-xdist
-          pip install "nautilus_trader==1.229.0"
-          CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" pip install ./rust
+          export UV_CACHE_DIR="$HOME/.cache/uv"
+          command -v uv >/dev/null 2>&1 || python -m pip install -q uv
+          uv pip install --system --python "$(command -v python)" -e ".[test]" pytest-xdist "nautilus_trader==1.229.0"
 
       - name: Build and install newchan_rust extension
-        run: pip install ./rust
+        run: |
+          export UV_CACHE_DIR="$HOME/.cache/uv"
+          if ! ls "$HOME/.cache/newchan-rust-wheel"/newchan_rust-*.whl >/dev/null 2>&1; then
+            rm -rf "$HOME/.cache/newchan-rust-wheel"
+            uv pip install --system --python "$(command -v python)" "maturin>=1.5,<2.0"
+            (cd rust && CARGO_TARGET_DIR="$HOME/.cache/newchan-rust-target" CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_OPT_LEVEL=1 maturin build --profile dev --compatibility linux --auditwheel skip --interpreter "$(command -v python)" --out "$HOME/.cache/newchan-rust-wheel")
+          fi
+          uv pip install --system --python "$(command -v python)" --no-deps "$HOME/.cache/newchan-rust-wheel"/newchan_rust-*.whl
 
       - name: Run tests with coverage
         # -rs 是 #324 的 090 要求：显式打印 skip 原因。
-        # #1875：-n 4 与托管 runner 4 核一致。Belay 同机：串行 100.7 s，-n 4 两轮 72.8 / 79.1 s，
-        #   通过数与失败集合逐项相同（4926 passed，3 个环境错误一致）。只改 .sandcastle 的 PR 与同 PR 复用命中的
-        #   run 不跑 Rust，CI 下限取决于本作业和 deepagents-pilot。pytest-cov 支持 xdist，覆盖率在各进程合并。
-        run: pytest -m "not slow" -n 4 --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
+        # #1875：-n 4 与托管 runner 4 核一致；--dist=worksteal 消除慢用例集中在单 worker 的长尾。
+        #   Boat 4 核实测 -n 4（73.88 s）→ -n 4 --dist=worksteal（38.24 s，1.93×），通过/跳过/失败集合逐项相同。
+        #   只改 .sandcastle 的 PR 与同 PR 复用命中的 run 不跑 Rust，CI 下限取决于本作业和 deepagents-pilot。
+        run: pytest -m "not slow" -n 4 --dist=worksteal --tb=short -q -rs --cov=newchan --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report
         if: ${{ !cancelled() }}
