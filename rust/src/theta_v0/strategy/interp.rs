@@ -515,6 +515,54 @@ impl TreeKey {
             TreeKey::emit(sub, fp);
         }
     }
+
+    fn matches_forest(&self, tower: &[Rc<Vec<LeveledMove>>]) -> bool {
+        let mut idx = 0usize;
+        for lvl in tower.iter().rev() {
+            for m in lvl.iter() {
+                if !TreeKey::matches_move(m, &self.0, &mut idx) {
+                    return false;
+                }
+            }
+        }
+        idx == self.0.len()
+    }
+
+    fn matches_move(
+        m: &LeveledMove,
+        fp: &[(u32, u32, u64, usize, usize, u8, i64, i64, usize)],
+        idx: &mut usize,
+    ) -> bool {
+        let Some(&expected) = fp.get(*idx) else {
+            return false;
+        };
+        let dir: u8 = match coverage::rmove_side(&m.rmove) {
+            VoiceSide::Long => 0,
+            VoiceSide::Short => 1,
+            VoiceSide::Flat => unreachable!("rmove_side 不产 Flat（#900 F4 收编点）"),
+        };
+        let actual = (
+            m.rmove.level(),
+            m.id.level,
+            m.id.ordinal,
+            m.start_index,
+            m.end_index,
+            dir,
+            m.rmove.lo(),
+            m.rmove.hi(),
+            m.sub_moves.len(),
+        );
+        if actual != expected {
+            return false;
+        }
+        *idx += 1;
+        for sub in m.sub_moves.iter() {
+            if !TreeKey::matches_move(sub, fp, idx) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// **工位 K 性能：tree-prefix（[`coverage::extract_elements`] 输出）缓存**。
@@ -610,11 +658,17 @@ fn tree_segment_cached_gen(
             // 命中判据：Some(e) 走 O(1) epoch 比较；None 走 of_forest 指纹（fallback，§5.4）。
             let hit = match forest_epoch {
                 Some(e) => c.valid && c.key_epoch == Some(e),
-                None => c.valid && c.key == TreeKey::of_forest(tower),
+                None => c.valid && c.key.matches_forest(tower),
             };
             if hit {
-                debug_assert_eq!(c.tree.as_ref(), &coverage::extract_carrier_forest(tower),
-                    "TreeCache 假命中——§16 不变量破裂或 forest_epoch 漏 bump（枚举不完备，on2w2 §3.1）");
+                #[cfg(debug_assertions)]
+                if forest_epoch.is_some() && !c.key.matches_forest(tower) {
+                    debug_assert_eq!(
+                        c.tree.as_ref(),
+                        &coverage::extract_carrier_forest(tower),
+                        "TreeCache 假命中——§16 不变量破裂或 forest_epoch 漏 bump（枚举不完备，on2w2 §3.1）"
+                    );
+                }
                 (
                     Rc::clone(&c.tree),
                     Rc::clone(&c.endpoint_idx),
