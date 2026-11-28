@@ -954,7 +954,7 @@ impl RawAdvanceFixture {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use crate::v3::business_json::{RawPrefixIndex, RawWinner};

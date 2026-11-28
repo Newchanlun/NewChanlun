@@ -16,7 +16,7 @@ struct RecordKey {
     digest: NodeDigest,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::super::super::audit_store::CodecRead;
     use super::super::HashReader;

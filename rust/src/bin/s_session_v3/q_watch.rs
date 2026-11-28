@@ -856,7 +856,7 @@ fn err(e: impl std::fmt::Display) -> String {
     format!("QWatchInvalid：{e}")
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::super::{
         capture::capture_configured, prepared::tests::Fixture, q_content, q_resources,

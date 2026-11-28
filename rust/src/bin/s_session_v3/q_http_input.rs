@@ -626,7 +626,7 @@ fn parse_content_length(text: &str) -> Result<u64, Failure> {
     Ok(value)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use serde_json::json;

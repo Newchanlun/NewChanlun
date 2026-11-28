@@ -3130,7 +3130,7 @@ pub(super) fn describe(conn: &Connection, root_key: &str) -> Result<Value, Strin
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod metadata_regressions {
     use super::*;
 

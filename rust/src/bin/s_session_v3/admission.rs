@@ -696,7 +696,7 @@ pub(super) fn read_startup_accounted(
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "../../../../s_session/tests/issue1527_recovery/provider_tests.rs"]
 mod tests;
 
@@ -711,7 +711,7 @@ fn mixed_failure(code: &'static str, phase: &'static str, detail: &str) -> Strin
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod mixed_writer_tests {
     use super::*;
     #[test]
@@ -820,7 +820,7 @@ mod mixed_writer_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod lock_release_tests {
     use super::Lock;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -1666,7 +1666,7 @@ fn check_fact_key_kind(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use crate::content_producer::{Cc004Producer, RawRefSpec};

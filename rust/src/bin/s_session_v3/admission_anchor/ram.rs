@@ -268,7 +268,7 @@ impl ScratchParent for OperationParent {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     fn limits(extra: usize) -> NativeRamLimits {

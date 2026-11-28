@@ -7444,7 +7444,11 @@ pub(super) mod construction_tests {
 }
 
 // #1488 仅测试私有构造点；NOT_RUN，本机禁止 cargo/rustc。
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    not(feature = "s_lock_subset_testonly")
+))]
 mod raw_native_move_ownership_tests {
     use super::*;
 
@@ -7871,7 +7875,11 @@ thread_local! {
     pub(super) static PUBLICATION_LEDGER_AFTER_BUDGET: Cell<bool> = const { Cell::new(false) };
 }
 
-#[cfg(all(test, feature = "s_incremental"))]
+#[cfg(all(
+    test,
+    feature = "s_incremental",
+    not(feature = "s_lock_subset_testonly")
+))]
 mod publication_degrade_verdict_tests {
     use super::*;
     use newchan_rust::s_content::capture_allocation::scratch::{ScratchFailure, WorkScope};
@@ -8099,7 +8107,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod p6_ledger_tests {
     use super::super::audit_ledger;
     use super::*;

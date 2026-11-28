@@ -228,7 +228,7 @@ fn codec_string(error: sc::CodecError) -> String {
     error.to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use newchan_rust::s_content::job::{Existing, JobLimits};

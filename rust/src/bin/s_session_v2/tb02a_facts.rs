@@ -1319,7 +1319,7 @@ pub(super) fn catalog_axes_admitted<'a, 'objects, 'changes>(
     fields(store, &root_fields)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod units_cache_tests {
     use super::*;
 
@@ -1560,7 +1560,7 @@ fn catalog_axes_oracle<'a, 'objects, 'changes>(
     Value::Object(axes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod catalog_axis_owner_tests {
     use super::*;
     #[cfg_attr(

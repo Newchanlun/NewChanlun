@@ -401,7 +401,7 @@ impl From<Vec<u8>> for NativeArc<[u8]> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     use newchan_rust::s_content::capture_allocation::{

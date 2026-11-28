@@ -485,7 +485,7 @@ fn err(e: impl std::fmt::Display) -> String {
     format!("QContentInvalid：{e}")
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::super::{
         capture::{capture_configured, ConfiguredCapture},

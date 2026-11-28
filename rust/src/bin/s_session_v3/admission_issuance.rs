@@ -540,6 +540,6 @@ fn revoke(site: &Site, id: &str) -> Result<Value> {
     Ok(json!({"ok":true,"revocation_id":id,"archive":site.state_path.join(archive_name)}))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 #[path = "../../../../s_session/tests/issue1657_admission.rs"]
 mod tests;

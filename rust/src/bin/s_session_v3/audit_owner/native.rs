@@ -20,7 +20,7 @@ pub(crate) enum Failure {
     Invalid(String),
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod r6_codec_work_tests {
     use super::*;
     use newchan_rust::s_content::{self as sc, capture_allocation::scratch::WorkError};
@@ -1782,7 +1782,7 @@ pub(crate) fn tree_growth<K, V>(len: usize) -> usize {
 
 pub(crate) use crate::v3::business_json::json_layout::JsonShape;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     use super::*;
     #[test]
@@ -1858,7 +1858,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod r8_native_admission_tests {
     use super::*;
     use crate::v3::{audit_store::CodecRead, history::HashReader};
@@ -2034,7 +2034,7 @@ mod r8_native_admission_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 // NOT_RUN：本轮禁止编译及执行Rust测试；以下均为待运行回归锁。
 mod cross_request_budget_tests {
     use super::*;
@@ -2273,7 +2273,7 @@ mod cross_request_budget_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 // #1488 v2反例锁。NOT_RUN：本轮未获准编译或执行Rust。
 mod lifecycle_repair_v2_tests {
     use super::*;
@@ -2502,7 +2502,7 @@ mod lifecycle_repair_v2_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 // #1488 v4 统一所有权反例锁（B/D/E的账本层与MoveIn/grant）。
 mod unified_ownership_v4_tests {
     use super::*;
@@ -2632,7 +2632,7 @@ mod unified_ownership_v4_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 // #1488 U2：五处追认点退出生产路径的正/负锁。负锁统一用“遗留 moved_in 足以追认、真实余额不足”的父：
 // 若仍走 adopt 会成功；新路径必须拒绝且不改容器与账。
 mod u2_exit_adopt_tests {

@@ -2178,7 +2178,7 @@ fn coord_array(
 // 测试面：真实 parser 事实 + 冻结 oracle（旧 `tb02b::build` **只在这里**当判据）。
 // ────────────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "s_lock_subset_testonly")))]
 mod tests {
     #[test]
     fn radix_ledger_borrowed_rows_match_plain_and_views_with_closed_ranges() {
