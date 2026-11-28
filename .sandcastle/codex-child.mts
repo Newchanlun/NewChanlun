@@ -3,6 +3,9 @@ import { parseArgs } from "node:util";
 import { writeSync } from "node:fs";
 import { ALLOWED_MODELS, runCodexChild, SupervisionError, outputProtocol, type ChildMode, type ChildModel } from "./codex-child.ts";
 
+const parseOptionalSeconds = (raw: string | undefined): number | undefined =>
+  raw === undefined ? undefined : raw.trim() === "" ? Number.NaN : Number(raw);
+
 const { values } = parseArgs({
   options: {
     ticket: { type: "string" },
@@ -15,8 +18,8 @@ const { values } = parseArgs({
     "output-protocol": { type: "string" },
     "prompt-file": { type: "string" },
     "output-dir": { type: "string" },
-    "idle-timeout-seconds": { type: "string", default: "600" },
-    "timeout-seconds": { type: "string", default: "3600" },
+    "idle-timeout-seconds": { type: "string" },
+    "timeout-seconds": { type: "string" },
     help: { type: "boolean", short: "h" },
   },
   strict: true,
@@ -44,8 +47,8 @@ if (values.help) {
       outputProtocol: values["output-protocol"] === undefined ? undefined : outputProtocol(values["output-protocol"]),
       promptFile: values["prompt-file"] ?? "",
       outputDir: values["output-dir"] ?? "",
-      idleTimeoutSeconds: Number(values["idle-timeout-seconds"]),
-      timeoutSeconds: Number(values["timeout-seconds"]),
+      idleTimeoutSeconds: parseOptionalSeconds(values["idle-timeout-seconds"]),
+      timeoutSeconds: parseOptionalSeconds(values["timeout-seconds"]),
     }, {
       signal: controller.signal,
       // 少量状态行直接写 fd；EPIPE 同步回到监督器，不能变成未处理的 error 事件。

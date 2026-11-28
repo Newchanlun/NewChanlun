@@ -678,6 +678,99 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
+const cliTimeoutEnv = {
+  idle: "SANDCASTLE_CHILD_IDLE_SECONDS",
+  total: "SANDCASTLE_CHILD_TIMEOUT_SECONDS",
+};
+
+for (const { name, idle, total, source, expires } of [
+  { name: "仅配置记录", idle: 8, total: 1, source: "record", expires: "总运行" },
+  { name: "环境变量覆盖记录", idle: 9, total: 1, source: "env", expires: "总运行" },
+  { name: "显式传参覆盖环境", idle: 10, total: 0.25, source: "explicit", expires: "总运行" },
+  { name: "未传参也能触发空闲期限", idle: 1, total: 8, source: "record", expires: "输出空闲" },
+  { name: "复现 71/321 秒", idle: 71, total: 321, source: "env", expires: null },
+] as const) {
+  test(`CLI 超时遵循来源优先级：${name}（#1606）`, () => {
+    const f = fixture();
+    try {
+      const configFile = join(f.dir, "scheduler.json");
+      const config = JSON.parse(readFileSync(join(__dirname, "scheduler-config.json"), "utf8"));
+      config.values.childIdleSeconds = source === "record" ? idle : 83;
+      config.values.childTimeoutSeconds = source === "record" ? total : 387;
+      writeFileSync(configFile, JSON.stringify(config));
+
+      const env: NodeJS.ProcessEnv = { ...f.env, SANDCASTLE_CONFIG_FILE: configFile };
+      delete env[cliTimeoutEnv.idle];
+      delete env[cliTimeoutEnv.total];
+      if (source !== "record") {
+        env[cliTimeoutEnv.idle] = String(source === "env" ? idle : 71);
+        env[cliTimeoutEnv.total] = String(source === "env" ? total : 321);
+      }
+      const overrides = source === "explicit"
+        ? ["--idle-timeout-seconds", String(idle), "--timeout-seconds", String(total)]
+        : [];
+
+      // 在真实 CLI 子进程观察监督器交给 Node 的毫秒数；不改计时器或回调。
+      const timerLog = join(f.dir, "timers.json");
+      const preload = join(f.dir, "observe-timers.mjs");
+      writeFileSync(preload, `
+        import { writeFileSync } from "node:fs";
+        const delays = [];
+        globalThis.setTimeout = new Proxy(setTimeout, {
+          apply(target, receiver, args) {
+            const caller = new Error().stack.split("\\n")[2];
+            if (delays.length < 2 && caller?.includes(${JSON.stringify(join(__dirname, "codex-child.ts") + ":")})) {
+              delays.push(args[1]);
+              if (delays.length === 2) {
+                writeFileSync(${JSON.stringify(timerLog)}, JSON.stringify(delays.sort((a, b) => a - b)));
+              }
+            }
+            return Reflect.apply(target, receiver, args);
+          },
+        });
+      `);
+      const expectedMs = [idle * 1000, total * 1000].sort((a, b) => a - b);
+      // stdin 在两个计时器注册后才关闭。只在注册值正确时等待实际到期，
+      // 变异时工蜂直接退出，由测试进程报告具体的数值差异。
+      f.fake(expires ? `
+        const timers = ${JSON.stringify(timerLog)};
+        if (fs.existsSync(timers) && fs.readFileSync(timers, "utf8") === ${JSON.stringify(JSON.stringify(expectedMs))}) {
+          setInterval(() => {}, 1000);
+        }
+      ` : "session(); complete();");
+      const run = spawnSync(process.execPath, [
+        "--import", "tsx", "--import", preload, join(__dirname, "codex-child.mts"),
+        "--ticket", "1606", "--parent-thread-id", f.options.parentThreadId,
+        "--manager-agent-id", f.options.managerAgentId, "--checkout", f.options.checkout,
+        "--expected-head", f.options.expectedHead, "--prompt-file", f.options.promptFile,
+        "--output-dir", f.options.outputDir, ...overrides,
+      ], { env, encoding: "utf8", timeout: 30000 });
+      assert.ifError(run.error);
+
+      const registered = existsSync(timerLog) ? JSON.parse(readFileSync(timerLog, "utf8")) : [];
+      assert.deepEqual(registered, expectedMs, "监督器实际注册的空闲/总超时（毫秒）");
+      const idleSource = source === "record" ? "record:1" : source === "env"
+        ? `env:${cliTimeoutEnv.idle}` : "explicit:idleTimeoutSeconds";
+      const totalSource = source === "record" ? "record:1" : source === "env"
+        ? `env:${cliTimeoutEnv.total}` : "explicit:timeoutSeconds";
+      assert.ok(run.stderr.includes(`codex-child.childIdleSeconds=${idle} source=${idleSource}`), run.stderr);
+      assert.ok(run.stderr.includes(`codex-child.childTimeoutSeconds=${total} source=${totalSource}`), run.stderr);
+      if (source !== "explicit") assert.doesNotMatch(run.stderr, /source=explicit:/);
+
+      const result = JSON.parse(readFileSync(join(f.options.outputDir, "result.json"), "utf8"));
+      if (expires) {
+        assert.equal(run.status, 1);
+        assert.equal(result.status, "failed");
+        assert.match(result.failure_reason, new RegExp(`工蜂${expires}超时`));
+        assertStoppedAndUnlocked(result, f.options);
+      } else {
+        assert.equal(run.status, 0, result.failure_reason);
+        assert.equal(result.status, "completed");
+      }
+    } finally { f.clean(); }
+  });
+}
+
 test("git 环境只留白名单：不含 CLIProxy 密钥、API/GitHub 密钥与宿主 GIT_*（#1588 A1）", () => {
   const env = gitEnvironment({
     PATH: "/bin", HOME: "/home/u", LANG: "C.UTF-8", [PROVIDER_KEY_ENV]: fixtureKey, GH_TOKEN: "fixture",
