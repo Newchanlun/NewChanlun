@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..4c2f612 100644
+index e69de29..a46c2be 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,381 @@
 +package middleware
 +
 +import (
@@ -67,6 +67,47 @@ index e69de29..4c2f612 100644
 +		return true
 +	}
 +	return false
++}
++
++// NewDisallowedPreflightOrReviewRejecter returns a handler function that rejects
++// authenticated disallowed-entry requests carrying review or preflight headers
++// before Gin routing/redirects run, tainting any attributable review launch.
++// It returns true when it has written the response and the caller must stop.
++func NewDisallowedPreflightOrReviewRejecter() func(w http.ResponseWriter, r *http.Request) bool {
++	root := os.Getenv("CLIPROXY_PREFLIGHT_RECEIPTS")
++	return func(w http.ResponseWriter, r *http.Request) bool {
++		if w == nil || r == nil || !HasPreflightOrReviewHeader(r.Header) {
++			return false
++		}
++		hasReviewHeader := hasAnyHeaderValue(r.Header, preflightreceipt.ReviewHeader)
++		if root == "" {
++			if hasReviewHeader {
++				rc := http.NewResponseController(w)
++				_ = rc.SetReadDeadline(time.Now())
++				_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
++				w.Header().Set("Connection", "close")
++				w.WriteHeader(http.StatusServiceUnavailable)
++				return true
++			}
++			return false
++		}
++		if hasReviewHeader {
++			launch, _, launchAmbiguous := singleHeaderValue(r.Header, preflightreceipt.ReviewHeader)
++			if launchAmbiguous || !preflightreceipt.ValidReviewLaunch(launch) {
++				if attrLaunch, ok := uniqueValidReviewLaunch(r.Header); ok {
++					preflightreceipt.TaintExistingReview(root, attrLaunch)
++				}
++			} else {
++				preflightreceipt.TaintExistingReview(root, launch)
++			}
++		}
++		rc := http.NewResponseController(w)
++		_ = rc.SetReadDeadline(time.Now())
++		_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
++		w.Header().Set("Connection", "close")
++		w.WriteHeader(http.StatusBadRequest)
++		return true
++	}
 +}
 +
 +func uniqueValidReviewLaunch(h http.Header) (string, bool) {
@@ -1760,10 +1801,10 @@ index 0000000..9cdebe2
 +	}
 +}
 diff --git a/internal/api/preflight_receipt_test.go b/internal/api/preflight_receipt_test.go
-index e69de29..1c6fe9c 100644
+index e69de29..394c777 100644
 --- a/internal/api/preflight_receipt_test.go
 +++ b/internal/api/preflight_receipt_test.go
-@@ -0,0 +1,1624 @@
+@@ -0,0 +1,1673 @@
 +//go:build preflight_test_roots
 +
 +package api
@@ -3385,11 +3426,60 @@ index e69de29..1c6fe9c 100644
 +			if code, body := sealLaunch(srv, lRT, sRT); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
 +				t.Fatalf("seal after authenticated POST /v1/realtime/sessions = (%d, %s), want (409, rejected)", code, body)
 +			}
++
++			// 5. Astra P1 #1 (PR #2280 R90): real HTTP server (srv.Handler()) MUST intercept trailing-slash
++			//    POST /v1/responses/ BEFORE Gin's RedirectTrailingSlash 307 redirect, even when the client
++			//    does not follow redirects; unauthenticated POST /v1/responses/ MUST NOT taint the launch.
++			ts := httptest.NewServer(srv.Handler())
++			defer ts.Close()
++			noRedirectClient := &http.Client{
++				CheckRedirect: func(*http.Request, []*http.Request) error {
++					return http.ErrUseLastResponse
++				},
++			}
++			lSlashUnauth := "review-e4010101-2222-4333-8444-5555555550" + suffix + "5"
++			sSlashUnauth := "019d0000-0000-7000-8000-e401010100" + suffix + "5"
++			runCleanTurn(srv, lSlashUnauth, sSlashUnauth)
++			reqSlashUnauth, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/responses/", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			reqSlashUnauth.Header.Set("Session-Id", sSlashUnauth)
++			reqSlashUnauth.Header.Set(preflightreceipt.ReviewHeader, lSlashUnauth)
++			respSlashUnauth, err := noRedirectClient.Do(reqSlashUnauth)
++			if err != nil {
++				t.Fatalf("unauthenticated POST /v1/responses/: %v", err)
++			}
++			_, _ = io.ReadAll(respSlashUnauth.Body)
++			_ = respSlashUnauth.Body.Close()
++			if respSlashUnauth.StatusCode != http.StatusTemporaryRedirect {
++				t.Fatalf("unauthenticated POST /v1/responses/ status = %d, want 307", respSlashUnauth.StatusCode)
++			}
++			if code, body := sealLaunch(srv, lSlashUnauth, sSlashUnauth); code != http.StatusOK {
++				t.Fatalf("unauthenticated POST /v1/responses/ tainted launch: seal = (%d, %s), want 200", code, body)
++			}
++
++			lSlashAuth := "review-e4010101-2222-4333-8444-5555555550" + suffix + "6"
++			sSlashAuth := "019d0000-0000-7000-8000-e401010100" + suffix + "6"
++			runCleanTurn(srv, lSlashAuth, sSlashAuth)
++			reqSlashAuth, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/responses/", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++			reqSlashAuth.Header.Set("Authorization", "Bearer test-key")
++			reqSlashAuth.Header.Set("Session-Id", sSlashAuth)
++			reqSlashAuth.Header.Set(preflightreceipt.ReviewHeader, lSlashAuth)
++			respSlashAuth, err := noRedirectClient.Do(reqSlashAuth)
++			if err != nil {
++				t.Fatalf("authenticated POST /v1/responses/: %v", err)
++			}
++			_, _ = io.ReadAll(respSlashAuth.Body)
++			_ = respSlashAuth.Body.Close()
++			if respSlashAuth.StatusCode != http.StatusBadRequest {
++				t.Fatalf("authenticated POST /v1/responses/ status = %d, want 400 (must beat Gin 307 redirect)", respSlashAuth.StatusCode)
++			}
++			if code, body := sealLaunch(srv, lSlashAuth, sSlashAuth); code != http.StatusConflict || !strings.Contains(body, `"rejected"`) {
++				t.Fatalf("seal after authenticated POST /v1/responses/ = (%d, %s), want (409, rejected)", code, body)
++			}
 +		})
 +	}
 +}
 diff --git a/internal/api/server.go b/internal/api/server.go
-index 099b5dd..aae9bfc 100644
+index 099b5dd..d10efc0 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
 @@ -198,6 +198,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
@@ -3400,11 +3490,20 @@ index 099b5dd..aae9bfc 100644
  	engine.Use(corsMiddleware())
  	engine.Use(s.responseCompressionMiddleware())
  	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
+@@ -268,7 +269,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 	// Create HTTP server
+ 	s.server = &http.Server{
+ 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+-		Handler:           wrapUnconsumedRequestBodyHandler(engine),
++		Handler:           wrapUnconsumedRequestBodyHandler(s.wrapPreflightDisallowedHTTPHandler(engine)),
+ 		ReadHeaderTimeout: muxSniffDeadline,
+ 	}
+ 
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
-index 9450038..b81e87f 100644
+index 9450038..c088078 100644
 --- a/internal/api/server_middleware.go
 +++ b/internal/api/server_middleware.go
-@@ -485,6 +485,27 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+@@ -485,6 +485,50 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
  	return accessAuthMiddleware(manager, false)
  }
  
@@ -3427,6 +3526,29 @@ index 9450038..b81e87f 100644
 +		}
 +		guard(c)
 +	}
++}
++
++func (s *Server) wrapPreflightDisallowedHTTPHandler(next http.Handler) http.Handler {
++	if next == nil {
++		return nil
++	}
++	reject := middleware.NewDisallowedPreflightOrReviewRejecter()
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r == nil || !middleware.HasPreflightOrReviewHeader(r.Header) || middleware.IsAllowedPreflightOrReviewEntry(r) {
++			next.ServeHTTP(w, r)
++			return
++		}
++		if s != nil && s.accessManager != nil {
++			if _, authErr := s.accessManager.Authenticate(r.Context(), r); authErr != nil {
++				next.ServeHTTP(w, r)
++				return
++			}
++		}
++		if reject(w, r) {
++			return
++		}
++		next.ServeHTTP(w, r)
++	})
 +}
 +
  func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
@@ -8277,10 +8399,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..b189f1b 100644
+index e69de29..986797a 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,13963 @@
+@@ -0,0 +1,14117 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -11134,6 +11256,73 @@ index e69de29..b189f1b 100644
 +	return toolPayloadField{sha: "json:" + canon}, true
 +}
 +
++func isValidWebSearchHTTPURL(raw string) bool {
++	if raw == "" || strings.TrimSpace(raw) != raw || len(raw) > 8192 {
++		return false
++	}
++	u, err := url.Parse(raw)
++	if err != nil {
++		return false
++	}
++	scheme := strings.ToLower(u.Scheme)
++	return (scheme == "http" || scheme == "https") && u.Host != ""
++}
++
++func isValidWebSearchAction(rawAction json.RawMessage) bool {
++	if !hasResponseError(rawAction) {
++		return false
++	}
++	actionFields, err := decodeExactJSONObject(rawAction, nil)
++	if err != nil {
++		return false
++	}
++	actionType, hasAT, okAT := exactOptionalStringPresent(actionFields, "type")
++	if !hasAT || !okAT || actionType == "" || strings.TrimSpace(actionType) != actionType || len(actionType) > maxStrictIdentityBytes {
++		return false
++	}
++	switch actionType {
++	case "search":
++		hasValidQuery := false
++		if rawQ, exists := actionFields["query"]; exists && hasResponseError(rawQ) {
++			qStr, hasQ, okQ := exactOptionalStringPresent(actionFields, "query")
++			if !okQ || !hasQ || strings.TrimSpace(qStr) == "" {
++				return false
++			}
++			hasValidQuery = true
++		}
++		hasValidQueries := false
++		if rawQs, exists := actionFields["queries"]; exists && hasResponseError(rawQs) {
++			qCount := 0
++			okQs := forEachJSONArrayElement(trimJSONSpace(rawQs), maxTrackedContentParts, func(elem json.RawMessage) bool {
++				trimmed := trimJSONSpace(elem)
++				if len(trimmed) == 0 || trimmed[0] != '"' {
++					return false
++				}
++				var q string
++				if json.Unmarshal(trimmed, &q) != nil || strings.TrimSpace(q) == "" {
++					return false
++				}
++				qCount++
++				return true
++			})
++			if !okQs || qCount == 0 {
++				return false
++			}
++			hasValidQueries = true
++		}
++		return hasValidQuery || hasValidQueries
++	case "open_page":
++		u, hasU, okU := exactOptionalStringPresent(actionFields, "url")
++		return okU && hasU && isValidWebSearchHTTPURL(u)
++	case "find", "find_in_page":
++		u, hasU, okU := exactOptionalStringPresent(actionFields, "url")
++		pat, hasP, okP := exactOptionalStringPresent(actionFields, "pattern")
++		return okU && hasU && isValidWebSearchHTTPURL(u) && okP && hasP && strings.TrimSpace(pat) != ""
++	default:
++		return false
++	}
++}
++
 +func extractItemToolFields(fields map[string]json.RawMessage) (meta toolItemMeta, args, input, code toolPayloadField, ok bool) {
 +	callID, ok1 := exactOptionalString(fields, "call_id")
 +	name, ok2 := exactOptionalString(fields, "name")
@@ -11155,13 +11344,8 @@ index e69de29..b189f1b 100644
 +		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
 +	hasValidAction := false
-+	if rawAction, exists := fields["action"]; exists && hasResponseError(rawAction) {
-+		if actionFields, aerr := decodeExactJSONObject(rawAction, nil); aerr == nil {
-+			actionType, hasAT, okAT := exactOptionalStringPresent(actionFields, "type")
-+			if hasAT && okAT && actionType != "" && strings.TrimSpace(actionType) == actionType && len(actionType) <= maxStrictIdentityBytes {
-+				hasValidAction = true
-+			}
-+		}
++	if rawAction, exists := fields["action"]; exists {
++		hasValidAction = isValidWebSearchAction(rawAction)
 +	}
 +	hasValidQueries := false
 +	if rawQueries, exists := fields["queries"]; exists && hasResponseError(rawQueries) {
@@ -16206,7 +16390,11 @@ index e69de29..b189f1b 100644
 +		}
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
-+		releaseReview(entry)
++		if hasDeadline {
++			releaseReviewWithSlotNonBlocking(entry, false)
++		} else {
++			releaseReview(entry)
++		}
 +		return nil, ErrUnavailable
 +	}
 +	if pendingTainted || entry.tainted || entry.pendingTaint.Load() {
@@ -16249,7 +16437,14 @@ index e69de29..b189f1b 100644
 +			var stateMu sync.Mutex
 +			callerLeft := false
 +			go func() {
-+				defer func() { <-initialPersistSem }()
++				semReleased := false
++				releaseSem := func() {
++					if !semReleased {
++						semReleased = true
++						<-initialPersistSem
++					}
++				}
++				defer releaseSem()
 +				var persistErr error
 +				if lockErr := acquirePrivateRootLock(root); lockErr != nil || entry.persistLocked() != nil {
 +					persistErr = ErrUnavailable
@@ -16260,6 +16455,7 @@ index e69de29..b189f1b 100644
 +				stateMu.Lock()
 +				left := callerLeft
 +				if !left {
++					releaseSem()
 +					doneCh <- initPersistRes{started: startedVal, err: persistErr}
 +				}
 +				stateMu.Unlock()
@@ -16632,22 +16828,32 @@ index e69de29..b189f1b 100644
 +			entry *reviewEntry
 +			err   error
 +		}
-+		doneCh := make(chan loadRes)
++		doneCh := make(chan loadRes, 1)
++		var stateMu sync.Mutex
++		callerLeft := false
 +		cleanupAbandonedLoaded := func(ent *reviewEntry) {
 +			if ent == nil {
 +				return
 +			}
-+			ent.mu.Lock()
-+			isUnpersistedEmpty := !ent.markerPersisted && !ent.tainted && !ent.sealed && ent.requests == 0
-+			ent.mu.Unlock()
-+			if isUnpersistedEmpty {
-+				rollbackUnpersistedEntryNonBlocking(key, ent)
-+			} else {
-+				failAndReleaseReservationEntryNonBlocking(ent, turnSeq, false, 0, false)
++			if ent.mu.TryLock() {
++				isUnpersistedEmpty := !ent.markerPersisted && !ent.tainted && !ent.sealed && ent.requests == 0
++				ent.mu.Unlock()
++				if isUnpersistedEmpty {
++					rollbackUnpersistedEntryNonBlocking(key, ent)
++					return
++				}
 +			}
++			failAndReleaseReservationEntryNonBlocking(ent, turnSeq, false, 0, false)
 +		}
 +		go func() {
-+			defer func() { <-initialPersistSem }()
++			semReleased := false
++			releaseSem := func() {
++				if !semReleased {
++					semReleased = true
++					<-initialPersistSem
++				}
++			}
++			defer releaseSem()
 +			var ent *reviewEntry
 +			var lerr error
 +			if lockErr := acquirePrivateRootLock(root); lockErr != nil {
@@ -16655,18 +16861,32 @@ index e69de29..b189f1b 100644
 +			} else {
 +				ent, lerr = getOrCreateReviewEntryContext(context.Background(), root, launch, "", time.Now(), true, true)
 +			}
-+			select {
-+			case doneCh <- loadRes{entry: ent, err: lerr}:
-+			case <-ctx.Done():
-+				if ent != nil {
-+					cleanupAbandonedLoaded(ent)
-+				}
++			stateMu.Lock()
++			left := callerLeft
++			if !left {
++				releaseSem()
++				doneCh <- loadRes{entry: ent, err: lerr}
++			}
++			stateMu.Unlock()
++			if left && ent != nil {
++				cleanupAbandonedLoaded(ent)
 +			}
 +		}()
 +		select {
 +		case r := <-doneCh:
 +			entry, err = r.entry, r.err
 +		case <-ctx.Done():
++			stateMu.Lock()
++			select {
++			case r := <-doneCh:
++				stateMu.Unlock()
++				if r.entry != nil {
++					cleanupAbandonedLoaded(r.entry)
++				}
++			default:
++				callerLeft = true
++				stateMu.Unlock()
++			}
 +			return nil, ErrUnavailable
 +		}
 +	} else {
@@ -18034,12 +18254,20 @@ index e69de29..b189f1b 100644
 +		}
 +		entry.taintAndPersistLocked()
 +		entry.mu.Unlock()
-+		releaseReviewWithSlot(entry, holdsSlot)
++		if hasDeadline {
++			releaseReviewWithSlotNonBlocking(entry, holdsSlot)
++		} else {
++			releaseReviewWithSlot(entry, holdsSlot)
++		}
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if entry.sealed {
 +		entry.mu.Unlock()
-+		releaseReviewWithSlot(entry, holdsSlot)
++		if hasDeadline {
++			releaseReviewWithSlotNonBlocking(entry, holdsSlot)
++		} else {
++			releaseReviewWithSlot(entry, holdsSlot)
++		}
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if entry.tainted || entry.pendingTaint.Load() {
@@ -18460,7 +18688,7 @@ index e69de29..b189f1b 100644
 +const maxStagingCreateRetries = 8
 +
 +var (
-+	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker|pending-key)-[0-9]+-[0-9]+-[0-9a-f]{16}$`)
++	stagingFilePattern  = regexp.MustCompile(`^(?:pending|pending-marker|pending-key)-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
 +	stagingDirPattern   = regexp.MustCompile(`^stage-dir-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
 +	stageSealDirPattern = regexp.MustCompile(`^stage-seal-[0-9]+-[0-9]+-[0-9a-f]{16}(?:-[0-9a-f]{32})?$`)
 +	reclaimDirPattern   = regexp.MustCompile(`^reclaim-[0-9]+-[0-9]+-[0-9a-f]{16,32}(?:-[0-9a-f]{32})?$`)
@@ -18489,14 +18717,14 @@ index e69de29..b189f1b 100644
 +	return keyBytes, true
 +}
 +
-+func signStagingDirName(key []byte, base string) string {
++func signStagingEntryName(key []byte, domain, base string) string {
 +	mac := hmac.New(sha256.New, key)
-+	_, _ = mac.Write([]byte("cliproxy-staging-dir-v1\x00"))
++	_, _ = mac.Write([]byte(domain))
 +	_, _ = mac.Write([]byte(base))
 +	return base + "-" + hex.EncodeToString(mac.Sum(nil)[:16])
 +}
 +
-+func verifyStagingDirName(key []byte, prefix, name string) bool {
++func verifyStagingEntryName(key []byte, domain, prefix, name string) bool {
 +	if len(key) != 32 || !strings.HasPrefix(name, prefix+"-") || len(name) <= len(prefix)+1+33 {
 +		return false
 +	}
@@ -18517,9 +18745,31 @@ index e69de29..b189f1b 100644
 +		return false
 +	}
 +	mac := hmac.New(sha256.New, key)
-+	_, _ = mac.Write([]byte("cliproxy-staging-dir-v1\x00"))
++	_, _ = mac.Write([]byte(domain))
 +	_, _ = mac.Write([]byte(base))
 +	return hmac.Equal(gotTag, mac.Sum(nil)[:16])
++}
++
++func signStagingDirName(key []byte, base string) string {
++	return signStagingEntryName(key, "cliproxy-staging-dir-v1\x00", base)
++}
++
++func verifyStagingDirName(key []byte, prefix, name string) bool {
++	return verifyStagingEntryName(key, "cliproxy-staging-dir-v1\x00", prefix, name)
++}
++
++func signStagingFileName(key []byte, base string) string {
++	return signStagingEntryName(key, "cliproxy-staging-file-v1\x00", base)
++}
++
++func verifyStagingFileName(key []byte, name string) bool {
++	if strings.HasPrefix(name, "pending-marker-") {
++		return verifyStagingEntryName(key, "cliproxy-staging-file-v1\x00", "pending-marker", name)
++	}
++	if strings.HasPrefix(name, "pending-") && !strings.HasPrefix(name, "pending-key-") {
++		return verifyStagingEntryName(key, "cliproxy-staging-file-v1\x00", "pending", name)
++	}
++	return false
 +}
 +
 +func ensureStagingKeyLocked(rootHandle, stagingRoot *os.Root, root string) error {
@@ -18696,12 +18946,24 @@ index e69de29..b189f1b 100644
 +}
 +
 +func createStagingFile(rootHandle, stagingRoot *os.Root, root, prefix string) (string, *os.File, func(), error) {
++	var stagingKey []byte
++	if prefix != "pending-key" {
++		var okKey bool
++		stagingKey, okKey = readStagingKey(rootHandle)
++		if !okKey {
++			return "", nil, nil, ErrUnavailable
++		}
++	}
 +	return createStagingFileWithGen(rootHandle, stagingRoot, root, func() (string, error) {
 +		tok, err := randomStagingToken()
 +		if err != nil {
 +			return "", err
 +		}
-+		return fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok), nil
++		base := fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok)
++		if len(stagingKey) == 32 {
++			return signStagingFileName(stagingKey, base), nil
++		}
++		return base, nil
 +	})
 +}
 +
@@ -19459,18 +19721,24 @@ index e69de29..b189f1b 100644
 +			if !forceAllInactive && now.Sub(fi.ModTime()) < stagingOrphanAge {
 +				continue
 +			}
-+			ch, ok := verifyStagingRegularFile(stagingRoot, name)
-+			if !ok {
-+				continue
-+			}
 +			maxB := int64(maxReviewReceiptBytes)
 +			if strings.HasPrefix(name, "pending-marker-") {
 +				maxB = 4096
 +			} else if strings.HasPrefix(name, "pending-key-") {
 +				maxB = 1024
 +			}
-+			if removeVerifiedFileInSubdir(stagingRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, maxB) {
-+				removed++
++			ch, ok := verifyStagingRegularFile(stagingRoot, name)
++			if ok {
++				if removeVerifiedFileInSubdir(stagingRoot, ch.name, ch.dev, ch.ino, ch.hasID, ch.sha256, maxB) {
++					removed++
++				}
++				continue
++			}
++			if hasStagingKey && verifyStagingFileName(stagingKey, name) {
++				raw, fDev, fIno, fHasID, okP := readPrivateRegularFileInSubdirAllowEmpty(stagingRoot, name, maxB)
++				if okP && isTruncatedJSONObjectPrefix(raw) && removeVerifiedFileInSubdirMode(stagingRoot, name, fDev, fIno, fHasID, sha256Hex(string(raw)), maxB, true) {
++					removed++
++				}
 +			}
 +			continue
 +		}
@@ -20684,7 +20952,14 @@ index e69de29..b189f1b 100644
 +				doneCh := make(chan error, 1)
 +				entryLocked = false
 +				go func() {
-+					defer func() { <-initialPersistSem }()
++					semReleased := false
++					releaseSem := func() {
++						if !semReleased {
++							semReleased = true
++							<-initialPersistSem
++						}
++					}
++					defer releaseSem()
 +					var rerr error
 +					rootDir := filepath.Dir(dir)
 +					rootLease, lerr := acquirePrivateRootLease(rootDir)
@@ -20701,6 +20976,7 @@ index e69de29..b189f1b 100644
 +						}
 +					}
 +					entry.mu.Unlock()
++					releaseSem()
 +					doneCh <- rerr
 +				}()
 +				select {
@@ -22245,10 +22521,10 @@ index e69de29..b189f1b 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..a5496d8 100644
+index e69de29..639c2f5 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,17430 @@
+@@ -0,0 +1,17729 @@
 +package preflightreceipt
 +
 +import (
@@ -39677,6 +39953,305 @@ index e69de29..a5496d8 100644
 +			t.Fatalf("rollbackUnpersistedEntry did not drain cleanly: inLedger=%v inFlight=%d cfBusy=%v", stillInLedger, gotIF, cfBusy)
 +		}
 +		time.Sleep(5 * time.Millisecond)
++	}
++}
++
++func TestWebSearchActionStrictEnumAndRequiredFields(t *testing.T) {
++	// Astra P1 #2 (PR #2280 R90): web_search_call.action MUST validate both the action.type enum
++	// (search, open_page, find, find_in_page) and each action type's required fields across both
++	// response.completed-only streams and output_item.done + response.completed streams.
++	root := filepath.Join(t.TempDir(), "r90-web-search-action")
++	runSSE := func(launch, sess, sse string) SealStatus {
++		ctx, c, err := BeginReview(context.Background(), root, launch, sess, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview %s: %v", launch, err)
++		}
++		ctx, e, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("Start %s: %v", launch, err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: 200,
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
++				Body:       io.NopCloser(strings.NewReader(sse)),
++				TLS:        verifiedTLSState("chatgpt.com"),
++			}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("Do %s: %v", launch, err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, raw)
++		e.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		st, _ := SealReviewWithDigest(root, launch, sess)
++		return st
++	}
++
++	makeCompletedOnly := func(respID, actionJSON string) string {
++		return fmt.Sprintf(`data: {"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed","action":%s},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n", respID, actionJSON)
++	}
++	makeDoneAndCompleted := func(respID, actionJSON string) string {
++		return fmt.Sprintf(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ws_1","type":"web_search_call","status":"completed","action":%s}}`+"\n\n"+
++			`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}`+"\n\n"+
++			`data: {"type":"response.completed","response":{"id":%q,"status":"completed","model":"gpt-6.2-sol","output":[{"id":"ws_1","type":"web_search_call","status":"completed","action":%s},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n", actionJSON, respID, actionJSON)
++	}
++
++	badActions := []struct {
++		name   string
++		action string
++	}{
++		{"unknown_enum", `{"type":"bogus","query":"x"}`},
++		{"search_missing_query", `{"type":"search"}`},
++		{"search_blank_query", `{"type":"search","query":"   "}`},
++		{"search_empty_queries", `{"type":"search","queries":[]}`},
++		{"open_page_missing_url", `{"type":"open_page"}`},
++		{"open_page_non_http_url", `{"type":"open_page","url":"javascript:alert(1)"}`},
++		{"find_missing_url", `{"type":"find","pattern":"foo"}`},
++		{"find_missing_pattern", `{"type":"find","url":"https://example.com/a"}`},
++		{"find_in_page_blank_pattern", `{"type":"find_in_page","url":"https://example.com/a","pattern":" "}`},
++	}
++	for i, tc := range badActions {
++		l1 := fmt.Sprintf("review-e5010101-2222-4333-8444-555555551%03d", i+1)
++		s1 := fmt.Sprintf("019d0000-0000-7000-8000-e50101011%03d", i+1)
++		if st := runSSE(l1, s1, makeCompletedOnly(fmt.Sprintf("resp_bad_co_%d", i), tc.action)); st != SealRejected {
++			t.Fatalf("completed-only %s: seal = %v, want SealRejected", tc.name, st)
++		}
++		l2 := fmt.Sprintf("review-e5010101-2222-4333-8444-555555552%03d", i+1)
++		s2 := fmt.Sprintf("019d0000-0000-7000-8000-e50101012%03d", i+1)
++		if st := runSSE(l2, s2, makeDoneAndCompleted(fmt.Sprintf("resp_bad_dc_%d", i), tc.action)); st != SealRejected {
++			t.Fatalf("done+completed %s: seal = %v, want SealRejected", tc.name, st)
++		}
++	}
++
++	goodActions := []struct {
++		name   string
++		action string
++	}{
++		{"search_query", `{"type":"search","query":"chanlun"}`},
++		{"search_queries", `{"type":"search","queries":["chanlun","beichi"]}`},
++		{"open_page", `{"type":"open_page","url":"https://platform.openai.com/docs"}`},
++		{"find", `{"type":"find","url":"https://platform.openai.com/docs","pattern":"responses"}`},
++		{"find_in_page", `{"type":"find_in_page","url":"https://platform.openai.com/docs","pattern":"responses"}`},
++	}
++	for i, tc := range goodActions {
++		l := fmt.Sprintf("review-e5010101-2222-4333-8444-555555553%03d", i+1)
++		s := fmt.Sprintf("019d0000-0000-7000-8000-e50101013%03d", i+1)
++		if st := runSSE(l, s, makeDoneAndCompleted(fmt.Sprintf("resp_good_%d", i), tc.action)); st != SealOK {
++			t.Fatalf("valid %s: seal = %v, want SealOK", tc.name, st)
++		}
++	}
++}
++
++func TestAlreadyTaintedReserveAndBeginDoNotBlockOnContendedReviewMu(t *testing.T) {
++	// Astra P2 #3 (PR #2280 R90): re-requesting a launch whose taint is already persisted MUST NOT
++	// block on synchronous releaseReview/releaseReviewWithSlot when reviewMu is contended and the
++	// caller carries a request deadline.
++	root := filepath.Join(t.TempDir(), "r90-tainted-nonblocking")
++	launch := "review-e6010101-2222-4333-8444-555555555501"
++	sess := "019d0000-0000-7000-8000-e60101010101"
++
++	res0, err := ReserveReview(root, launch)
++	if err != nil {
++		t.Fatal(err)
++	}
++	entry := res0.entry
++	res0.Release()
++	TaintExistingReview(root, launch)
++	// Ensure taint is persisted on disk.
++	entry.mu.Lock()
++	entry.taintAndPersistLocked()
++	persisted := entry.taintedPersisted
++	entry.mu.Unlock()
++	if !persisted {
++		t.Fatalf("expected entry.taintedPersisted == true")
++	}
++
++	cleanRoot, _ := cleanPrivateRoot(root)
++	key := cleanRoot + "\x00" + launch
++
++	// 1. finishReserveReviewEntryContext on already-tainted persisted launch under contended reviewMu.
++	reviewMu.Lock()
++	entry.inFlight++
++	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel1()
++	done1 := make(chan error, 1)
++	go func() {
++		_, ferr := finishReserveReviewEntryContext(ctx1, cleanRoot, key, entry, 2, false, 0)
++		done1 <- ferr
++	}()
++	select {
++	case ferr := <-done1:
++		if !errors.Is(ferr, ErrUnavailable) {
++			reviewMu.Unlock()
++			t.Fatalf("finishReserveReviewEntryContext already-tainted = %v, want ErrUnavailable", ferr)
++		}
++	case <-time.After(400 * time.Millisecond):
++		reviewMu.Unlock()
++		t.Fatalf("finishReserveReviewEntryContext already-tainted blocked on contended reviewMu")
++	}
++
++	// 2. BeginReviewReserved on already-tainted persisted launch with holdsSlot=true under contended reviewMu.
++	entry.inFlight++
++	pendingReviewTotal++
++	resFake := &ReviewReservation{entry: entry, started: entry.started, turnSeq: 3, holdsSlot: true}
++	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel2()
++	done2 := make(chan error, 1)
++	go func() {
++		_, _, berr := BeginReviewReserved(ctx2, resFake, sess, "gpt-6.2-sol")
++		done2 <- berr
++	}()
++	select {
++	case berr := <-done2:
++		if !errors.Is(berr, ErrUnavailable) {
++			reviewMu.Unlock()
++			t.Fatalf("BeginReviewReserved already-tainted = %v, want ErrUnavailable", berr)
++		}
++	case <-time.After(400 * time.Millisecond):
++		reviewMu.Unlock()
++		t.Fatalf("BeginReviewReserved already-tainted blocked on contended reviewMu")
++	}
++	reviewMu.Unlock()
++
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		reviewMu.Lock()
++		drainCancelFailLocked()
++		gotIF := entry.inFlight
++		gotPending := pendingReviewTotal
++		reviewMu.Unlock()
++		cancelFailMu.Lock()
++		cfBusy := cancelFailRunning
++		cancelFailMu.Unlock()
++		if gotIF == 0 && gotPending == 0 && !cfBusy {
++			break
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("already-tainted non-blocking releases did not drain: inFlight=%d pending=%d cfBusy=%v", gotIF, gotPending, cfBusy)
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++}
++
++func TestStagingSignedPendingFilesRecoverPartialWritesWhilePreservingForeign(t *testing.T) {
++	// Astra P2 #4 (PR #2280 R90): ordinary pending-* staging files carry an HMAC tag bound to
++	// <root>/.staging-key so crash-left 0-byte or truncated-JSON staging files are verifiably
++	// reclaimed by quota sweep and restart sweep, while unsigned partial files and complete
++	// non-producer JSON files remain preserved untouched.
++	oldMaxStaging := maxStagingEntries
++	oldOrphanAge := stagingOrphanAge
++	maxStagingEntries = 4
++	stagingOrphanAge = time.Second
++	defer func() {
++		maxStagingEntries = oldMaxStaging
++		stagingOrphanAge = oldOrphanAge
++	}()
++
++	root := filepath.Join(t.TempDir(), "r90-signed-pending-files")
++	if err := ensurePrivateRoot(root); err != nil {
++		t.Fatal(err)
++	}
++	lease, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stagingRoot, err := ensureStagingDir(lease.dir, root)
++	if err != nil {
++		lease.Close()
++		t.Fatal(err)
++	}
++	key, ok := readStagingKey(lease.dir)
++	if !ok {
++		_ = stagingRoot.Close()
++		lease.Close()
++		t.Fatalf("readStagingKey failed")
++	}
++	stagingPath := filepath.Join(root, ".staging")
++	ancient := time.Now().Add(-time.Hour)
++
++	mkSignedPending := func(prefix, tok string, content []byte) string {
++		name := signStagingFileName(key, fmt.Sprintf("%s-%d-%d-%s", prefix, os.Getpid(), tmpSeq.Add(1), tok))
++		p := filepath.Join(stagingPath, name)
++		if err := os.WriteFile(p, content, 0600); err != nil {
++			t.Fatal(err)
++		}
++		return p
++	}
++	// 1. Fill all 4 slots with signed 0-byte and truncated-JSON pending-* files.
++	f1 := mkSignedPending("pending", "a111111111111111", nil)
++	f2 := mkSignedPending("pending", "a222222222222222", []byte(`{"schema":"cliproxy-review-v1","launch":`))
++	f3 := mkSignedPending("pending-marker", "a333333333333333", nil)
++	f4 := mkSignedPending("pending-marker", "a444444444444444", []byte(`{"schema":"cliproxy`))
++	for _, p := range []string{f1, f2, f3, f4} {
++		_ = os.Chtimes(p, ancient, ancient)
++	}
++
++	// Quota is at 4/4: creating a new staging file MUST reclaim all 4 signed crash-left files.
++	newName, nf, rel, cerr := createStagingFile(lease.dir, stagingRoot, root, "pending")
++	if cerr != nil {
++		_ = stagingRoot.Close()
++		lease.Close()
++		t.Fatalf("createStagingFile after signed partial backlog = %v, want nil", cerr)
++	}
++	_ = nf.Close()
++	_ = stagingRoot.Remove(newName)
++	rel()
++	for _, p := range []string{f1, f2, f3, f4} {
++		if _, err := os.Lstat(p); !os.IsNotExist(err) {
++			t.Fatalf("signed partial pending file %s survived quota sweep: %v", p, err)
++		}
++	}
++
++	// 2. Restart sweep reclaims fresh signed 0-byte pending-* while preserving unsigned 0-byte,
++	//    unsigned truncated, and signed complete non-producer JSON.
++	freshSignedEmpty := mkSignedPending("pending", "a555555555555555", nil)
++	signedCompleteForeign := mkSignedPending("pending", "a666666666666666", []byte(`{"keep":true}`))
++	unsignedEmpty := filepath.Join(stagingPath, fmt.Sprintf("pending-%d-99-abcdef0123456701", os.Getpid()))
++	unsignedTrunc := filepath.Join(stagingPath, fmt.Sprintf("pending-%d-99-abcdef0123456702", os.Getpid()))
++	if err := os.WriteFile(unsignedEmpty, nil, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(unsignedTrunc, []byte(`{"schema":"cliproxy`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	_ = stagingRoot.Close()
++	lease.Close()
++
++	rootLockMu.Lock()
++	if h := rootLocks[root]; h != nil {
++		delete(rootLocks, root)
++		h.refs--
++		if h.refs == 0 {
++			_ = h.file.Close()
++			if h.dir != nil {
++				_ = h.dir.Close()
++			}
++			if h.parentFD != nil {
++				_ = h.parentFD.Close()
++			}
++		}
++	}
++	rootLockMu.Unlock()
++
++	lease2, err := acquirePrivateRootLease(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	lease2.Close()
++
++	if _, err := os.Lstat(freshSignedEmpty); !os.IsNotExist(err) {
++		t.Fatalf("fresh signed 0-byte pending file survived restart sweep: %v", err)
++	}
++	for _, preserved := range []string{signedCompleteForeign, unsignedEmpty, unsignedTrunc} {
++		if _, err := os.Lstat(preserved); err != nil {
++			t.Fatalf("non-producer or unsigned staging file %s was deleted instead of preserved: %v", preserved, err)
++		}
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
