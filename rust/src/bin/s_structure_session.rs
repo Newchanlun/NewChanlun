@@ -6621,15 +6621,18 @@ mod tests {
     fn tb02w_killed_case_two_scan_budget_resume_and_recover() {
         const KILLED: &[i64] = &[0, 20, 10, 40, 25, 35, 22, 45, 30, 38, 26, 34];
         let down = design_rows(KILLED, false, 0);
-        let (_, snaps) = run_design(&down, None, &[31, 33, down.len()]);
-        assert_killed_published(&snaps, false, "0");
         let rows = design_rows(KILLED, true, 6);
-        let (_, base) = run_design(&rows, None, &[rows.len()]);
         // #1875 TB-02-W 负责人裁定：预算轮只在设计点推进（27 耗尽、29 追加后 OPEN、31 再耗尽、33 判失效、
         // 35 A 终结）加终点，并把四个设计点的状态逐项钉死。原先 25..len 每 2 根推进一次（16 代），37–53
         // 只是把已判定的游标逐代后带；逐前缀不复活另由 tb02w_tests.rs 的 parser 层测试覆盖。
         let counts: Vec<usize> = vec![25, 27, 29, 31, 33, 35, rows.len()];
-        let (files, budgeted) = run_design(&rows, Some(1), &counts);
+        let (snaps, base, (files, budgeted)) = std::thread::scope(|s| {
+            let h_down = s.spawn(|| run_design(&down, None, &[31, 33, down.len()]).1);
+            let h_base = s.spawn(|| run_design(&rows, None, &[rows.len()]).1);
+            let budgeted_res = run_design(&rows, Some(1), &counts);
+            (h_down.join().unwrap(), h_base.join().unwrap(), budgeted_res)
+        });
+        assert_killed_published(&snaps, false, "0");
         for (count, coverage, granted, semantic, result) in [
             (
                 27,
@@ -11086,17 +11089,35 @@ mod tests {
     /// #1394 第二段：旧库整块域继续严格可读；半降级/混写一律拒绝，不提供降级通道。
     #[test]
     fn evidence_graph_downgrade_is_strict() {
-        let build = |files: &TestFiles| {
-            init_test_db(files);
-            let rows = tb02b_oracle_rows();
-            for n in 1..=rows.len() {
-                accept_ohlc(files, &located_ohlc_input(&rows[..n]));
-                advance_business(&files.db(), DEFAULT_WRITER_EPOCH).unwrap();
+        let base = TestFiles::new();
+        init_test_db(&base);
+        let rows = tb02b_oracle_rows();
+        for n in 1..=rows.len() {
+            accept_ohlc(&base, &located_ohlc_input(&rows[..n]));
+            advance_business(&base.db(), DEFAULT_WRITER_EPOCH).unwrap();
+        }
+        {
+            let conn = open_db(&base.db()).unwrap();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+        }
+        let clone_base = || -> TestFiles {
+            let copy = TestFiles::new();
+            std::fs::copy(base.db(), copy.db()).unwrap();
+            for suffix in ["-wal", "-shm"] {
+                let mut src = base.db().into_os_string();
+                src.push(suffix);
+                let src = std::path::PathBuf::from(src);
+                if src.exists() {
+                    let mut dst = copy.db().into_os_string();
+                    dst.push(suffix);
+                    std::fs::copy(&src, dst).unwrap();
+                }
             }
+            copy
         };
         // ① 完整降级为旧库：整块字节写回批次行并撤掉三表 → 旧整块判据仍必须严格可读。
-        let legacy = TestFiles::new();
-        build(&legacy);
+        let legacy = clone_base();
         {
             let conn = open_db(&legacy.db()).unwrap();
             let ids: Vec<String> = {
@@ -11169,8 +11190,7 @@ mod tests {
             "DROP TABLE s_evidence_nodes",
             "DROP TABLE s_evidence_format",
         ] {
-            let half = TestFiles::new();
-            build(&half);
+            let half = clone_base();
             let conn = open_db(&half.db()).unwrap();
             conn.execute(drop_sql, []).unwrap();
             drop(conn);
@@ -11186,8 +11206,7 @@ mod tests {
             "UPDATE s_evidence_format SET graph_format='evidence-graph/9'",
             "UPDATE s_evidence_format SET graph_format='evidence-graph/1'",
         ] {
-            let bad = TestFiles::new();
-            build(&bad);
+            let bad = clone_base();
             let conn = open_db(&bad.db()).unwrap();
             conn.execute(sql, []).unwrap();
             drop(conn);
