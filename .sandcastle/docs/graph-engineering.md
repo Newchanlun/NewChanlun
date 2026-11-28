@@ -12,7 +12,7 @@
 | 验收面 | `harvest.sh`（#1660 PR 模式） | 15 分钟 | 评审完成的分支推远端、基于 main 开 PR、票面登记；不合入（合入见下文「main 的合入」） |
 | 观测面 | `health-monitor` + 进度页（新） | 5 分钟 / 1 分钟 | 停摆即 _red_、自愈、进度 |
 
-**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；工蜂、执行器派票 run 与 Sandcastle 实施者只开 PR，不合入。执行器交付的 PR 以 draft 开出并保持 draft，review_sweep 不审、不合 draft；主控、代理或主图验收后把它标为 ready for review，sweep 才审查它并按下面的规则合入。标 ready 后，执行器下一轮对账按交付合同把这次持有转 halted（`not_draft`），不再写这个 PR；合入后由主控释放持有。`executor serve` 内的 review_sweep 循环只在 PR 精确 head 上 `deepagents/review`（审查 App 发出）与 `ci-ok` 都为 success 时合入，合入请求带 `sha=<head>`；触及人工确认两类（实盘下单或资金、密钥或凭证）的 PR 它不合入。代理也可按同一规则手动合入。授权边界在分支保护，review_sweep 只是按它执行（用户裁定留痕 https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）。
+**main 的合入**：不设人工批准。main 分支保护强制两项必需检查，`deepagents/review`（正式非作者双审 success）与 `ci-ok`（适用 CI 全绿），并要求分支先追平 main（strict）；工蜂、执行器派票 run 与 Sandcastle 实施者只开 PR，不合入。执行器交付的 PR 以 draft 开出并保持 draft，review_sweep 不审、不合 draft；主控、代理或主图验收后把它标为 ready for review，sweep 才审查它并按下面的规则合入。标 ready 后，执行器下一轮对账按交付合同把这次持有转 halted（`not_draft`），不再写这个 PR；合入后由主控释放持有。`executor serve` 内的 review_sweep 循环只在 PR 精确 head 上 `deepagents/review`（审查 App 发出）与 `ci-ok` 都为 success 时合入，合入请求带 `sha=<head>`；触及人工确认两类（实盘下单或资金、密钥或凭证）的 PR 它不合入。#2131 切换前，代理可按上述分支保护规则手动合入（[#1742 裁定留痕](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。分支保护仍是底线。#2131 上线切换后，所有面向 `main` 的合入（包括 review_sweep 与人工合入）只走 [ADR 0064](../../docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md) R09 的同一受控入口。先持久留存并读回 `merge_intent` 与 `send_grant`，再发合入请求；代理不得只凭分支保护直接合入。按 R09 留预检、截止快照及终态，合入秒须严格晚于所选正式状态的服务端创建秒和更新秒。G0（含）后的主线集成都须是普通 merge commit，恰有两父，第二父是实际获审的 PR head，落地树与第二父同树；旧入口期间的历史证据按 R09 基线／过渡规则核验。
 
 **人工确认只保留两类**：实盘下单与资金（含账户/交易激活，按 ADR 0041「授权来源与生效边界」交还用户签署，见「1. 分级」的资金与权限硬门）、密钥与凭证。CI 与分支保护配置由代理决定、事后报告，不需要人工确认（2026-11-08 用户裁定，原话与范围见 [#1742 裁定留痕](https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631)）。授权范围的边界：代理可以改 CI 与分支保护的配置，但不能借此关闭或放宽必需检查 `deepagents/review`、`ci-ok`，不能取消 strict，也不能用管理员权限绕过；这是「合入前有非作者独审」这条底线的执行机制。其余普通研发流程不设等人批准的门。spec 与 P 类决策同 T 类一样，起草后经非作者独审 PASS 由代理裁定并记账（#1909，用户直接授权）；BLOCK 返修，缺有效独审不放行。
 
@@ -220,7 +220,7 @@ Sandcastle 宿主 `NewChanlun-sandcastle-host` 开启 `SANDCASTLE_HOST_AUTO_UPDA
 2. 裁决面 live：一张 T 类票走完分级、起草、独审、分支落文档、PR。
 3. 执行面：claim-loop 派出的实施工蜂实际产生输出（上下文非 0、有 commit 或明确 blocked 结论）。
 4. health-monitor 发现停摆能变 _red_ 并自愈，进度页可看。
-5. 以上改动经 PR 合入 main（分支保护的 `deepagents/review` 与 `ci-ok` 满足后由代理合入）。
+5. 以上改动经 PR 按本文「main 的合入」规则落地。
 
 ### Codex 单票阶段交付（#1617，2026-10-25）
 
@@ -236,7 +236,7 @@ Codex 的受管提交提示使用 codex-implement-prompt.md / codex-review-promp
 
 - **实施交付**：resolution 绑定实际落地提交；已进入 origin/main 后才按已交付关票。关票评论只写当时已经成立的结果，附主线 SHA 与对应 CI run。纯决策票沿 wayfinder 的关票口径，不能用纯裁定豁免实施交付。
 - **验证与独审**：最终交付满足票面验收，评审覆盖最终产品差异；评审后新增代码必须补审，不能以“大头已评”放过尾部。纯文档/机械收据尾部能否复用旧证据，按 CODEX-CHILD 的实际产品字节与扫描差异核对。多提交交付仍须交代各提交的可构建性；纯文档豁免编译但不豁免适用检查。依本文「main 的合入」通过正式门，review_sweep 用 merge commit；自 G0（含）起，凡 [ADR 0064](../../docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md) R09 覆盖的 `main` 主线集成，无论图内 PR、图外 PR、自动还是人工合入，严禁 squash 或 rebase-merge，一律使用普通 merge：落地提交恰有两父，第二父为实际获审 PR head，落地树须与第二父同树。#1394/#1488 的 squash 交付口径不适用该区间；在其原有适用范围内也不得掩盖未验证的最终产物；正式 App 审查沿用只按 R09 证成，不以尾部证明或历史运行替代本轮验收。
-- **CI 门**：沿本文「main 的合入」，非作者正式审查、ci-ok 与 strict 不能降低。红灯如实记录缺陷与承接票，不缩测试范围、不加 ignore、不改触发分支来伪造绿灯；已交付声明须指向实际主线，不拿其他树的绿色 CI 作证。#1323 整图验收的 CI 绑定受验主线头，历史偏差另录，不改写原票合入或关票结论，见 ADR 0064 R08/R11。
+- **CI 门**：非作者正式审查、ci-ok 与 strict 不能降低。#2131 切换后，按本文「main 的合入」由唯一受控入口完成 R09 留证与合入。红灯如实记录缺陷与承接票，不缩测试范围、不加 ignore、不改触发分支来伪造绿灯；已交付声明须指向实际主线，不拿其他树的绿色 CI 作证。#1323 整图验收的 CI 绑定受验主线头，历史偏差另录，不改写原票合入或关票结论，见 ADR 0064 R08/R11。
 - **实体与恢复**：报告存在且可读，manifest 绑定 ticket、base/head 和实体摘要；新证据仓外，旧仓内合法调用继续验证 Git blob。无实体报告就写「无报告」。关票前处置本票未交付在制品；工位仅按 ADR 0004 的容器判据清理，保留其他 owner、在途工作及恢复入口，不再执行“关票即删工位”。
 - **验收声明**：对照型验收给出可定位的版本、文件或测试。缺对照时补齐或明确降级为不可按对照独立验收，并写可直接验证的条件；不能把缺口记成通过。豁免须有命题、命令及关键输出，覆盖不到的要求标未检验，不能越过票面明写的 AC。多票共用提交导致某项无法按票独验时，逐项记录该限制。
 - **编号**：`#N` 只指 GitHub 对应票，内部课题用谱系号或日期标签。
