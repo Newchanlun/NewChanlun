@@ -10,8 +10,8 @@ namespace Chan.Hypotheses
 
 open Chan.Defs.Alt Chan.Defs.Level Chan.Defs.Limits Chan.Defs.Order Chan.Defs.Signal
 
-/-- 任一时刻之后，所选级别在统一步数界内各自形成严格上涨和严格下跌的段（#2322 U-6 暂行）。
-两端取自原始价格路径，证据来自该有限时刻的分解；恒值路径与永久单边走势均不能作证。
+/-- #2322 U-6：对指定级别，任一时刻起的统一步数界内各有一段严格上涨与严格下跌。
+两端取自原始价格路径，成段由该有限时刻的分解作证；裸价格涨跌或无统一等待界均不足。
 [017:60] 「因为某种类型的走势完成以后就会转化为其他类型的走势，对于下跌的走势来说，一旦完成，只能转化为上涨与盘整，因此，一旦能把握下跌走势转化的关节点买入，就在市场中占据了一个最有利的位置，而这个买点，就是前面反复强调的“第一类买点”；」 -/
 def LivenessHyp (rule : BlockRule.{0}) (readStage : StageReader Rat rule)
     (depth bound : Nat) (x : InfPath Rat) : Prop :=
@@ -34,13 +34,15 @@ def ExhaustionHyp (thrust : InfPath Rat) (side : Dir) (onset : Nat) (budget : Ra
     let f := thrust (onset + i)
     max 0 (match side with | .up => f | .down => -f)) ≤ budget
 
-/-- 偏离锚定区间时，结构回复力指向区间，且强度至少为正数 `strength`（#2322 U-7 暂行）。
+/-- #2322 U-7：区间外的回复力指向锚定区间，强度至少为同一个正常数 `strength`。
+这里只约束下界，允许回复时跳穿整个核。
 [033:26] 「所谓顶背驰，就是最后这个中枢，向上离开比向下离开要弱，而中枢有这样的特性，就是对无论向上或向下离开的，都有相同的回拉作用，既然向上离开比向下离开要弱，而向下离开都能拉回中枢，那向上的离开当然也能拉回中枢里，对于b+B+c向上的走势，这就构成顶背驰，而对于b+B+c向下的走势，就构成底背驰。」 -/
 def PullbackHyp (zone : Bar Rat) (restore : Rat → Rat) (strength : Rat) : Prop :=
   0 < strength ∧ ∀ p, (p < zone.lo → strength ≤ restore p) ∧
     (zone.hi < p → restore p ≤ -strength)
 
-/-- 线性回复的对照假设：下界随离带距离成正比，允许显式误差 `slack`。
+/-- #2322 U-7 对照假设：回复下界随离带距离成正比，允许显式误差 `slack`；
+与一致正下界不可比，不纳入五项假设包。
 [033:26] 「所谓顶背驰，就是最后这个中枢，向上离开比向下离开要弱，而中枢有这样的特性，就是对无论向上或向下离开的，都有相同的回拉作用，既然向上离开比向下离开要弱，而向下离开都能拉回中枢，那向上的离开当然也能拉回中枢里，对于b+B+c向上的走势，这就构成顶背驰，而对于b+B+c向下的走势，就构成底背驰。」 -/
 def LinearPullbackHyp (zone : Bar Rat) (restore : Rat → Rat) (κ slack : Rat) : Prop :=
   0 < κ ∧ 0 ≤ slack ∧ ∀ p,
@@ -94,7 +96,7 @@ structure DynamicsHypBundle (s : DynamicsInputs) (barHeights : List ℚ) : Prop 
   bars : SymUnimodalBarGroupHyp barHeights
 
 /-- B-17 的待检条件命题。在线判据在离开时刻读取同一前缀及其最后中枢；
-满足假设后只要求一次后续触及该中枢闭区间。
+按 #2322 U-3/U-7，只要求后续一次越过或触及离开侧核沿，不要求样本落入闭核。
 [098:16] 「一个背驰后，无论是盘整背驰还是真正的背驰，理论只能保证其回拉原来的中枢，这是正确的思维方式，那么，回拉之后如何，这涉及预测。正确的思维是，把回拉后出现的情况进行完全的分类，根据每种分类对应的后果，决定你自己的对策。」 -/
 def DivReturnsToCenterStmt (s : DynamicsInputs)
     (divNow : Chan.Defs.Path.History Rat → Decomposition Rat → Dir → Prop) : Prop :=
@@ -106,7 +108,10 @@ def DivReturnsToCenterStmt (s : DynamicsInputs)
   PullbackHyp s.anchor s.restore s.minRestoringForce →
   divNow h d s.side →
     (∃ z, d.recent 0 d.steps.length = some z ∧ z.core = s.anchor) →
-    ∃ t, s.onset < t ∧ s.anchor.lo ≤ s.price t ∧ s.price t ≤ s.anchor.hi
+    ∃ t, s.onset < t ∧
+      match s.side with
+      | .up => s.price t ≤ s.anchor.hi
+      | .down => s.anchor.lo ≤ s.price t
 
 /-- 参与者标签；同方向、同价格的成交仍可区分不同参与者。
 [030:24] 「其次，社会结构的现实多层性以及个体的差异性决定了，任何的群体性交易都不具有同时性，也就是说，即使是相同原因造成的相同买卖，都不可能同时出现，必然有先后，也就是说，交易具有延异性，不会完全地趋同，这是交易能形成可分析走势的现实基础。」 -/

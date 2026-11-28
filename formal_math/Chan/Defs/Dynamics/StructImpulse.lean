@@ -61,7 +61,8 @@ structure RestImpulseReadings where
   positiveVariation : ℚ
   deriving DecidableEq
 
-/-- 同时取出从静止起算的两项读数，不替比较者选一项作为力度（#2322 U-8，待 FM-42 裁定）。
+/-- #2322 U-8：同时取出从静止起算的两项读数。速度冲量族是 FM-42 证明期的主攻口径，
+不是默认值；末态速度与正变差并行检验。
 [033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」 -/
 def impulseFromRest (side : Dir) (w : ImpulseWindow) : RestImpulseReadings :=
   ⟨impulseZero .endpointDiff side 0 w, impulseZero .posVar side 0 w⟩

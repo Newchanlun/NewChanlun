@@ -103,7 +103,18 @@ def DivGeometry.trendSide (side : Dir) (zs : List (Center ℚ)) : Bool :=
     | .up => decide (gapUp a.zone.hull b.zone.hull)
     | .down => decide (gapDown a.zone.hull b.zone.hull)
 
-/-- 由最后两枢定位入枢段与从末枢延伸到当下的出枢段。
+/-- #2322 K-4/K-5：把最后两枢之间的全部连接段合为唯一的 b，与给定的 c 配对。
+[033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」
+-/
+def DivGeometry.trendWindowOfDecomp? (d : Decomposition ℚ) (prev z : Center ℚ)
+    (c : Span) : Option ForceWindow := do
+  guard (prev.stop < z.start)
+  let firstB ← d.steps[prev.stop]?
+  let lastB ← d.steps[z.start - 1]?
+  let b ← span? firstB.source.first lastB.source.last
+  window? b c z
+
+/-- 由最后两枢确定比较段 b；独立离开段 c 只读到当下。
 [033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」
 -/
 def DivGeometry.trendWindow? {r k h} (f : DivFrame r k h) (since : Nat) (side : Dir) :
@@ -111,17 +122,13 @@ def DivGeometry.trendWindow? {r k h} (f : DivFrame r k h) (since : Nat) (side : 
   let zs := sameScope f.stage since h.length
   guard (trendSide side zs)
   let z :: prev :: _ := zs.reverse | none
-  guard (prev.stop < z.start)
-  let xs := f.stage.steps
-  let firstB ← xs[prev.stop]?
-  let lastB ← xs[z.start - 1]?
-  let b ← span? firstB.source.first lastB.source.last
   let openAt ← f.opened
   -- 独立 c 可以已有完成的内部段；只取第一段的已知起点，不取未来终点。
-  let c ← span? ((xs[z.stop]?.map (·.source.first)).getD openAt) (h.length - 1)
+  let c ← span? ((f.stage.steps[z.stop]?.map (·.source.first)).getD openAt) (h.length - 1)
+  let w ← trendWindowOfDecomp? f.stage prev z c
   let now ← h.getLast?
-  guard (progresses h b side && progresses h c side && ahead side now (edge side z.core))
-  window? b c z
+  guard (progresses h w.earlier side && progresses h c side && ahead side now (edge side z.core))
+  return w
 
 /-- 到达中枢闭区间，触及边界也计入。
 [098:16] 「一个背驰后，无论是盘整背驰还是真正的背驰，理论只能保证其回拉原来的中枢，这是正确的思维方式，那么，回拉之后如何，这涉及预测。正确的思维是，把回拉后出现的情况进行完全的分类，根据每种分类对应的后果，决定你自己的对策。」
@@ -139,22 +146,21 @@ def DivGeometry.leaveAt (d : Decomposition ℚ) (z : Center ℚ) (side : Dir) (i
        (i > 0 && d.steps[i-1]?.any fun prev => decide (overlaps z.core prev.range)))
   | _, _ => false
 
-/-- 单枢盘背的两种结构窗：紧邻中枢的同向进入段与成枢后离开段，
-或同一中枢的相邻两次同侧离开（中间须有反向触核）。两窗独立形成，不以力度判定失败来切换。
+/-- 分别构造入枢窗与再离窗。再离窗只取最近一次同侧离开，且中间有反向触核。
 [027:20] 「注意，这里是把第一、三段看成两个走势类型之间的比较，这和趋势背驰里的情况有点不同，这两个走势类型是否一定是趋势，都问题不大，两个盘整在盘整背驰中也是可以比较力度的。」
 [061:26] 「要比较力度，发现背驰，首先要搞清楚是哪两段比较，其实，只要是围绕一中枢的两段走势都可以比较力度。显然，对于60-65这个1分钟中枢，55-60与65开始的一段之间就可以比较。在实际操作中，65开始的走势，由于没实际走出来，所以在和55-60比较时，都可以先假设是进入背驰段。而当走势实际走出来，一旦力度大于前者，那么就可以断定背驰段不成立，也就不会出现背驰。在没有证据否定背驰之前，就要观察从65开始的一段其内部结构中的背驰情况，这种方法可以逐次下去，这就是区间套的定位方法，这种方法，可以在当下精确地定位走势的转折点。」
 -/
-def DivGeometry.consolWindows {r k h} (f : DivFrame r k h) (since : Nat) (side : Dir) :
-    List ForceWindow := Id.run do
-  let [z] := sameScope f.stage since h.length | return []
-  let some j := f.opened | return []
-  let some c := span? j (h.length-1) | return []
-  let some (p,q) := bounds? h c | return []
-  let some out := h.getLast? | return []
+def DivGeometry.consolWindowPair {r k h} (f : DivFrame r k h) (since : Nat) (side : Dir) :
+    Option ForceWindow × Option ForceWindow := Id.run do
+  let [z] := sameScope f.stage since h.length | return (none, none)
+  let some j := f.opened | return (none, none)
+  let some c := span? j (h.length-1) | return (none, none)
+  let some (p,q) := bounds? h c | return (none, none)
+  let some out := h.getLast? | return (none, none)
   let xs := f.stage.steps
   unless progresses h c side && ahead side out (edge side z.core) &&
       (decide (p ≤ z.core.hi ∧ z.core.lo ≤ q) ||
-       xs.getLast?.any fun prev => decide (overlaps z.core prev.range)) do return []
+       xs.getLast?.any fun prev => decide (overlaps z.core prev.range)) do return (none, none)
   let entry := do
     guard (since < z.start)
     let a ← xs[z.start-1]?
@@ -167,7 +173,16 @@ def DivGeometry.consolWindows {r k h} (f : DivFrame r k h) (since : Nat) (side :
     guard ((xs.drop (i+1)).any (fun s => s.dir == side.flip && decide (overlaps s.range z.core)))
     let a ← xs[i]?
     window? a.source c z
-  return entry.toList ++ departure.toList
+  return (entry, departure)
+
+/-- #2322 U-2：列出独立形成的入枢窗与再离窗。真值相对调用方按 `spec.window` 指名的窗，
+两窗不互为退路（#799）。
+[027:20] 「注意，这里是把第一、三段看成两个走势类型之间的比较，这和趋势背驰里的情况有点不同，这两个走势类型是否一定是趋势，都问题不大，两个盘整在盘整背驰中也是可以比较力度的。」
+-/
+def DivGeometry.consolWindows {r k h} (f : DivFrame r k h) (since : Nat) (side : Dir) :
+    List ForceWindow :=
+  let (entry, departure) := consolWindowPair f since side
+  entry.toList ++ departure.toList
 
 /-- 核对比较跨度，指定了锚定区间时也核对中枢。
 [061:26] 「要比较力度，发现背驰，首先要搞清楚是哪两段比较，其实，只要是围绕一中枢的两段走势都可以比较力度。显然，对于60-65这个1分钟中枢，55-60与65开始的一段之间就可以比较。在实际操作中，65开始的走势，由于没实际走出来，所以在和55-60比较时，都可以先假设是进入背驰段。而当走势实际走出来，一旦力度大于前者，那么就可以断定背驰段不成立，也就不会出现背驰。在没有证据否定背驰之前，就要观察从65开始的一段其内部结构中的背驰情况，这种方法可以逐次下去，这就是区间套的定位方法，这种方法，可以在当下精确地定位走势的转折点。」
@@ -184,6 +199,51 @@ def DivGeometry.passes (mode : ForceCompareMode) (spec : ForceSpec) (h : List �
   matchesWindow spec.window w && MakesNewExtreme h side w.earlier w.later &&
     forceWeaker mode spec h side
 
+/-- #2322 K-2/K-4/K-5/K-6：复用 M15 传入的分解及末枢，不再分解或复验一类点结构。
+`j` 是离开段，方向取该段自身；`isFirstBuy` 对应向下离开与底背驰。`i` 不参与求值：
+比较段 b 由两枢之间的全部连接段合成。价格只读离开段终点（含）之前的前缀。
+[033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」
+-/
+def divJudge (recipe : ForceRecipe) (mode : ForceCompareMode) (h : List ℚ) : StrengthJudge ℚ :=
+  fun d z _i j => Id.run do
+    let some c := d.steps[j]? | return false
+    let some prev := (d.ledger.centers.takeWhile (fun p => p.start < z.start)).getLast? | return false
+    let some w := trendWindowOfDecomp? d prev z c.source | return false
+    let past := h.take (c.source.last + 1)
+    return MakesNewExtreme past c.dir w.earlier w.later &&
+      forceWeaker mode (recipe.atWindow w) past c.dir
+
+/-- K-2 镜像义务：势为反号等变时，价格取负且分解与中枢镜像的判定一致。
+段跨度和中枢段号保持不变，段方向翻转，传入末枢的核取负并交换上下沿。
+[033:26] 「所谓顶背驰，就是最后这个中枢，向上离开比向下离开要弱，而中枢有这样的特性，就是对无论向上或向下离开的，都有相同的回拉作用，既然向上离开比向下离开要弱，而向下离开都能拉回中枢，那向上的离开当然也能拉回中枢里，对于b+B+c向上的走势，这就构成顶背驰，而对于b+B+c向下的走势，就构成底背驰。」
+-/
+def DivJudgeMirrorEquiv (recipe : ForceRecipe) (mode : ForceCompareMode) : Prop :=
+  MirrorAntiSym recipe.potential →
+    ∀ (h : List ℚ) (d d' : Decomposition ℚ) (z z' : Center ℚ) (i j : Nat),
+      d'.steps.map (fun s => (s.source, s.dir)) =
+        d.steps.map (fun s => (s.source, s.dir.flip)) →
+      d'.ledger.centers.map (fun p => (p.start, p.stop)) =
+        d.ledger.centers.map (fun p => (p.start, p.stop)) →
+      z'.start = z.start → z'.stop = z.stop →
+      z'.core.lo = -z.core.hi → z'.core.hi = -z.core.lo →
+      divJudge recipe mode (h.map Neg.neg) d' z' i j = divJudge recipe mode h d z i j
+
+/-- K-2 因果义务：历史在离开段终点及之前逐项相同，则同一切点的结果相同。
+[033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」
+-/
+def DivJudgeCausal (recipe : ForceRecipe) (mode : ForceCompareMode) : Prop :=
+  ∀ (h₁ h₂ : List ℚ) (d : Decomposition ℚ) (z : Center ℚ) (i j : Nat) (c : Seg ℚ),
+    d.steps[j]? = some c →
+    h₁.take (c.source.last + 1) = h₂.take (c.source.last + 1) →
+    divJudge recipe mode h₁ d z i j = divJudge recipe mode h₂ d z i j
+
+/-- K-4 合窗义务：改变 M15 传入的连接段下标不改变判定。
+[033:26] 「对a+A+b+B+c，背驰的大概意思就是c段的力度比b的小了。」
+-/
+def DivJudgeIndepOfIndex (recipe : ForceRecipe) (mode : ForceCompareMode) : Prop :=
+  ∀ (h : List ℚ) (d : Decomposition ℚ) (z : Center ℚ) (i₁ i₂ j : Nat),
+    divJudge recipe mode h d z i₁ j = divJudge recipe mode h d z i₂ j
+
 variable (rule : BlockRule.{0}) (analyse : DivAnalysis rule)
 
 /-- 趋势至少有两个连续同向、严格分离的同级中枢。比较倒数两个中枢之间的 b 与最后中枢以后的 c。
@@ -195,13 +255,28 @@ def TrendDiv (depth since : Nat) (h : List ℚ) (side : Dir) (spec : ForceSpec)
     (mode : ForceCompareMode) : Bool :=
   (analyse depth h).any fun f => (trendWindow? f since side).any (passes mode spec h side)
 
-/-- #2322 U-2：单枢比较成枢前进入与成枢后离开，或比较经反向触核分隔的相邻两次同侧离开；两窗共用力度接口。
+/-- #2322 U-2：只在单枢内按 `spec.window` 指名检验，真值相对所选窗口。
+等价于 `ConsolDivEntry` 与 `ConsolDivRepeat` 之或；指名的窗失败时，不换另一窗重判（#799）。
 [027:16] 「如果在第一个中枢就出现背驰，那不会是真正意义上的背驰，只能算是盘整背驰，其真正的技术含义，其实就是一个企图脱离中枢的运动，由于力度有限，被阻止而出现回到中枢里。」
 [027:20] 「注意，这里是把第一、三段看成两个走势类型之间的比较，这和趋势背驰里的情况有点不同，这两个走势类型是否一定是趋势，都问题不大，两个盘整在盘整背驰中也是可以比较力度的。」
 -/
 def ConsolDiv (depth since : Nat) (h : List ℚ) (side : Dir) (spec : ForceSpec)
     (mode : ForceCompareMode) : Bool :=
   (analyse depth h).any fun f => (consolWindows f since side).any (passes mode spec h side)
+
+/-- 单枢盘背的入枢窗：用 `spec.window` 指名紧邻中枢的同向进入段与成枢后离开段。
+[027:20] 「注意，这里是把第一、三段看成两个走势类型之间的比较，这和趋势背驰里的情况有点不同，这两个走势类型是否一定是趋势，都问题不大，两个盘整在盘整背驰中也是可以比较力度的。」
+-/
+def ConsolDivEntry (depth since : Nat) (h : List ℚ) (side : Dir) (spec : ForceSpec)
+    (mode : ForceCompareMode) : Bool :=
+  (analyse depth h).any fun f => (consolWindowPair f since side).1.any (passes mode spec h side)
+
+/-- 单枢盘背的再离窗：用 `spec.window` 指名经反向触核分隔的相邻同侧离开段。
+[027:16] 「如果在第一个中枢就出现背驰，那不会是真正意义上的背驰，只能算是盘整背驰，其真正的技术含义，其实就是一个企图脱离中枢的运动，由于力度有限，被阻止而出现回到中枢里。」
+-/
+def ConsolDivRepeat (depth since : Nat) (h : List ℚ) (side : Dir) (spec : ForceSpec)
+    (mode : ForceCompareMode) : Bool :=
+  (analyse depth h).any fun f => (consolWindowPair f since side).2.any (passes mode spec h side)
 
 /-- 只用当前前缀检验趋势或盘整的候选背驰，不预扣下一根价格或下一段回拉。
 [043:40] 「这种小级别背驰最终转化成大级别转折的情况，最值得注意的，是出现在趋势走势的冲顶或赶底之中，这种情况一般都会引发大级别的转折，这种例子前面都说过，例如20070104的工行，20061207的北辰实业、20070122的水井坊等。」
@@ -241,12 +316,14 @@ def DivTouchedCore (depth since : Nat) (h tail : List ℚ) (side : Dir) (spec : 
     (mode : ForceCompareMode) : Bool :=
   DivGeometry.confirmedBy rule analyse touches depth since h tail side spec mode
 
-/-- #2322 U-3 暂取离散触核。半平面穿越见 DivCrossedCore，等待 needs-fable 复核。
+/-- #2322 U-3：确认取 `DivCrossedCore` 的越沿口径。在线背驰成立、后缀未刷新离开段极值，
+且有样本不再严格越过离开侧核沿，即予确认。更严的 `DivTouchedCore` 要求有样本落入闭核：
+落核蕴含越沿，跳穿整个核说明反向不成立。
 [098:16] 「一个背驰后，无论是盘整背驰还是真正的背驰，理论只能保证其回拉原来的中枢，这是正确的思维方式，那么，回拉之后如何，这涉及预测。正确的思维是，把回拉后出现的情况进行完全的分类，根据每种分类对应的后果，决定你自己的对策。」
 -/
 def DivConfirmed (depth since : Nat) (h tail : List ℚ) (side : Dir) (spec : ForceSpec)
     (mode : ForceCompareMode) : Bool :=
-  DivTouchedCore rule analyse depth since h tail side spec mode
+  DivCrossedCore rule analyse depth since h tail side spec mode
 
 /-- 三种互斥的终结机制。仍在发展的走势没有终结标签。
 [033:24] 「在最极端的情况下，在a+A+b+B+c的走势系列类型里，a和c并不是必然存在的，而b完全可以是一个跳空缺口，这样，整个走势就可以简化为两个孤零零的中枢。」
@@ -340,7 +417,8 @@ def DivGeometry.checkedChain (since : Nat) (h : List ℚ) (side : Dir) (spec : F
       ((analyse k h).any (fun f => observedSpan f s) ||
         (analyse k (h.take (s.last+1))).any (fun f => observedSpan f s)))
 
-/-- #2322 U-4：层深严格下降，可跳层；内层只要求实际分解中的跨度包含，不要求逐层背驰。
+/-- #2322 U-4 主口径：层深严格下降，可跳层；原始闭跨度按非严格 `SpanWithin` 嵌套，允许相等。
+顶层须为背驰段，内层只须在实际分解中可观测。
 [027:38] 「以万科为例子，季度图上的第三段，在月线上，可以找到针对月线最后中枢的背驰段，而这背驰段，一定在季度线的背驰段里，而且区间比之小，把这个过程从月线延伸到周线、日线、30分钟、5分钟、1分钟，甚至是每笔成交，这区间不断缩小，在理论上，甚至可以达到这样一种情况，就是明确指出，就这一笔是万科历史底部的最后一笔成交，这成交完成意味着万科一个历史性底部的形成与时代的开始。」
 [056:66] 「这个例子说明，一个大的盘整背驰段的内部结构，完全可以不必有该级别的背驰，完全可以小级别转大级别，昨天的图上就有这样一个标准的例子。」
 -/
@@ -349,7 +427,7 @@ def NestedDivChain (since : Nat) (h : List ℚ) (side : Dir) (spec : ForceSpec)
   DivGeometry.checkedChain rule analyse since h side spec mode chain &&
     (chain.zip chain.tail).all fun ((k,u),(j,v)) => decide (j < k ∧ SpanWithin v u)
 
-/-- 相邻逐层且真包含的对照谓词；顶层背驰与下层来源验证与主谓词一致。
+/-- #2322 U-4 字面理想档：相邻逐层且跨度真包含；顶层背驰与下层来源验证与主口径一致。
 [027:38] 「以万科为例子，季度图上的第三段，在月线上，可以找到针对月线最后中枢的背驰段，而这背驰段，一定在季度线的背驰段里，而且区间比之小，把这个过程从月线延伸到周线、日线、30分钟、5分钟、1分钟，甚至是每笔成交，这区间不断缩小，在理论上，甚至可以达到这样一种情况，就是明确指出，就这一笔是万科历史底部的最后一笔成交，这成交完成意味着万科一个历史性底部的形成与时代的开始。」
 -/
 def StrictNestedDivChain (since : Nat) (h : List ℚ) (side : Dir) (spec : ForceSpec)

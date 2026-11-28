@@ -38,14 +38,14 @@ variable [LinearOrder P]
 
 /-- B-24（存在）：抽取器把有限价格历史变为底层段列；合法规则下须能给出合法塔。
 [101:52] 「所谓走势必完美，就是本ID所给出的分型、笔、线段、不同级别走势类型所对应的递归函数，能将行情的任何走势唯一地分解。」 -/
-def DecompExistsSpec (rule : BlockRule.{u}) (dir : CoarseDirPolicy P)
+def DecompExistsSpec (rule : BlockRule.{u}) (dir : CoarseDirPolicy)
     (extractBase : History P → AltSeq P) : Prop :=
   InterfaceLaws rule → ∀ h, ∃ t : LevelTower rule dir (extractBase h), ValidDecomp t = true
 
 /-- B-24（规范唯一）：在同一历史、规则与方向策略下，有一座满足指定规范的合法塔，
 且所有这样的塔具有相同切点。
 [101:56] 「本ID理论最牛的地方，就是把仿佛毫无头绪的股票走势，给出了唯一分解定理，也就是走势必完美，这等于引进理想数，使得代数数论升堂入室一样牛。」 -/
-def CanonicalUniqueSpec (rule : BlockRule.{u}) (dir : CoarseDirPolicy P)
+def CanonicalUniqueSpec (rule : BlockRule.{u}) (dir : CoarseDirPolicy)
     (extractBase : History P → AltSeq P)
     (canonical : (h : History P) → LevelTower rule dir (extractBase h) → Prop) : Prop :=
   InterfaceLaws rule → ∀ h, ∃ a : CanonicalDecomp rule dir (extractBase h) (canonical h),
@@ -67,7 +67,8 @@ def BoundedTerminationSpec {Id : Type*} (rule : BlockRule.{u}) (readStage : Stag
       (complete id (readStage depth (prefixOf x m)).val ∨
        ∃ higher, depth < higher ∧ promoted id (readStage higher (prefixOf x m)).val)
 
-/-- B-24（弱安全）：买点以当时的分解判读。其后若形成同级中枢，买入后至少一次可达买价，且不晚于同级中枢的形成时刻（#2322 U-5 暂行）；
+/-- B-24 弱安全（#2322 U-5）：买点以当时的分解判读。其后若形成同级中枢，
+在买入之后、成枢第三段完成时刻（含）之前至少有一次价格不低于买价。
 等价亦计，不计费用，不把买入时刻本身当卖出机会。
 [107:22] 「显然，没有任何绝对性可以保障上下上中，最后一个上一定有比第一个上有更高的高点，特别那种所谓奔走型的反弹，后上的高点可能只刚好触及前上的低点，因此，如果你一定要等上下上都完成才抛出，那很可能面对这样的尴尬，就是你在第一个上的最低点买的，在上下上的电梯过后，你只有一个可能连手续费都不够、稍纵即逝的卖点。因此，这种操作，注定是只有相对的理论上的绝对安全性，而没有具体操作上的绝对安全性。」 -/
 def WeakSafetySpec (rule : BlockRule.{u}) (readStage : StageReader P rule)
@@ -78,7 +79,8 @@ def WeakSafetySpec (rule : BlockRule.{u}) (readStage : StageReader P rule)
       ∀ m, m = z.c.source.last → buy < m → m ≤ t →
       ∃ exitTime, buy < exitTime ∧ exitTime ≤ m ∧ x buy ≤ x exitTime)
 
-/-- 对照口径：同级中枢出现后只要求买入后的某时可达买价，不约束退出时间上界。
+/-- #2322 U-5 对照口径：若买入后形成同级中枢，只要求买入后的某时可达买价，
+卖点不以成枢时刻为界。
 [107:22] 「显然，没有任何绝对性可以保障上下上中，最后一个上一定有比第一个上有更高的高点，特别那种所谓奔走型的反弹，后上的高点可能只刚好触及前上的低点，因此，如果你一定要等上下上都完成才抛出，那很可能面对这样的尴尬，就是你在第一个上的最低点买的，在上下上的电梯过后，你只有一个可能连手续费都不够、稍纵即逝的卖点。因此，这种操作，注定是只有相对的理论上的绝对安全性，而没有具体操作上的绝对安全性。」 -/
 def UnboundedWeakSafetySpec (rule : BlockRule.{u}) (readStage : StageReader P rule)
     (buyNow : Decomposition P → Prop) : Prop :=

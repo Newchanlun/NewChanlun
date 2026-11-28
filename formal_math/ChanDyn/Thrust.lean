@@ -34,6 +34,15 @@ abbrev BoundedReturn (m : ThrustModel) (start deadline : ℕ) : Prop :=
   ∃ k : Fin deadline, m.center.lo ≤ m.position (start + k.val + 1) ∧
     m.position (start + k.val + 1) ≤ m.center.hi
 
+/-- #2322 U-7 越沿版：从核外出发后，在给定期限内触及或越过出发侧核沿；
+跳穿整个核也计入。落核版另见 `BoundedReturn`。
+[033:30] 「那么，这个反转是否成功，不妨把这个后续的反转写成c，那么也只要比较一下a+A+b与c这两段的力度就可以，因为中枢B对这两段的回拉力度是一样的，如果c比a+A+b弱，那当然反转不成功，也就意味着一定要重新回到中枢里，在最强的情况下也至少有一次回拉去确认能否构成一个第三类买点。」 -/
+abbrev BoundedCrossingReturn (m : ThrustModel) (start deadline : ℕ) : Prop :=
+  ∃ k : Fin deadline,
+    let x := m.position start
+    let y := m.position (start + k.val + 1)
+    (x < m.center.lo ∧ m.center.lo ≤ y) ∨ (m.center.hi < x ∧ y ≤ m.center.hi)
+
 /-- 待检条件命题：将内向场、推力预算和离带出发分开，检验有限期限内回到闭核。
 [033:30] 「那么，这个反转是否成功，不妨把这个后续的反转写成c，那么也只要比较一下a+A+b与c这两段的力度就可以，因为中枢B对这两段的回拉力度是一样的，如果c比a+A+b弱，那当然反转不成功，也就意味着一定要重新回到中枢里，在最强的情况下也至少有一次回拉去确认能否构成一个第三类买点。」 -/
 def ReturnUnderBudgetStmt (m : ThrustModel) (start deadline : ℕ) (budget critical : ℚ) : Prop :=

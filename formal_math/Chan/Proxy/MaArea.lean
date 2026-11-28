@@ -22,13 +22,21 @@ def maPosArea (fast slow : ℕ → ℚ) (s e : ℕ) : ℚ :=
 def maNegArea (fast slow : ℕ → ℚ) (s e : ℕ) : ℚ :=
   maPosArea slow fast s e
 
-/-- #2322 U-1 暂取非空窗口的趋势平均力度：两均线间的无向面积除以时长。
-窗口包含首尾两根单位时间柱，因此总时长为 `e + 1 - s`。
+/-- 闭窗内短长均线差全非负或全非正；相等也属于同侧。
+[015:42] 「称为缠中说禅趋势平均力度：当下与前一“吻”的结束时短线均线与长期均线形成的面积除以时间」 -/
+abbrev MaSameSide (fast slow : ℕ → ℚ) (s e : ℕ) : Prop :=
+  (∀ i : Fin (e + 1 - s), 0 ≤ fast (s + i.val) - slow (s + i.val)) ∨
+  (∀ i : Fin (e + 1 - s), fast (s + i.val) - slow (s + i.val) ≤ 0)
+
+/-- #2322 U-1：用两均线间的无向面积除以时长比较强弱。闭窗每柱一单位，
+总时长为 `e + 1 - s`，由 `s ≤ e` 保证非空。原文限于相邻两吻之间的 `MaSameSide` 窗；
+此时无向版等于带号版的绝对值。跨吻窗上的读数只是代数延拓。
 [015:42] 「称为缠中说禅趋势平均力度：当下与前一“吻”的结束时短线均线与长期均线形成的面积除以时间」 -/
 def maAvgForce (fast slow : ℕ → ℚ) (s e : ℕ) (_ : s ≤ e) : ℚ :=
   (maPosArea fast slow s e + maNegArea fast slow s e) / ((e + 1 - s : ℕ) : ℚ)
 
-/-- 同一非空窗口的带号口径：短长均线差可互相抵消。
+/-- 同一非空同侧窗的带号读数，用于端点差恒等式；比较力度前须按方向取号。
+跨吻窗只作代数延拓，短长均线差可能互相抵消。
 [015:42] 「称为缠中说禅趋势平均力度：当下与前一“吻”的结束时短线均线与长期均线形成的面积除以时间」 -/
 def maSignedAvgForce (fast slow : ℕ → ℚ) (s e : ℕ) (_ : s ≤ e) : ℚ :=
   maSignedArea fast slow s e / ((e + 1 - s : ℕ) : ℚ)
