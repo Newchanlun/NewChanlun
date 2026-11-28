@@ -1,7 +1,7 @@
-import { test } from "node:test";
+import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEEPAGENTS_OUTPUT_PROTOCOL, workerOutputSchema } from "./codex-child.ts";
@@ -24,16 +24,42 @@ const cases = [
   { name: "Opus 保留 schema", output: valid, model: "claude-opus-5-5", success: true },
 ];
 
-for (const sample of cases) test(sample.name, () => {
+let seedRepo: { root: string; repo: string; head: string } | undefined;
+function getSeedRepo() {
+  if (seedRepo) return seedRepo;
+  const root = mkdtempSync(join(tmpdir(), "boat-protocol-seed-"));
+  const repo = join(root, "repo");
+  mkdirSync(repo, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(repo, "README"), "fixture\n"); git("add", ".");
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture");
+  seedRepo = { root, repo, head: git("rev-parse", "HEAD") };
+  return seedRepo;
+}
+after(() => { if (seedRepo) rmSync(seedRepo.root, { recursive: true, force: true }); });
+
+function runWorker(args: string[]) {
+  return new Promise<{ status: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
+    child.stderr.on("data", (d) => { stderr += String(d); });
+    child.stdout.resume();
+    child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    child.on("close", (status) => { clearTimeout(timer); resolve({ status, stderr }); });
+  });
+}
+
+describe("boat-worker", { concurrency: 4 }, () => {
+for (const sample of cases) test(sample.name, async () => {
+  const seed = getSeedRepo();
   const dir = mkdtempSync(join(tmpdir(), "boat-protocol-"));
   try {
     const root = join(dir, "package"), repo = join(root, "repo"), claim = join(root, "claim");
-    mkdirSync(repo, { recursive: true }); mkdirSync(claim); mkdirSync(join(dir, "private"));
-    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
-    git("init", "-q", "-b", "main");
-    writeFileSync(join(repo, "README"), "fixture\n"); git("add", ".");
-    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture");
-    const head = git("rev-parse", "HEAD"), model = sample.model ?? "kimi-k3.1-pro";
+    mkdirSync(root, { recursive: true }); mkdirSync(claim); mkdirSync(join(dir, "private"));
+    cpSync(seed.repo, repo, { recursive: true });
+    const head = seed.head, model = sample.model ?? "kimi-k3.1-pro";
     const events = [
       { type: "thread.started", thread_id: "fixture-session" },
       { type: "item.completed", item: { type: "agent_message", text: sample.text ?? JSON.stringify(sample.output) } },
@@ -69,8 +95,8 @@ for (const sample of cases) test(sample.name, () => {
     writeFileSync(loader, `import {registerHooks} from 'node:module'; const modules=${JSON.stringify(modules)};
       registerHooks({resolve(s,c,next) {return c.parentURL?.endsWith('/boat-worker.mts') && s in modules
         ? {url:'data:text/javascript,'+encodeURIComponent(modules[s]),shortCircuit:true} : next(s,c)}});`);
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--import", loader,
-      resolve(".sandcastle/boat-worker.mts"), join(root, "request.json")], { encoding: "utf8", timeout: 15000 });
+    const child = await runWorker(["--import", "tsx", "--import", loader,
+      resolve(".sandcastle/boat-worker.mts"), join(root, "request.json")]);
     assert.equal(child.status, 0, child.stderr);
     const observed = JSON.parse(readFileSync(join(root, "observed.json"), "utf8"));
     assert.match(observed.command, /--disable multi_agent/);
@@ -92,4 +118,5 @@ for (const sample of cases) test(sample.name, () => {
     assert.deepEqual(receipt.files, []);
     assert.equal(readFileSync(join(root, "closed"), "utf8"), "yes");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 });
