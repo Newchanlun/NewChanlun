@@ -81,6 +81,23 @@ fn work_copy_typed<T: Copy>(
     Ok(out)
 }
 
+fn work_copy_bytes_typed(
+    bytes: &[u8],
+    owner: Option<&OwnedBudget>,
+    work: Option<&WorkScope>,
+) -> Result<CodecVec<u8>, MixedJsonError> {
+    let admission = NativeAdmission(work);
+    let mut out = new_work(owner);
+    admission
+        .native_codec_room(&mut out, bytes.len())
+        .map_err(MixedJsonError::Resource)?;
+    out.try_reserve_exact(bytes.len())
+        .map_err(MixedJsonError::Resource)?;
+    out.try_extend_bytes(bytes)
+        .map_err(MixedJsonError::Resource)?;
+    Ok(out)
+}
+
 fn work_resize_typed<T: Copy>(
     v: &mut CodecVec<T>,
     len: usize,
@@ -609,8 +626,34 @@ impl SlotSpec {
     }
 }
 
+/// SHA-256 节点 ID 的快速前 8 字节哈希器（节点 ID 已均匀分布，避免 SipHash / BTree 追指针）。
+#[derive(Default)]
+struct Sha256PrefixHasher(u64);
+
+impl std::hash::Hasher for Sha256PrefixHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        if bytes.len() >= 8 {
+            self.0 = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        } else {
+            let mut buf = [0u8; 8];
+            buf[..bytes.len()].copy_from_slice(bytes);
+            self.0 = u64::from_ne_bytes(buf);
+        }
+    }
+}
+
+type NodeMap<V> =
+    std::collections::HashMap<[u8; 32], V, std::hash::BuildHasherDefault<Sha256PrefixHasher>>;
+
 /// 拼接节点的一个分量。
 enum Child {
+    /// 内联静态字面字节（免堆分配）。
+    Static(&'static [u8]),
     /// 内联字面字节（只在叶以下的小片段出现）。
     Lit(Vec<u8>),
     /// 引用一个不可变节点。
@@ -652,8 +695,11 @@ pub(super) struct Staged {
 /// 一次 staging 的累加器。
 pub(super) struct Stager {
     params: Vec<Vec<u8>>,
-    index: std::collections::BTreeMap<(u8, Vec<u8>), u16>,
-    nodes: std::collections::BTreeMap<[u8; 32], Node>,
+    index: Vec<(u8, Vec<u8>, u16)>,
+    nodes: NodeMap<Node>,
+    /// 供 `try_string_decomposition` 失败回滚的新增节点日志（免整表深拷贝）。
+    inserted_log: Vec<[u8; 32]>,
+    tracking_depth: usize,
     /// staging 内部引用了一个本代未生成的节点（只可能是实现缺陷）：记录后由 `stage_complete` 拒绝。
     missing_ref: Option<[u8; 32]>,
 }
@@ -664,7 +710,7 @@ impl Stager {
             return Err("SchemaUnsupported：代际参数槽超出 u16 域".into());
         }
         let mut params = Vec::with_capacity(slots.len());
-        let mut index = std::collections::BTreeMap::new();
+        let mut index: Vec<(u8, Vec<u8>, u16)> = Vec::with_capacity(slots.len());
         for (i, s) in slots.iter().enumerate() {
             let tag = match s.kind {
                 SlotKind::Number => 0u8,
@@ -672,13 +718,20 @@ impl Stager {
             };
             // 同代两个声明取同一个值时（例：某代 generation 与 input_frontier 同为 "1"），
             // 保留先出现的那个下标；重复声明不再单列独立槽，模板形状因此跨代稳定。
-            index.entry((tag, s.bytes.clone())).or_insert(i as u16);
+            if !index
+                .iter()
+                .any(|(t, b, _)| *t == tag && b.as_slice() == s.bytes.as_slice())
+            {
+                index.push((tag, s.bytes.clone(), i as u16));
+            }
             params.push(s.bytes.clone());
         }
         Ok(Stager {
             params,
             index,
-            nodes: std::collections::BTreeMap::new(),
+            nodes: NodeMap::default(),
+            inserted_log: Vec::new(),
+            tracking_depth: 0,
             missing_ref: None,
         })
     }
@@ -692,14 +745,25 @@ impl Stager {
         &self.params
     }
 
+    #[inline]
+    fn insert_node(&mut self, id: [u8; 32], node: Node) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.nodes.entry(id) {
+            entry.insert(node);
+            if self.tracking_depth > 0 {
+                self.inserted_log.push(id);
+            }
+        }
+    }
+
     fn leaf(&mut self, bytes: Vec<u8>) -> Child {
         let id = node_id(KIND_LEAF, &bytes);
         if !self.nodes.contains_key(&id) {
-            self.nodes.insert(
+            let expanded_length = bytes.len() as u64;
+            self.insert_node(
                 id,
                 Node {
                     kind: KIND_LEAF,
-                    expanded_length: bytes.len() as u64,
+                    expanded_length,
                     payload: bytes,
                 },
             );
@@ -709,10 +773,25 @@ impl Stager {
 
     /// 生成（或命中已生成的）拼接节点。
     fn seq(&mut self, children: Vec<Child>) -> Child {
-        let mut payload = Vec::with_capacity(children.len() * 8);
+        let mut payload_len = 0usize;
+        for c in &children {
+            payload_len += match c {
+                Child::Static(b) => 5 + b.len(),
+                Child::Lit(b) => 5 + b.len(),
+                Child::Ref(_) => 33,
+                Child::Slot(_) => 3,
+            };
+        }
+        let mut payload = Vec::with_capacity(payload_len);
         let mut expanded = 0u64;
         for c in &children {
             match c {
+                Child::Static(b) => {
+                    payload.push(TAG_LIT);
+                    payload.extend_from_slice(&(b.len() as u32).to_be_bytes());
+                    payload.extend_from_slice(b);
+                    expanded += b.len() as u64;
+                }
                 Child::Lit(b) => {
                     payload.push(TAG_LIT);
                     payload.extend_from_slice(&(b.len() as u32).to_be_bytes());
@@ -739,7 +818,7 @@ impl Stager {
         }
         let id = node_id(KIND_SEQ, &payload);
         if !self.nodes.contains_key(&id) {
-            self.nodes.insert(
+            self.insert_node(
                 id,
                 Node {
                     kind: KIND_SEQ,
@@ -756,28 +835,41 @@ impl Stager {
     fn intern(&mut self, value: &Value, escape: bool) -> Result<Child, String> {
         match value {
             Value::Object(map) => {
-                let mut children = Vec::with_capacity(map.len() * 4 + 1);
-                children.push(Child::Lit(esc(escape, "{")));
+                let mut children = Vec::with_capacity(map.len() * 3 + 2);
+                children.push(Child::Static(b"{"));
                 for (i, (k, v)) in map.iter().enumerate() {
                     if i > 0 {
-                        children.push(Child::Lit(esc(escape, ",")));
+                        children.push(Child::Static(b","));
                     }
-                    let key = serde_json::to_string(k).map_err(|e| {
-                        crate::v3::business_json::mixed_diagnostic(format_args!("{e}"))
-                    })?;
-                    children.push(Child::Lit(esc(escape, &format!("{key}:"))));
+                    let mut key_lit = Vec::with_capacity(k.len() + if escape { 7 } else { 3 });
+                    if !escape {
+                        key_lit.push(b'"');
+                        push_escaped(&mut key_lit, k);
+                        key_lit.extend_from_slice(b"\":");
+                    } else {
+                        let mut raw_key = Vec::with_capacity(k.len() + 3);
+                        raw_key.push(b'"');
+                        push_escaped(&mut raw_key, k);
+                        raw_key.extend_from_slice(b"\":");
+                        let raw_str = std::str::from_utf8(&raw_key).expect("UTF-8");
+                        push_escaped(&mut key_lit, raw_str);
+                    }
+                    children.push(Child::Lit(key_lit));
                     let child = self.intern(v, escape)?;
                     children.push(child);
                 }
-                children.push(Child::Lit(esc(escape, "}")));
+                children.push(Child::Static(b"}"));
                 Ok(self.seq(children))
             }
             Value::Array(items) => self.intern_array(items, escape),
-            Value::String(_) if escape => {
+            Value::String(s) if escape => {
                 // 字符串内部的字符串：整段按同一 serializer **再转义一次**后作叶。
                 // 少了这一步，候选展开就永远比目标短（`"` 未写成 `\"`），整段拆分会被
                 // 自核对安静地退回成一个大叶——字节仍对，但跨代共享退化成按字符串整体去重。
-                let canonical = canonical_bytes_of_value(value);
+                let mut canonical = Vec::with_capacity(s.len() + 2);
+                canonical.push(b'"');
+                push_escaped(&mut canonical, s);
+                canonical.push(b'"');
                 let text = std::str::from_utf8(&canonical).map_err(|e| {
                     crate::v3::business_json::mixed_diagnostic(format_args!(
                         "SchemaUnsupported：字符串规范字节非 UTF-8：{e}"
@@ -788,7 +880,10 @@ impl Stager {
                 Ok(self.leaf(escaped))
             }
             Value::String(s) => {
-                let bytes = canonical_bytes_of_value(value);
+                let mut bytes = Vec::with_capacity(s.len() + 2);
+                bytes.push(b'"');
+                push_escaped(&mut bytes, s);
+                bytes.push(b'"');
                 if !escape {
                     if let Some(slot) = self.match_slot(1, &bytes) {
                         return Ok(Child::Slot(slot));
@@ -804,8 +899,8 @@ impl Stager {
                 }
                 Ok(Child::Lit(bytes))
             }
-            Value::Number(_) => {
-                let bytes = canonical_bytes_of_value(value);
+            Value::Number(n) => {
+                let bytes = n.to_string().into_bytes();
                 if !escape {
                     if let Some(slot) = self.match_slot(0, &bytes) {
                         return Ok(Child::Slot(slot));
@@ -813,7 +908,9 @@ impl Stager {
                 }
                 Ok(Child::Lit(bytes))
             }
-            Value::Bool(_) | Value::Null => Ok(Child::Lit(canonical_bytes_of_value(value))),
+            Value::Bool(true) => Ok(Child::Static(b"true")),
+            Value::Bool(false) => Ok(Child::Static(b"false")),
+            Value::Null => Ok(Child::Static(b"null")),
         }
     }
 
@@ -824,39 +921,49 @@ impl Stager {
         inner: Value,
         target: &[u8],
     ) -> Result<Option<Child>, String> {
-        let snapshot = self.nodes.clone();
-        let mut children = Vec::with_capacity(3);
-        children.push(Child::Lit(b"\"".to_vec()));
-        children.push(self.intern(&inner, true)?);
-        children.push(Child::Lit(b"\"".to_vec()));
-        let candidate = self.seq(children);
-        let expanded = self.expand_staged(&candidate)?;
-        if expanded == target {
-            Ok(Some(candidate))
-        } else {
-            self.nodes = snapshot;
-            Ok(None)
+        let log_mark = self.inserted_log.len();
+        let saved_missing_ref = self.missing_ref;
+        self.tracking_depth += 1;
+        let attempt = (|| -> Result<Option<Child>, String> {
+            let mut children = Vec::with_capacity(3);
+            children.push(Child::Static(b"\""));
+            children.push(self.intern(&inner, true)?);
+            children.push(Child::Static(b"\""));
+            let candidate = self.seq(children);
+            if self.matches_staged(&candidate, target)? {
+                Ok(Some(candidate))
+            } else {
+                Ok(None)
+            }
+        })();
+        self.tracking_depth -= 1;
+        let keep = matches!(&attempt, Ok(Some(_)));
+        if !keep {
+            for id in self.inserted_log.drain(log_mark..) {
+                self.nodes.remove(&id);
+            }
+            self.missing_ref = saved_missing_ref;
+        } else if self.tracking_depth == 0 {
+            self.inserted_log.clear();
         }
+        attempt
     }
 
     fn intern_array(&mut self, items: &[Value], escape: bool) -> Result<Child, String> {
         if items.is_empty() {
-            return Ok(self.seq(vec![
-                Child::Lit(esc(escape, "[")),
-                Child::Lit(esc(escape, "]")),
-            ]));
+            return Ok(self.seq(vec![Child::Static(b"["), Child::Static(b"]")]));
         }
         if items.len() <= BLOCK {
             let mut children = Vec::with_capacity(items.len() * 2 + 1);
-            children.push(Child::Lit(esc(escape, "[")));
+            children.push(Child::Static(b"["));
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    children.push(Child::Lit(esc(escape, ",")));
+                    children.push(Child::Static(b","));
                 }
                 let child = self.intern(item, escape)?;
                 children.push(child);
             }
-            children.push(Child::Lit(esc(escape, "]")));
+            children.push(Child::Static(b"]"));
             return Ok(self.seq(children));
         }
         let mut blocks: Vec<Child> = Vec::with_capacity(items.len() / BLOCK + 1);
@@ -864,7 +971,7 @@ impl Stager {
             let mut children = Vec::with_capacity(group.len() * 2);
             for (i, item) in group.iter().enumerate() {
                 if i > 0 {
-                    children.push(Child::Lit(esc(escape, ",")));
+                    children.push(Child::Static(b","));
                 }
                 let child = self.intern(item, escape)?;
                 children.push(child);
@@ -876,89 +983,229 @@ impl Stager {
             let mut it = blocks.into_iter();
             while let Some(left) = it.next() {
                 match it.next() {
-                    Some(right) => {
-                        next.push(self.seq(vec![left, Child::Lit(esc(escape, ",")), right]))
-                    }
+                    Some(right) => next.push(self.seq(vec![left, Child::Static(b","), right])),
                     None => next.push(left),
                 }
             }
             blocks = next;
         }
         Ok(self.seq(vec![
-            Child::Lit(esc(escape, "[")),
+            Child::Static(b"["),
             blocks.pop().expect("非空块树"),
-            Child::Lit(esc(escape, "]")),
+            Child::Static(b"]"),
         ]))
     }
 
+    #[inline]
     fn match_slot(&self, tag: u8, bytes: &[u8]) -> Option<u16> {
-        self.index.get(&(tag, bytes.to_vec())).copied()
+        for (t, b, idx) in &self.index {
+            if *t == tag && b.as_slice() == bytes {
+                return Some(*idx);
+            }
+        }
+        None
     }
 
-    /// staging 内部展开（自核对用；同一次 staging 的节点都在内存里）。
-    fn expand_staged(&self, child: &Child) -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        let mut stack = new_work::<Frame>(None);
+    /// staging 内部流式展开对拍（免构造展开缓冲与帧拷贝；已核子树在本次 staging 内按区间 `memcmp` 复用）。
+    fn matches_staged(&self, child: &Child, target: &[u8]) -> Result<bool, String> {
+        enum Walk<'a> {
+            Bytes(&'a [u8]),
+            Seq {
+                id: [u8; 32],
+                start: usize,
+                payload: &'a [u8],
+                pos: usize,
+            },
+            Close {
+                id: [u8; 32],
+                start: usize,
+            },
+        }
+        let mut cursor = 0usize;
+        let mut completed: NodeMap<(usize, usize)> = NodeMap::default();
+        let mut stack: Vec<Walk<'_>> = Vec::with_capacity(32);
         match child {
-            Child::Lit(b) => stack
-                .try_push(Frame::Lit(CodecVec::from_plain(b.clone())))
-                .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("{e}")))?,
-            Child::Slot(i) => stack
-                .try_push(Frame::Slot(*i))
-                .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("{e}")))?,
-            Child::Ref(id) => stack
-                .try_push(Frame::Open(*id))
-                .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("{e}")))?,
-        }
-        while let Some(frame) = stack.pop() {
-            match frame {
-                Frame::Lit(b) => out.extend_from_slice(&b),
-                Frame::Slot(i) => out.extend_from_slice(&self.params[i as usize]),
-                Frame::Open(id) => {
-                    let node = self
-                        .nodes
-                        .get(&id)
-                        .ok_or("StorageUnavailable：staging 展开缺节点")?;
-                    decode_into(node.kind, &node.payload, &mut stack)?;
-                }
-                Frame::Close { .. } => {
-                    return Err("StorageUnavailable：staging 展开出现非法收束帧".into())
+            Child::Static(b) => stack.push(Walk::Bytes(b)),
+            Child::Lit(b) => stack.push(Walk::Bytes(b)),
+            Child::Slot(i) => stack.push(Walk::Bytes(&self.params[*i as usize])),
+            Child::Ref(id) => {
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or("StorageUnavailable：staging 展开缺节点")?;
+                if node.kind == KIND_LEAF {
+                    stack.push(Walk::Bytes(&node.payload));
+                } else {
+                    stack.push(Walk::Seq {
+                        id: *id,
+                        start: 0,
+                        payload: &node.payload,
+                        pos: 0,
+                    });
                 }
             }
         }
-        Ok(out)
+        while let Some(item) = stack.pop() {
+            match item {
+                Walk::Bytes(b) => {
+                    let end = cursor + b.len();
+                    if end > target.len() || &target[cursor..end] != b {
+                        return Ok(false);
+                    }
+                    cursor = end;
+                }
+                Walk::Close { id, start } => {
+                    completed.entry(id).or_insert((start, cursor));
+                }
+                Walk::Seq {
+                    id,
+                    start,
+                    payload,
+                    mut pos,
+                } => {
+                    let mut descended = false;
+                    while pos < payload.len() {
+                        match payload[pos] {
+                            TAG_LIT => {
+                                if pos + 5 > payload.len() {
+                                    return Err("StorageUnavailable：拼接节点字面量长度截断".into());
+                                }
+                                let len = u32::from_be_bytes(
+                                    payload[pos + 1..pos + 5]
+                                        .try_into()
+                                        .map_err(|_| "StorageUnavailable：字面量长度解码失败")?,
+                                ) as usize;
+                                let s = pos + 5;
+                                let e = s + len;
+                                if e > payload.len() {
+                                    return Err("StorageUnavailable：拼接节点字面量越界".into());
+                                }
+                                let b = &payload[s..e];
+                                let end = cursor + b.len();
+                                if end > target.len() || &target[cursor..end] != b {
+                                    return Ok(false);
+                                }
+                                cursor = end;
+                                pos = e;
+                            }
+                            TAG_SLOT => {
+                                if pos + 3 > payload.len() {
+                                    return Err("StorageUnavailable：拼接节点参数槽截断".into());
+                                }
+                                let idx = u16::from_be_bytes([payload[pos + 1], payload[pos + 2]]);
+                                let b = &self.params[idx as usize];
+                                let end = cursor + b.len();
+                                if end > target.len() || &target[cursor..end] != b {
+                                    return Ok(false);
+                                }
+                                cursor = end;
+                                pos += 3;
+                            }
+                            TAG_REF => {
+                                if pos + 33 > payload.len() {
+                                    return Err("StorageUnavailable：拼接节点引用截断".into());
+                                }
+                                let mut ref_id = [0u8; 32];
+                                ref_id.copy_from_slice(&payload[pos + 1..pos + 33]);
+                                pos += 33;
+                                if let Some(&(cs, ce)) = completed.get(&ref_id) {
+                                    let b = &target[cs..ce];
+                                    let end = cursor + b.len();
+                                    if end > target.len() || &target[cursor..end] != b {
+                                        return Ok(false);
+                                    }
+                                    cursor = end;
+                                    continue;
+                                }
+                                let node = self
+                                    .nodes
+                                    .get(&ref_id)
+                                    .ok_or("StorageUnavailable：staging 展开缺节点")?;
+                                if node.kind == KIND_LEAF {
+                                    let b = &node.payload;
+                                    let end = cursor + b.len();
+                                    if end > target.len() || &target[cursor..end] != b {
+                                        return Ok(false);
+                                    }
+                                    completed.insert(ref_id, (cursor, end));
+                                    cursor = end;
+                                    continue;
+                                }
+                                if pos < payload.len() {
+                                    stack.push(Walk::Seq {
+                                        id,
+                                        start,
+                                        payload,
+                                        pos,
+                                    });
+                                } else {
+                                    stack.push(Walk::Close { id, start });
+                                }
+                                stack.push(Walk::Seq {
+                                    id: ref_id,
+                                    start: cursor,
+                                    payload: &node.payload,
+                                    pos: 0,
+                                });
+                                descended = true;
+                                break;
+                            }
+                            other => {
+                                return Err(format!(
+                                    "StorageUnavailable：拼接节点分量标签 `{other}` 未声明"
+                                ));
+                            }
+                        }
+                    }
+                    if !descended {
+                        completed.entry(id).or_insert((start, cursor));
+                    }
+                }
+            }
+        }
+        Ok(cursor == target.len())
     }
 }
 
-/// 字面量按需转义（`escape` 由所在层级决定，与 `serde_json` 同规则）。
-fn esc(escape: bool, text: &str) -> Vec<u8> {
-    if !escape {
-        return text.as_bytes().to_vec();
-    }
-    let mut out = Vec::with_capacity(text.len());
-    push_escaped(&mut out, text);
-    out
-}
-
-/// `serde_json` 默认字符串转义：`"`/`\`/控制字符，非 ASCII 原样。
+/// `serde_json` 默认字符串转义：`"`/`\`/控制字符，非 ASCII 原样（按无转义切片整段拷贝）。
 fn push_escaped(out: &mut Vec<u8>, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '"' => out.extend_from_slice(b"\\\""),
-            '\\' => out.extend_from_slice(b"\\\\"),
-            '\n' => out.extend_from_slice(b"\\n"),
-            '\r' => out.extend_from_slice(b"\\r"),
-            '\t' => out.extend_from_slice(b"\\t"),
-            '\u{08}' => out.extend_from_slice(b"\\b"),
-            '\u{0c}' => out.extend_from_slice(b"\\f"),
-            c if (c as u32) < 0x20 => {
-                out.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes());
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        let esc: &[u8] = match b {
+            b'"' => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
+            0x08 => b"\\b",
+            0x0c => b"\\f",
+            0x00..=0x1f => {
+                if start < i {
+                    out.extend_from_slice(&bytes[start..i]);
+                }
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                out.extend_from_slice(&[
+                    b'\\',
+                    b'u',
+                    b'0',
+                    b'0',
+                    HEX[(b >> 4) as usize],
+                    HEX[(b & 0xf) as usize],
+                ]);
+                start = i + 1;
+                continue;
             }
-            c => {
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            }
+            _ => continue,
+        };
+        if start < i {
+            out.extend_from_slice(&bytes[start..i]);
         }
+        out.extend_from_slice(esc);
+        start = i + 1;
+    }
+    if start < bytes.len() {
+        out.extend_from_slice(&bytes[start..]);
     }
 }
 
@@ -966,6 +1213,12 @@ fn push_escaped(out: &mut Vec<u8>, text: &str) {
 ///
 /// 不做「解析→宽松回写→猜回原件」：拆分的候选展开必须与目标字节逐字节相等，否则退回整段作叶。
 fn decomposable_json_text(text: &str) -> Option<Value> {
+    let first = text
+        .bytes()
+        .find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))?;
+    if first != b'{' && first != b'[' {
+        return None;
+    }
     let parsed = v2::strict_json(text.as_bytes()).ok()?;
     match parsed {
         Value::Object(_) | Value::Array(_) => Some(parsed),
@@ -1065,17 +1318,6 @@ fn split_seq_work_typed<'a>(
     Ok(parts)
 }
 
-fn decode_into(kind: i64, payload: &[u8], stack: &mut CodecVec<Frame>) -> Result<(), String> {
-    decode_into_admitted(kind, payload, stack, None)
-}
-fn decode_into_admitted(
-    kind: i64,
-    payload: &[u8],
-    stack: &mut CodecVec<Frame>,
-    work: Option<&WorkScope>,
-) -> Result<(), String> {
-    decode_into_typed(kind, payload, stack, work).map_err(ordinary_read_error)
-}
 fn decode_into_typed(
     kind: i64,
     payload: &[u8],
@@ -1089,14 +1331,18 @@ fn decode_into_typed(
             .native_codec_room(stack, 1)
             .map_err(MixedJsonError::Resource)?;
         stack
-            .try_push(Frame::Lit(work_copy_typed(payload, owner.as_ref(), work)?))
+            .try_push(Frame::Lit(work_copy_bytes_typed(
+                payload,
+                owner.as_ref(),
+                work,
+            )?))
             .map_err(MixedJsonError::Resource)?;
         return Ok(());
     }
     let mut frames = new_work(owner.as_ref());
     for part in split_seq_work_typed(payload, owner.as_ref(), work)? {
         let frame = match part {
-            Part::Lit(bytes) => Frame::Lit(work_copy_typed(bytes, owner.as_ref(), work)?),
+            Part::Lit(bytes) => Frame::Lit(work_copy_bytes_typed(bytes, owner.as_ref(), work)?),
             Part::Ref(id) => Frame::Open(id),
             Part::Slot(idx) => Frame::Slot(idx),
         };
@@ -1125,8 +1371,7 @@ pub(super) fn stage_complete(value: &Value, slots: &[SlotSpec]) -> Result<Staged
             hex(&id)
         ));
     }
-    let expanded = stager.expand_staged(&root)?;
-    if expanded != canonical {
+    if !stager.matches_staged(&root, &canonical)? {
         return Err(
             "SchemaUnsupported：私有证据图的展开字节与同一份规范字节不符（无损性自核对失败，拒绝写入）"
                 .into(),
@@ -1151,7 +1396,8 @@ pub(super) fn stage_complete(value: &Value, slots: &[SlotSpec]) -> Result<Staged
         Child::Ref(id) => id,
         _ => return Err("SchemaUnsupported：根必须是节点引用".into()),
     };
-    let nodes: Vec<([u8; 32], Node)> = stager.nodes.into_iter().collect();
+    let mut nodes: Vec<([u8; 32], Node)> = stager.nodes.into_iter().collect();
+    nodes.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
     let staged_bytes: u64 = nodes.iter().map(|(_, n)| n.payload.len() as u64 + 40).sum();
     let staged_nodes = nodes.len();
     Ok(Staged {
@@ -1189,10 +1435,10 @@ pub(super) fn publish_refs(
     let mut inserted_bytes = 0u64;
     {
         let mut insert = tx
-            .prepare("INSERT OR IGNORE INTO s_evidence_nodes(node_id,node_kind,payload,expanded_length) VALUES(?1,?2,?3,?4)")
+            .prepare_cached("INSERT OR IGNORE INTO s_evidence_nodes(node_id,node_kind,payload,expanded_length) VALUES(?1,?2,?3,?4)")
             .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("prepare 私有节点失败：{e}")))?;
         let mut read = tx
-            .prepare(
+            .prepare_cached(
                 "SELECT node_kind,payload,expanded_length FROM s_evidence_nodes WHERE node_id=?1",
             )
             .map_err(|e| {
@@ -1234,21 +1480,26 @@ pub(super) fn publish_refs(
                 continue;
             }
             // 同 ID 必须同内容：逐字节比对，不符即拒绝发布。
-            let (kind, payload, length): (i64, Vec<u8>, i64) = read
-                .query_row(params![&id[..]], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            let (same, existing_len): (bool, usize) = read
+                .query_row(params![&id[..]], |r| {
+                    let kind: i64 = r.get(0)?;
+                    let payload = r.get_ref(1)?.as_blob()?;
+                    let length: i64 = r.get(2)?;
+                    let same = kind == node.kind
+                        && payload == node.payload.as_slice()
+                        && u64::try_from(length).ok() == Some(node.expanded_length);
+                    Ok((same, payload.len()))
+                })
                 .map_err(|e| {
                     crate::v3::business_json::mixed_diagnostic(format_args!(
                         "读既有私有节点失败：{e}"
                     ))
                 })?;
-            if kind != node.kind
-                || payload != node.payload
-                || u64::try_from(length).ok() != Some(node.expanded_length)
-            {
+            if !same {
                 return Err(format!(
                     "IdentityConflict：私有节点 {} 同 ID 异内容（既有 {} 字节 / 本次 {} 字节），拒绝发布",
                     hex(id),
-                    payload.len(),
+                    existing_len,
                     node.payload.len()
                 ));
             }
@@ -1256,41 +1507,48 @@ pub(super) fn publish_refs(
     }
     let slot_blob: Vec<u8> = staged.slot_ids.concat();
     let changed = tx
-        .execute(
+        .prepare_cached(
             "INSERT OR IGNORE INTO s_evidence_roots(root_key,node_id,slot_ids,expanded_length,content_sha256) VALUES(?1,?2,?3,?4,?5)",
-            params![
-                root_key,
-                &staged.root[..],
-                slot_blob,
-                i64::try_from(staged.expanded_length)
-                    .map_err(|_| "StorageUnavailable：根展开长度超出 i64 域")?,
-                staged.content_sha256,
-            ],
         )
+        .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("写私有根失败：{e}")))?
+        .execute(params![
+            root_key,
+            &staged.root[..],
+            slot_blob,
+            i64::try_from(staged.expanded_length)
+                .map_err(|_| "StorageUnavailable：根展开长度超出 i64 域")?,
+            staged.content_sha256,
+        ])
         .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("写私有根失败：{e}")))?;
     if changed == 0 {
-        let (node_id, slots, len, hash): (Vec<u8>, Vec<u8>, i64, String) = tx
-            .query_row(
+        let same_root: bool = tx
+            .prepare_cached(
                 "SELECT node_id,slot_ids,expanded_length,content_sha256 FROM s_evidence_roots WHERE root_key=?1",
-                params![root_key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("读既有私有根失败：{e}")))?
+            .query_row(params![root_key], |r| {
+                let node_id = r.get_ref(0)?.as_blob()?;
+                let slots = r.get_ref(1)?.as_blob()?;
+                let len: i64 = r.get(2)?;
+                let hash = r.get_ref(3)?.as_str()?;
+                Ok(node_id == staged.root
+                    && slots == slot_blob.as_slice()
+                    && usize::try_from(len).ok() == Some(staged.expanded_length as usize)
+                    && hash == staged.content_sha256.as_str())
+            })
             .map_err(|e| crate::v3::business_json::mixed_diagnostic(format_args!("读既有私有根失败：{e}")))?;
-        if node_id != staged.root
-            || slots != slot_blob
-            || usize::try_from(len).ok() != Some(staged.expanded_length as usize)
-            || hash != staged.content_sha256
-        {
+        if !same_root {
             return Err(format!(
                 "IdentityConflict：私有根 `{root_key}` 同 key 异内容，拒绝覆写"
             ));
         }
     }
     let replaced = tx
-        .execute(
-            "DELETE FROM s_evidence_roots WHERE root_key=?1 AND node_id<>?2",
-            params![root_key, &staged.root[..]],
-        )
+        .prepare_cached("DELETE FROM s_evidence_roots WHERE root_key=?1 AND node_id<>?2")
+        .map_err(|e| {
+            crate::v3::business_json::mixed_diagnostic(format_args!("核私有根唯一性失败：{e}"))
+        })?
+        .execute(params![root_key, &staged.root[..]])
         .map_err(|e| {
             crate::v3::business_json::mixed_diagnostic(format_args!("核私有根唯一性失败：{e}"))
         })?;
@@ -1600,9 +1858,6 @@ impl<'a> Reader<'a> {
     fn owner(&self) -> Option<&OwnedBudget> {
         self.owned.as_ref().map(|o| &o.budget)
     }
-    fn mark_touched(&mut self, id: [u8; 32]) -> Result<(), String> {
-        self.mark_touched_typed(id).map_err(ordinary_read_error)
-    }
     fn mark_touched_typed(&mut self, id: [u8; 32]) -> Result<(), MixedJsonError> {
         if self.owned.is_none() {
             self.touched
@@ -1760,7 +2015,7 @@ impl<'a> Reader<'a> {
         // 声明槽未必都被模板引用：只核每个槽叶自身可寻址；实际占用的槽字节在遍历时累计。
         let mut slot_len = new_work(owner.as_ref());
         work_resize_typed(&mut slot_len, slots.len(), 0u64, work)?;
-        for id in &slots {
+        for (i, id) in slots.iter().enumerate() {
             let node = self.load_for_walk(id)?;
             if node.kind() != KIND_LEAF {
                 return Err(format!(
@@ -1768,9 +2023,7 @@ impl<'a> Reader<'a> {
                 )
                 .into());
             }
-        }
-        for (i, id) in slots.iter().enumerate() {
-            slot_len[i] = self.load_for_walk(id)?.length();
+            slot_len[i] = node.length();
         }
         // 与根无关的派生量（不含槽长度 + 子树槽出现次数 + 子树摘要）按**新鲜行**自下而上算一次，
         // 同一次捕获内跨根共享（每个唯一节点只解析一次，不再按根重复遍历整棵闭包）。
@@ -1880,7 +2133,6 @@ impl<'a> Reader<'a> {
                 }
                 continue;
             }
-            let parts = split_seq_work_typed(node.payload(), owner.as_ref(), work)?;
             if !closing {
                 admission
                     .native_map_room(&mut on_path)
@@ -1912,6 +2164,7 @@ impl<'a> Reader<'a> {
                 }
                 continue;
             }
+            let parts = split_seq_work_typed(node.payload(), owner.as_ref(), work)?;
             // 子节点派生量必须已结算；被逐出/未结算时重新下沉重算，不误判为存储损坏。
             let mut missing: Option<[u8; 32]> = None;
             for part in &parts {
@@ -2358,6 +2611,9 @@ impl<'a> Reader<'a> {
         root_key: &str,
         row: &RootRow,
     ) -> Result<CodecVec<u8>, MixedJsonError> {
+        if self.work.is_none() && self.owned.is_none() && !cache::retention_enabled() {
+            return self.expand_plain_uncached(root_key, row);
+        }
         let owner = self.owner().cloned();
         let work = self.work;
         let admission = NativeAdmission(work);
@@ -2380,7 +2636,7 @@ impl<'a> Reader<'a> {
                 .into());
             }
             param_bytes
-                .try_push(work_copy_typed(node.payload(), owner.as_ref(), work)?)
+                .try_push(work_copy_bytes_typed(node.payload(), owner.as_ref(), work)?)
                 .map_err(MixedJsonError::Resource)?;
         }
         // 声明长度来自数据库，不能用它直接请求任意大的分配；实际输出逐段增长。
@@ -2489,6 +2745,425 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    /// 无持久缓存普通读快路径（`work=None`, `owned=None`, `retention_enabled=false`）：
+    /// 单条 hoisted `prepare_cached` + SQLite 零拷贝 blob 校验，省去每节点的
+    /// `node_children` 二次解析、`Arc<Cert>`/`Arc<[u8]>` 与逐 `TAG_LIT` `CodecVec` 分配，
+    /// 同时保持 `verify_node_row`、标签语法、声明长度、根摘要、所有错误文案与测试计数完全一致。
+    fn expand_plain_uncached(
+        &mut self,
+        root_key: &str,
+        row: &RootRow,
+    ) -> Result<CodecVec<u8>, MixedJsonError> {
+        enum PlainFrame {
+            Open([u8; 32]),
+            Seq {
+                id: [u8; 32],
+                declared_length: u64,
+                start: usize,
+                slot_bytes_at_open: u64,
+                payload: Vec<u8>,
+                pos: usize,
+            },
+        }
+
+        enum StepAction {
+            Leaf,
+            FlatSeq {
+                start: usize,
+                slot_bytes_at_open: u64,
+                declared: u64,
+            },
+            BranchSeq {
+                declared: u64,
+                payload: Vec<u8>,
+            },
+        }
+
+        #[inline]
+        fn validate_seq_tags(payload: &[u8]) -> Result<bool, String> {
+            let mut i = 0usize;
+            let mut has_ref = false;
+            while i < payload.len() {
+                match payload[i] {
+                    TAG_LIT => {
+                        if i + 5 > payload.len() {
+                            return Err("StorageUnavailable：拼接节点字面量长度截断".into());
+                        }
+                        let len = u32::from_be_bytes(
+                            payload[i + 1..i + 5]
+                                .try_into()
+                                .map_err(|_| "StorageUnavailable：字面量长度解码失败")?,
+                        ) as usize;
+                        let end = i + 5 + len;
+                        if end > payload.len() {
+                            return Err("StorageUnavailable：拼接节点字面量越界".into());
+                        }
+                        i = end;
+                    }
+                    TAG_REF => {
+                        if i + 33 > payload.len() {
+                            return Err("StorageUnavailable：拼接节点引用截断".into());
+                        }
+                        has_ref = true;
+                        i += 33;
+                    }
+                    TAG_SLOT => {
+                        if i + 3 > payload.len() {
+                            return Err("StorageUnavailable：拼接节点参数槽截断".into());
+                        }
+                        i += 3;
+                    }
+                    other => {
+                        return Err(format!(
+                            "StorageUnavailable：拼接节点分量标签 `{other}` 未声明"
+                        ));
+                    }
+                }
+            }
+            Ok(has_ref)
+        }
+
+        #[inline]
+        fn append_plain(out: &mut Vec<u8>, bytes: &[u8], declared: u64) -> Result<(), String> {
+            let next = out
+                .len()
+                .checked_add(bytes.len())
+                .ok_or("StorageUnavailable：证据图展开长度溢出")?;
+            if next as u64 > declared {
+                return Err("StorageUnavailable：证据图实际展开超过根声明长度".into());
+            }
+            out.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        #[inline]
+        fn append_span_plain(
+            out: &mut Vec<u8>,
+            start: usize,
+            end: usize,
+            declared: u64,
+        ) -> Result<(), String> {
+            let len = end - start;
+            let next = out
+                .len()
+                .checked_add(len)
+                .ok_or("StorageUnavailable：证据图展开长度溢出")?;
+            if next as u64 > declared {
+                return Err("StorageUnavailable：证据图实际展开超过根声明长度".into());
+            }
+            out.extend_from_within(start..end);
+            Ok(())
+        }
+
+        let expanded_len = row.expanded_length;
+        let hash = row.content_sha256.as_str();
+        let root = row.node;
+        let admission = NativeAdmission(None);
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT node_kind,payload,expanded_length FROM s_evidence_nodes WHERE node_id=?1",
+            )
+            .map_err(|e| {
+                crate::v3::business_json::mixed_diagnostic(format_args!(
+                    "StorageUnavailable：读私有节点失败：{e}"
+                ))
+            })?;
+
+        let mut param_bytes: Vec<Vec<u8>> = Vec::with_capacity(row.slots.len());
+        for id in &row.slots {
+            if self
+                .touched
+                .insert_admitted(*id, &admission)
+                .map_err(MixedJsonError::Resource)?
+            {
+                cache::mark_reachable_admitted(self.conn_id, *id, None)?;
+            }
+            let fetched: Result<(i64, Vec<u8>), String> = stmt
+                .query_row(params![&id[..]], |r| {
+                    let kind: i64 = r.get(0)?;
+                    let payload = r.get_ref(1)?.as_blob()?;
+                    let len: i64 = r.get(2)?;
+                    match verify_node_row(id, kind, payload, len) {
+                        Ok(_declared) => {
+                            #[cfg(test)]
+                            cache::counter(|c| {
+                                c.node_rows_read += 1;
+                                c.node_payload_bytes_read += payload.len();
+                                c.capture_node_admission_rejected += 1;
+                            });
+                            Ok(Ok((kind, payload.to_vec())))
+                        }
+                        Err(e) => Ok(Err(e)),
+                    }
+                })
+                .optional()
+                .map_err(|e| {
+                    crate::v3::business_json::mixed_diagnostic(format_args!(
+                        "StorageUnavailable：读私有节点失败：{e}"
+                    ))
+                })?
+                .ok_or_else(|| format!("StorageUnavailable：私有节点 {} 缺失", hex(id)))?;
+            let (kind, payload) = fetched?;
+            if kind != KIND_LEAF {
+                return Err(format!(
+                    "StorageUnavailable：私有根 `{root_key}` 参数槽引用了非叶节点"
+                )
+                .into());
+            }
+            param_bytes.push(payload);
+        }
+
+        let mut out: Vec<u8> = Vec::with_capacity((expanded_len as usize).min(65536));
+        let mut stack: Vec<PlainFrame> = Vec::with_capacity(32);
+        stack.push(PlainFrame::Open(root));
+        let mut slot_bytes = 0u64;
+        let mut completed: Option<NodeMap<(usize, usize, u64)>> =
+            (!self.conn.is_autocommit()).then(NodeMap::default);
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                PlainFrame::Open(id) => {
+                    if let Some(&(cs, ce, slots)) =
+                        completed.as_ref().and_then(|spans| spans.get(&id))
+                    {
+                        append_span_plain(&mut out, cs, ce, expanded_len)?;
+                        slot_bytes += slots;
+                        continue;
+                    }
+                    if self
+                        .touched
+                        .insert_admitted(id, &admission)
+                        .map_err(MixedJsonError::Resource)?
+                    {
+                        cache::mark_reachable_admitted(self.conn_id, id, None)?;
+                    }
+                    let start_before = out.len();
+                    let slot_before = slot_bytes;
+                    let step: Result<StepAction, String> = stmt
+                        .query_row(params![&id[..]], |r| {
+                            let kind: i64 = r.get(0)?;
+                            let payload = r.get_ref(1)?.as_blob()?;
+                            let len: i64 = r.get(2)?;
+                            let declared = match verify_node_row(&id, kind, payload, len) {
+                                Ok(d) => d,
+                                Err(e) => return Ok(Err(e)),
+                            };
+                            if kind == KIND_LEAF {
+                                #[cfg(test)]
+                                cache::counter(|c| {
+                                    c.node_rows_read += 1;
+                                    c.node_payload_bytes_read += payload.len();
+                                    c.capture_node_admission_rejected += 1;
+                                });
+                                if let Err(e) = append_plain(&mut out, payload, expanded_len) {
+                                    return Ok(Err(e));
+                                }
+                                return Ok(Ok(StepAction::Leaf));
+                            }
+                            let has_ref = match validate_seq_tags(payload) {
+                                Ok(v) => v,
+                                Err(e) => return Ok(Err(e)),
+                            };
+                            #[cfg(test)]
+                            cache::counter(|c| {
+                                c.node_rows_read += 1;
+                                c.node_payload_bytes_read += payload.len();
+                                c.capture_node_admission_rejected += 1;
+                            });
+                            if !has_ref {
+                                let mut p = 0usize;
+                                while p < payload.len() {
+                                    match payload[p] {
+                                        TAG_LIT => {
+                                            let blen = u32::from_be_bytes([
+                                                payload[p + 1],
+                                                payload[p + 2],
+                                                payload[p + 3],
+                                                payload[p + 4],
+                                            ])
+                                                as usize;
+                                            let s = p + 5;
+                                            let e = s + blen;
+                                            if let Err(err) =
+                                                append_plain(&mut out, &payload[s..e], expanded_len)
+                                            {
+                                                return Ok(Err(err));
+                                            }
+                                            p = e;
+                                        }
+                                        TAG_SLOT => {
+                                            let idx = u16::from_be_bytes([
+                                                payload[p + 1],
+                                                payload[p + 2],
+                                            ]);
+                                            let Some(bytes) = param_bytes.get(idx as usize) else {
+                                                return Ok(Err(format!(
+                                                    "StorageUnavailable：私有根 `{root_key}` 参数槽 {idx} 越界"
+                                                )));
+                                            };
+                                            if let Err(err) =
+                                                append_plain(&mut out, bytes, expanded_len)
+                                            {
+                                                return Ok(Err(err));
+                                            }
+                                            slot_bytes += bytes.len() as u64;
+                                            p += 3;
+                                        }
+                                        _ => unreachable!("validated above"),
+                                    }
+                                }
+                                return Ok(Ok(StepAction::FlatSeq {
+                                    start: start_before,
+                                    slot_bytes_at_open: slot_before,
+                                    declared,
+                                }));
+                            }
+                            Ok(Ok(StepAction::BranchSeq {
+                                declared,
+                                payload: payload.to_vec(),
+                            }))
+                        })
+                        .optional()
+                        .map_err(|e| {
+                            crate::v3::business_json::mixed_diagnostic(format_args!(
+                                "StorageUnavailable：读私有节点失败：{e}"
+                            ))
+                        })?
+                        .ok_or_else(|| format!("StorageUnavailable：私有节点 {} 缺失", hex(&id)))?;
+                    match step? {
+                        StepAction::Leaf => {
+                            if let Some(spans) = completed.as_mut() {
+                                spans.entry(id).or_insert((start_before, out.len(), 0));
+                            }
+                        }
+                        StepAction::FlatSeq {
+                            start,
+                            slot_bytes_at_open,
+                            declared,
+                        } => {
+                            let actual = (out.len() - start) as u64;
+                            let slots = slot_bytes - slot_bytes_at_open;
+                            let without_slots = actual - slots;
+                            if without_slots != declared {
+                                return Err(format!(
+                                    "StorageUnavailable：私有节点 {} 声明长度 {} 与实际展开 {without_slots} 不符",
+                                    hex(&id),
+                                    declared
+                                )
+                                .into());
+                            }
+                            if let Some(spans) = completed.as_mut() {
+                                spans.entry(id).or_insert((start, out.len(), slots));
+                            }
+                        }
+                        StepAction::BranchSeq { declared, payload } => {
+                            stack.push(PlainFrame::Seq {
+                                id,
+                                declared_length: declared,
+                                start: start_before,
+                                slot_bytes_at_open: slot_before,
+                                payload,
+                                pos: 0,
+                            });
+                        }
+                    }
+                }
+                PlainFrame::Seq {
+                    id,
+                    declared_length,
+                    start,
+                    slot_bytes_at_open,
+                    payload,
+                    mut pos,
+                } => {
+                    let mut descended = false;
+                    while pos < payload.len() {
+                        match payload[pos] {
+                            TAG_LIT => {
+                                let blen = u32::from_be_bytes([
+                                    payload[pos + 1],
+                                    payload[pos + 2],
+                                    payload[pos + 3],
+                                    payload[pos + 4],
+                                ]) as usize;
+                                let s = pos + 5;
+                                let e = s + blen;
+                                append_plain(&mut out, &payload[s..e], expanded_len)?;
+                                pos = e;
+                            }
+                            TAG_SLOT => {
+                                let idx = u16::from_be_bytes([payload[pos + 1], payload[pos + 2]]);
+                                let bytes = param_bytes.get(idx as usize).ok_or_else(|| {
+                                    format!(
+                                        "StorageUnavailable：私有根 `{root_key}` 参数槽 {idx} 越界"
+                                    )
+                                })?;
+                                append_plain(&mut out, bytes, expanded_len)?;
+                                slot_bytes += bytes.len() as u64;
+                                pos += 3;
+                            }
+                            TAG_REF => {
+                                let mut ref_id = [0u8; 32];
+                                ref_id.copy_from_slice(&payload[pos + 1..pos + 33]);
+                                pos += 33;
+                                if let Some(&(cs, ce, slots)) =
+                                    completed.as_ref().and_then(|spans| spans.get(&ref_id))
+                                {
+                                    append_span_plain(&mut out, cs, ce, expanded_len)?;
+                                    slot_bytes += slots;
+                                    continue;
+                                }
+                                stack.push(PlainFrame::Seq {
+                                    id,
+                                    declared_length,
+                                    start,
+                                    slot_bytes_at_open,
+                                    payload,
+                                    pos,
+                                });
+                                stack.push(PlainFrame::Open(ref_id));
+                                descended = true;
+                                break;
+                            }
+                            _ => unreachable!("validated above"),
+                        }
+                    }
+                    if !descended {
+                        let actual = (out.len() - start) as u64;
+                        let slots = slot_bytes - slot_bytes_at_open;
+                        let without_slots = actual - slots;
+                        if without_slots != declared_length {
+                            return Err(format!(
+                                "StorageUnavailable：私有节点 {} 声明长度 {} 与实际展开 {without_slots} 不符",
+                                hex(&id),
+                                declared_length
+                            )
+                            .into());
+                        }
+                        if let Some(spans) = completed.as_mut() {
+                            spans.entry(id).or_insert((start, out.len(), slots));
+                        }
+                    }
+                }
+            }
+        }
+        if out.len() as u64 != expanded_len {
+            return Err(format!(
+                "StorageUnavailable：私有根 `{root_key}` 展开长度不符（声明 {expanded_len}，实际 {}）",
+                out.len()
+            )
+            .into());
+        }
+        if !hash_matches(&out, hash) {
+            return Err(format!(
+                "StorageUnavailable：私有根 `{root_key}` 展开字节与登记摘要不符（内容被改）"
+            )
+            .into());
+        }
+        Ok(CodecVec::from_plain(out))
+    }
+
     /// 按 id 取节点**原件证书**：本次捕获已读过就直接复用；否则从**新鲜行**读入，先核内容寻址与
     /// 长度自洽，再与保留证书**逐字节**比较（命中才打上原件门标记），最后记入本次捕获的临时读集
     /// （超预算只失去复用，当次读照常返回）。
@@ -2501,8 +3176,17 @@ impl<'a> Reader<'a> {
             reason = "#1488 再合 #1608：8组合实测无调用方，保留不删"
         )]
         let admission = NativeAdmission(self.work);
-        self.mark_touched(*id)?;
-        cache::mark_reachable_admitted(self.conn_id, *id, self.work)?;
+        if self.owned.is_none() {
+            if self
+                .touched
+                .insert_admitted(*id, &admission)
+                .map_err(|e| ordinary_read_error(MixedJsonError::Resource(e)))?
+            {
+                cache::mark_reachable_admitted(self.conn_id, *id, self.work)?;
+            }
+        } else {
+            cache::mark_reachable_admitted(self.conn_id, *id, self.work)?;
+        }
         if let Some(node) = cache::node_get(self.conn_id, id) {
             #[cfg(test)]
             cache::counter(|c| c.node_reused_in_capture += 1);
@@ -2528,7 +3212,11 @@ impl<'a> Reader<'a> {
             let declared = verify_node_row(id, kind, &payload, len)?;
             (kind, CodecVec::from_plain(payload), declared)
         };
-        let children = node_children_admitted(kind, &payload, None, self.work)?;
+        let pre_children = if self.work.is_some() {
+            Some(node_children_admitted(kind, &payload, None, self.work)?)
+        } else {
+            None
+        };
         #[cfg(test)]
         cache::counter(|c| {
             c.node_rows_read += 1;
@@ -2545,6 +3233,10 @@ impl<'a> Reader<'a> {
             }
             candidate => {
                 let _ = &candidate;
+                let children = match pre_children {
+                    Some(c) => c,
+                    None => node_children_admitted(kind, &payload, None, self.work)?,
+                };
                 #[cfg(test)]
                 cache::counter(|c| {
                     if candidate.is_some() {
@@ -2707,7 +3399,7 @@ fn read_node_row_typed(
         ))
     })?;
     let kind = row.integer(0).map_err(err)?;
-    let payload = work_copy_typed(row.blob(1).map_err(err)?, owner, work)?;
+    let payload = work_copy_bytes_typed(row.blob(1).map_err(err)?, owner, work)?;
     let len = row.integer(2).map_err(err)?;
     drop(row);
     stmt.finalize().map_err(err)?;
@@ -2784,14 +3476,106 @@ fn read_root_row_typed(
             )
         )
     };
+    if owner.is_none() && work.is_none() {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT node_id,slot_ids,expanded_length,content_sha256 FROM s_evidence_roots WHERE root_key=?1",
+            )
+            .map_err(err)?;
+        let Some((node, slots, len, hash)) = stmt
+            .query_row(params![root_key], |r| {
+                let node_ref = r.get_ref(0)?;
+                let node = match node_ref {
+                    rusqlite::types::ValueRef::Blob(b) => b.to_vec(),
+                    other => {
+                        return Err(rusqlite::Error::InvalidColumnType(
+                            0,
+                            "node_id".into(),
+                            other.data_type(),
+                        ))
+                    }
+                };
+                let slots_ref = r.get_ref(1)?;
+                let slots = match slots_ref {
+                    rusqlite::types::ValueRef::Blob(b) => b.to_vec(),
+                    other => {
+                        return Err(rusqlite::Error::InvalidColumnType(
+                            1,
+                            "slot_ids".into(),
+                            other.data_type(),
+                        ))
+                    }
+                };
+                let len: i64 = r.get(2)?;
+                let hash_ref = r.get_ref(3)?;
+                let hash = match hash_ref {
+                    rusqlite::types::ValueRef::Text(t) => std::str::from_utf8(t)
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?
+                        .to_owned(),
+                    other => {
+                        return Err(rusqlite::Error::InvalidColumnType(
+                            3,
+                            "content_sha256".into(),
+                            other.data_type(),
+                        ))
+                    }
+                };
+                Ok((node, slots, len, hash))
+            })
+            .optional()
+            .map_err(err)?
+        else {
+            return Ok(None);
+        };
+        let root = decode_id(&node)
+            .ok_or_else(|| format!("StorageUnavailable：私有根 `{root_key}` 节点 id 非 32 字节"))?;
+        if slots.len() % 32 != 0 {
+            return Err(
+                format!("StorageUnavailable：私有根 `{root_key}` 参数槽列长度非 32 倍数").into(),
+            );
+        }
+        let mut params = Vec::with_capacity(slots.len() / 32);
+        for chunk in slots.chunks_exact(32) {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(chunk);
+            params.push(id);
+        }
+        let expanded = u64::try_from(len)
+            .map_err(|_| format!("StorageUnavailable：私有根 `{root_key}` 长度非负越界"))?;
+        if !is_hex64(&hash) {
+            return Err(format!(
+                "StorageUnavailable：私有根 `{root_key}` 内容摘要非 64 位十六进制"
+            )
+            .into());
+        }
+        return Ok(Some(
+            RootRow {
+                node: root,
+                slots: CodecVec::from_plain(params),
+                expanded_length: expanded,
+                content_sha256:
+                    TextValue::Plain(
+                        newchan_rust::s_content::capture_allocation::native_owned::NativeValue::<
+                            String,
+                        >::from_unscoped(hash),
+                    ),
+            },
+        ));
+    }
     let mut stmt=CheckedStatement::prepare(conn,c"SELECT node_id,slot_ids,expanded_length,content_sha256 FROM s_evidence_roots WHERE root_key=?1").map_err(err)?;
     stmt.bind_text(1, root_key).map_err(err)?;
     let Some(mut row) = stmt.next().map_err(err)? else {
         stmt.finalize().map_err(err)?;
         return Ok(None);
     };
-    let node = work_copy_typed(row.blob(0).map_err(err)?, owner, work)?;
-    let slots = work_copy_typed(row.blob(1).map_err(err)?, owner, work)?;
+    let node = work_copy_bytes_typed(row.blob(0).map_err(err)?, owner, work)?;
+    let slots = work_copy_bytes_typed(row.blob(1).map_err(err)?, owner, work)?;
     let len = row.integer(2).map_err(err)?;
     let hash = TextValue::from_str_admitted_typed(row.text(3).map_err(err)?, owner, work)
         .map_err(MixedJsonError::Resource)?;
