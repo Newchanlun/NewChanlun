@@ -373,58 +373,97 @@ fn roots_as_sets(mut facts: StrokeFacts) -> StrokeFacts {
 fn tb02v_tied_root_order_and_designation_do_not_change_vectors_or_strokes() {
     let config = ParseConfig::default();
     let mut rng = Rng(0x1405_1343_0000_0001);
-    let (mut multi_root_endpoints, mut keep_eq, mut strokes, mut designations) = (0, 0, 0, 0);
+    let mut cases = Vec::with_capacity(160);
     for case in 0..160 {
         let stride = 1 + case % 3;
         let n = 60 + rng.below(140) as usize;
         let raw = hl_bars(&tie_heavy(&mut rng, n), stride);
         let inclusion = process_inclusion_with_facts(&raw);
-        let base = build_stroke_facts(&inclusion, &config);
-        let positions = positions_of_steps(&inclusion);
-        multi_root_endpoints += base
-            .endpoints
-            .iter()
-            .filter(|e| e.extreme_roots.len() > 1)
-            .count();
-        keep_eq += base
-            .pairs
-            .iter()
-            .filter(|p| p.evidence.contains(&SAME_KIND_EQUAL_PRICE_KEEP_EARLIER))
-            .count();
-        strokes += base.strokes.len();
-        for p in base.pairs.iter().filter(|p| p.conditions.is_some()) {
-            let mut least = usize::MAX;
-            for x in &p.old.extreme_roots {
-                for y in &p.new.extreme_roots {
-                    let (px, py) = (positions[x], positions[y]);
-                    assert!(py > px, "case {case}：时间先后的极值区不相交");
-                    least = least.min(py - px - 1);
-                    designations += 1;
-                }
-            }
-            assert_eq!(
-                p.conditions.as_ref().unwrap().raw_between_actual_extrema,
-                least,
-                "case {case}：极值区间隔 = 对任意指定取最小"
-            );
-        }
-        for round in 0..3 {
-            let mut permuted = inclusion.clone();
-            for g in &mut permuted.groups {
-                rng.shuffle(&mut g.high_sources);
-                rng.shuffle(&mut g.low_sources);
-            }
-            let shuffled = build_stroke_facts(&permuted, &config);
-            assert_eq!(
-                roots_as_sets(shuffled),
-                roots_as_sets(base.clone()),
-                "case {case} round {round}：并列根到达序不进任何判据"
-            );
-        }
-        if case < 24 {
-            check_incremental_prefixes(&raw, &format!("tie_heavy case {case}"));
-        }
+        let shuffled_groups = std::array::from_fn::<_, 3, _>(|_| {
+            inclusion
+                .groups
+                .iter()
+                .map(|g| {
+                    let mut high = g.high_sources.clone();
+                    let mut low = g.low_sources.clone();
+                    rng.shuffle(&mut high);
+                    rng.shuffle(&mut low);
+                    (high, low)
+                })
+                .collect::<Vec<_>>()
+        });
+        cases.push((case, raw, shuffled_groups));
     }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    let (multi_root_endpoints, keep_eq, strokes, designations) = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let cases = &cases;
+                let config = &config;
+                s.spawn(move || {
+                    let (mut mre, mut keq, mut stk, mut des) = (0usize, 0usize, 0usize, 0usize);
+                    for (case, raw, shuffled_groups) in cases.iter().skip(worker).step_by(workers) {
+                        let mut inclusion = process_inclusion_with_facts(raw);
+                        let base = build_stroke_facts(&inclusion, config);
+                        let positions = positions_of_steps(&inclusion);
+                        mre += base
+                            .endpoints
+                            .iter()
+                            .filter(|e| e.extreme_roots.len() > 1)
+                            .count();
+                        keq += base
+                            .pairs
+                            .iter()
+                            .filter(|p| p.evidence.contains(&SAME_KIND_EQUAL_PRICE_KEEP_EARLIER))
+                            .count();
+                        stk += base.strokes.len();
+                        for p in base.pairs.iter().filter(|p| p.conditions.is_some()) {
+                            let mut least = usize::MAX;
+                            for x in &p.old.extreme_roots {
+                                for y in &p.new.extreme_roots {
+                                    let (px, py) = (positions[x], positions[y]);
+                                    assert!(py > px, "case {case}：时间先后的极值区不相交");
+                                    least = least.min(py - px - 1);
+                                    des += 1;
+                                }
+                            }
+                            assert_eq!(
+                                p.conditions.as_ref().unwrap().raw_between_actual_extrema,
+                                least,
+                                "case {case}：极值区间隔 = 对任意指定取最小"
+                            );
+                        }
+                        let base_sets = roots_as_sets(base);
+                        for (round, sg) in shuffled_groups.iter().enumerate() {
+                            for (g, (high, low)) in inclusion.groups.iter_mut().zip(sg.iter()) {
+                                g.high_sources.clone_from(high);
+                                g.low_sources.clone_from(low);
+                            }
+                            let shuffled = build_stroke_facts(&inclusion, config);
+                            assert_eq!(
+                                roots_as_sets(shuffled),
+                                base_sets,
+                                "case {case} round {round}：并列根到达序不进任何判据"
+                            );
+                        }
+                        if *case < 24 {
+                            check_incremental_prefixes(raw, &format!("tie_heavy case {case}"));
+                        }
+                    }
+                    (mre, keq, stk, des)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .fold((0usize, 0usize, 0usize, 0usize), |acc, h| {
+                let (a, b, c, d) = h.join().unwrap();
+                (acc.0 + a, acc.1 + b, acc.2 + c, acc.3 + d)
+            })
+    });
     eprintln!(
         "tb02v property: multi_root_endpoints={multi_root_endpoints} keep_eq={keep_eq} strokes={strokes} designations={designations}"
     );
@@ -539,10 +578,15 @@ fn tb02v_replay_hash_equal_across_fresh_processes() {
             .unwrap_or_else(|| panic!("子进程未打印读数：{stdout}"))
             .to_string()
     };
-    let (a, b) = (run(), run());
+    let (a, b, local) = std::thread::scope(|s| {
+        let ha = s.spawn(|| run());
+        let hb = s.spawn(|| run());
+        let local = replay_digest();
+        (ha.join().unwrap(), hb.join().unwrap(), local)
+    });
     eprintln!("tb02v replay digest a={a} b={b}");
     assert_eq!(a, b, "两个新进程同输入重放哈希不等");
-    assert_eq!(a, replay_digest(), "新进程与本进程读数不等");
+    assert_eq!(a, local, "新进程与本进程读数不等");
 }
 
 /// 紧凑全量重建（生产 `parse_layer` 同一路径）：`IncrFactsState` 折叠 + 唯一 transition。
