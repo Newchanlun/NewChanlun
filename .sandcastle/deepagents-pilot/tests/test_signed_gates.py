@@ -10,12 +10,19 @@ from signing_fixture import Signer
 from test_agent import call, scripted
 from v2env import TICKET, SimulatedCrash, V2Env, crash_at
 
+from pilot1742 import run as pilot_run
 from pilot1742.agent import build_agent
 from pilot1742.approval import SpecAuthorization
 from pilot1742.executor import AdmissionRefused
 from pilot1742.workunit import Takeover, WorkUnit
 
 BRANCH = f"codex/deepagents/t{TICKET}"
+
+
+@pytest.fixture(autouse=True)
+def _fast_poll(monkeypatch):
+    real_sleep = pilot_run.time.sleep
+    monkeypatch.setattr(pilot_run.time, "sleep", lambda s: real_sleep(min(s, 0.01)))
 
 
 @pytest.fixture
