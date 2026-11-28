@@ -175,9 +175,7 @@ theorem section7_pnl_from_remaining_net (side : Side) (Q H : Nat) (d : Int) :
 theorem hedged_two_leg_zero (side : Side) (Q : Nat) (d : Int) :
     parentLegPnl side Q d + childLegPnl side Q d = 0 := by
   rw [section7_two_leg_sum]
-  have h : (Q : Int) - (Q : Int) = 0 := by omega
-  rw [h]
-  simp
+  rw [Int.sub_self, Int.mul_zero, Int.zero_mul]
 
 /--
   ★§7 剩余净方向（p6）：H < Q ⟹ N = σ(Q-H) ≠ 0（仍有净方向，收益来自剩余净敞口）。
@@ -185,8 +183,11 @@ theorem hedged_two_leg_zero (side : Side) (Q : Nat) (d : Int) :
 theorem remaining_net_nonzero (side : Side) (Q H : Nat) (hHQ : H < Q) :
     remainingNet side Q H ≠ 0 := by
   unfold remainingNet
-  have hQH : (Q : Int) - (H : Int) ≠ 0 := by omega
-  cases side <;> simp only [sign, Int.one_mul, Int.neg_one_mul] <;> omega
+  have hQH : (Q : Int) - (H : Int) ≠ 0 :=
+    fun h => Nat.ne_of_gt hHQ (Int.ofNat.inj (Int.eq_of_sub_eq_zero h))
+  cases side
+  · simp only [sign, Int.one_mul]; exact hQH
+  · simp only [sign, Int.neg_one_mul]; exact Int.neg_ne_zero.mpr hQH
 
 /--
   ★剩余净敞口在 H=Q 时归零（p6 反方向）：N = σ(Q-Q) = 0。
@@ -195,7 +196,7 @@ theorem remaining_net_nonzero (side : Side) (Q H : Nat) (hHQ : H < Q) :
 theorem remaining_net_zero_when_equal (side : Side) (Q : Nat) :
     remainingNet side Q Q = 0 := by
   unfold remainingNet
-  cases side <;> simp only [sign, Int.one_mul, Int.neg_one_mul] <;> omega
+  rw [Int.sub_self, Int.mul_zero]
 
 /-! ════════════════════════════════════════════════════════════════════════
   ## §3 ★★telescoping 恒等式（§7 的多 bar 推广，核心产出）
@@ -214,7 +215,7 @@ theorem list_sum_add {α : Type u} (f g : α → Int) (l : List α) :
   | nil => simp
   | cons a l ih =>
       simp only [List.map_cons, List.sum_cons, ih]
-      omega
+      rw [Int.add_assoc, Int.add_left_comm (g a), ← Int.add_assoc]
 
 /-- Σ_t 0 = 0（零函数求和）。 -/
 theorem list_sum_zero {α : Type u} (l : List α) :
@@ -230,8 +231,7 @@ theorem list_sum_zero_of {α : Type u} (f : α → Int) (l : List α)
   | nil => simp
   | cons a l ih =>
       simp only [List.map_cons, List.sum_cons, h a (List.mem_cons_self),
-        ih (fun b hb => h b (List.mem_cons_of_mem a hb))]
-      omega
+        ih (fun b hb => h b (List.mem_cons_of_mem a hb)), Int.zero_add]
 
 /-- (Σ_t f t)·c = Σ_t (f t·c)（右乘分配进求和）。 -/
 theorem sum_mul {α : Type u} (f : α → Int) (c : Int) (l : List α) :
@@ -270,7 +270,7 @@ theorem sum_swap (legs : List LedgerLeg) (f : LedgerLeg → Nat → Int) (T : Na
 theorem sum_at_point (T n : Nat) (f : Nat → Int) (hnT : n < T) :
     ((List.range T).map (fun t => if t = n then f t else 0)).sum = f n := by
   induction T with
-  | zero => omega
+  | zero => exact absurd hnT (Nat.not_lt_zero n)
   | succ m ih =>
       rw [List.range_succ, List.map_append, List.sum_append]
       by_cases h : n = m
@@ -278,20 +278,14 @@ theorem sum_at_point (T n : Nat) (f : Nat → Int) (hnT : n < T) :
         have hzero : ((List.range m).map (fun t => if t = m then f t else 0)).sum = 0 := by
           refine list_sum_zero_of _ _ ?_
           intro t ht
-          have ht' : t < m := (List.mem_range.mp ht)
-          have htne : ¬ (t = m) := by omega
-          simp only [if_neg htne]
+          simp only [if_neg (Nat.ne_of_lt (List.mem_range.mp ht))]
         rw [hzero]
         change 0 + ((if m = m then f m else 0) + 0) = f m
-        rw [if_pos rfl]
-        omega
-      · have hnT' : n < m := by omega
-        have hih := ih hnT'
-        rw [hih]
-        have hTn : ¬ (m = n) := by omega
-        simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil]
-        rw [if_neg hTn]
-        omega
+        rw [if_pos rfl, Int.zero_add, Int.add_zero]
+      · have hnT' : n < m := Nat.lt_of_le_of_ne (Nat.le_of_lt_succ hnT) h
+        rw [ih hnT']
+        simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil,
+          if_neg (Ne.symm h), Int.add_zero]
 
 /-- 指示子拆分 [λ≤t<n+1] = [λ≤t<n] + [t=n]（λ≤n 时逐点成立）。 -/
 theorem indicator_split_add (la n t : Nat) (X : Int) (hln : la ≤ n) :
@@ -299,17 +293,16 @@ theorem indicator_split_add (la n t : Nat) (X : Int) (hln : la ≤ n) :
     = (if la ≤ t ∧ t < n then X else 0) + (if t = n then X else 0) := by
   by_cases h1 : la ≤ t ∧ t < n + 1
   · by_cases h2 : la ≤ t ∧ t < n
-    · have hne : ¬ (t = n) := by omega
-      simp only [if_pos h1, if_pos h2, if_neg hne]
-      omega
-    · have htn : t = n := by omega
-      have hneg2 : ¬ (la ≤ t ∧ t < n) := by omega
-      simp only [if_pos h1, if_neg hneg2, if_pos htn]
-      omega
-  · have hneg2 : ¬ (la ≤ t ∧ t < n) := by omega
-    have hne : ¬ (t = n) := by omega
-    simp only [if_neg h1, if_neg hneg2, if_neg hne]
-    omega
+    · simp only [if_pos h1, if_pos h2, if_neg (Nat.ne_of_lt h2.2), Int.add_zero]
+    · have htn : t = n :=
+        Nat.le_antisymm (Nat.le_of_lt_succ h1.2)
+          (Nat.le_of_not_lt (fun hlt => h2 ⟨h1.1, hlt⟩))
+      simp only [if_pos h1, if_neg h2, if_pos htn, Int.zero_add]
+  · have hneg2 : ¬ (la ≤ t ∧ t < n) :=
+      fun ⟨hla, hlt⟩ => h1 ⟨hla, Nat.lt_succ_of_lt hlt⟩
+    have hne : ¬ (t = n) :=
+      fun heq => h1 ⟨heq ▸ hln, heq ▸ Nat.lt_succ_self n⟩
+    simp only [if_neg h1, if_neg hneg2, if_neg hne, Int.add_zero]
 
 /--
   ★telescoping 引理（指示子版）：Σ_{t<T} [λ≤t<λ+d]·ΔP_t = P_{λ+d} - P_λ（λ+d ≤ T）。
@@ -324,31 +317,26 @@ theorem telescope_indicator (P : Nat → Int) (la d T : Nat) (h : la + d ≤ T) 
           = 0 := by
         refine list_sum_zero_of _ _ ?_
         intro t ht
-        by_cases hc : la ≤ t ∧ t < la + 0
-        · omega
-        · simp only [if_neg hc]
-      rw [hzero]
-      simp only [Nat.add_zero]
-      omega
+        have hc : ¬ (la ≤ t ∧ t < la + 0) :=
+          fun ⟨hle, hlt⟩ => Nat.not_lt.mpr hle (Nat.add_zero la ▸ hlt)
+        simp only [if_neg hc]
+      rw [hzero, Nat.add_zero, Int.sub_self]
   | succ d ih =>
-      have hsucc : la + (d + 1) = (la + d) + 1 := by omega
+      have hsucc : la + (d + 1) = (la + d) + 1 := (Nat.add_assoc la d 1).symm
       have hmap : ((List.range T).map (fun t => if la ≤ t ∧ t < la + (d + 1) then dP P t else 0))
           = ((List.range T).map (fun t =>
               (if la ≤ t ∧ t < la + d then dP P t else 0)
               + (if t = la + d then dP P t else 0))) := by
         apply List.map_congr_left
         intro t _
-        have hs := indicator_split_add la (la + d) t (dP P t) (by omega)
-        simpa [hsucc] using hs
+        have hs := indicator_split_add la (la + d) t (dP P t) (Nat.le_add_right la d)
+        simpa only [hsucc] using hs
       rw [hmap, list_sum_add]
-      have hih : ((List.range T).map (fun t => if la ≤ t ∧ t < la + d then dP P t else 0)).sum
-          = P (la + d) - P la := ih T (by omega)
-      rw [hih]
-      have hpoint := sum_at_point T (la + d) (fun t => dP P t) (by omega)
-      rw [hpoint]
-      rw [hsucc]
+      have hlt : la + d < T := Nat.lt_of_succ_le (show (la + d) + 1 ≤ T from hsucc ▸ h)
+      rw [ih T (Nat.le_of_lt hlt), sum_at_point T (la + d) (fun t => dP P t) hlt, hsucc]
       unfold dP
-      omega
+      rw [Int.sub_eq_add_neg (a := P (la + d)), Int.add_comm (P (la + d)), Int.add_assoc (-P la),
+          Int.add_comm (P (la + d)), Int.sub_add_cancel, Int.add_comm, ← Int.sub_eq_add_neg]
 
 /--
   ★单腿 bar 指示子求和 = 腿毛收益（telescoping 的单腿形式）：
@@ -503,15 +491,9 @@ theorem ledger_identity_with_cost (legs : List LedgerLeg) (P : Nat → Int)
 example : ¬ (∀ (legs : List LedgerLeg) (P : Nat → Int) (T : Nat),
     legPnlSum legs P = barPnlSum legs P T) := by
   intro h
-  have hc : (1 : Int) = 0 := by
-    have := h [{ side := Side.long, q := 1, entry := 0, exit := 1 }]
-      (fun t => (t : Int)) 0
-    unfold legPnlSum barPnlSum at this
-    simp only [List.range_zero, List.map_nil, List.sum_nil, List.map_cons, List.sum_cons] at this
-    unfold LedgerLeg.entryPnl LedgerLeg.signedQ at this
-    simp only [sign] at this
-    omega
-  omega
+  have := h [{ side := Side.long, q := 1, entry := 0, exit := 1 }]
+    (fun t => (t : Int)) 0
+  cases this
 
 /--
   ★见证②（§7 双开退化删约束 H=Q 不可证）：
@@ -521,12 +503,8 @@ example : ¬ (∀ (legs : List LedgerLeg) (P : Nat → Int) (T : Nat),
 example : ¬ (∀ (side : Side) (Q H : Nat) (d : Int),
     parentLegPnl side Q d + childLegPnl side H d = 0) := by
   intro h
-  have hc : (1 : Int) = 0 := by
-    have := h Side.long 2 1 1
-    unfold parentLegPnl childLegPnl at this
-    simp only [sign, Int.one_mul, Int.neg_one_mul] at this
-    omega
-  omega
+  have := h Side.long 2 1 1
+  cases this
 
 /--
   ★见证③（`remaining_net_nonzero` 删前件 H<Q 不可证）：
@@ -545,14 +523,9 @@ example : ¬ (∀ (side : Side) (Q H : Nat), remainingNet side Q H ≠ 0) := by
 example : ¬ (∀ (legs : List LedgerLeg) (c : LedgerLeg → Nat → Int) (C : Nat → Int) (T : Nat),
     grossCostSum legs c T = ((List.range T).map C).sum) := by
   intro h
-  have hc : (1 : Int) = 0 := by
-    have := h [{ side := Side.long, q := 1, entry := 0, exit := 1 }]
-      (fun _ _ => 1) (fun _ => 0) 1
-    unfold grossCostSum legCostSum at this
-    simp only [List.range_succ, List.range_zero, List.map_append, List.map_nil, List.sum_append,
-      List.sum_nil, List.map_cons, List.sum_cons] at this
-    omega
-  omega
+  have := h [{ side := Side.long, q := 1, entry := 0, exit := 1 }]
+    (fun _ _ => 1) (fun _ => 0) 1
+  cases this
 
 /-! ════════════════════════════════════════════════════════════════════════
   ## §6 诚实标签（formalization-validity-domain gatekeeper）
