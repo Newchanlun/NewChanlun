@@ -345,9 +345,19 @@ class TestTopoDivergence:
             n_points=4,
         )
 
-        import persim
+        import sys
+        import types
 
-        monkeypatch.setattr(persim, "wasserstein", lambda *_args, **_kwargs: 1e-8)
+        if "persim" in sys.modules:
+            monkeypatch.setattr(
+                sys.modules["persim"], "wasserstein", lambda *_args, **_kwargs: 1e-8
+            )
+        else:
+            monkeypatch.setitem(
+                sys.modules,
+                "persim",
+                types.SimpleNamespace(wasserstein=lambda *_args, **_kwargs: 1e-8),
+            )
         div = topo_divergence(barcode, barcode, dimension=0)
 
         assert div.wasserstein_ac == 0.0
