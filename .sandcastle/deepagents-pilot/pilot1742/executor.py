@@ -964,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="审查 App 私钥，只原样转给 sweep 派的 review-pr；不复用 --private-key（执行器 App）。"
                             "审查身份文件（external_review.IDENTITY_CONFIG）存在时必须给")
     serve.add_argument("--review-sweep-auto-merge", action="store_true",
-                       help="review_sweep 追平队首，并在精确 head 双门全绿时带 sha 合入；没有 --review-sweep 时记一行警告并忽略")
+                       help="兼容旧参数：#2131 R09 切换前停用自动合入和自动追平，不发送合入或追平 PUT；此参数只开启只读三门与改动分类诊断，仍做覆盖对账并按需撤销原生 auto-merge。没有 --review-sweep 时记一行警告并忽略")
     serve.add_argument("--review-sweep-max-running", type=int, default=None,
                        help="HOST 上同时在跑的审查上限（默认 1；操作员手动起的 review-pr 也算）；"
                             "没有 --review-sweep 时记一行警告并忽略")
