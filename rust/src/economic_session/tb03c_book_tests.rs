@@ -452,23 +452,41 @@ fn eligibility_implies_latch_and_latch_never_regresses() {
             .position(|x| s == x)
             .unwrap()
     };
-    for seed in 1..=12u64 {
-        let books = random_long_books(seed);
-        let mut prev_rank = 0;
-        let mut prev_events = 0;
-        for b in &books {
-            let r = rank(&b["phase"]["latch"]);
-            assert!(r >= prev_rank, "latch 回退 seed={seed}");
-            let events = b["phase"]["events"].as_array().unwrap().len();
-            assert!(events >= prev_events, "阶段事件史被改写 seed={seed}");
-            if b["phase"]["growth_eligible"]["status"] == "Eligible" {
-                assert_eq!(b["phase"]["latch"], "EarningShares", "seed={seed}");
-                assert_eq!(b["phase"]["gate"]["kind"], "SimulatedGateReached");
-                assert_eq!(b["phase"]["growth_enabled"]["status"], "AwaitingPolicy");
-            }
-            (prev_rank, prev_events) = (r, events);
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|tid| {
+                scope.spawn(move || {
+                    for seed in (1u64 + tid as u64..=12u64).step_by(workers) {
+                        let books = random_long_books(seed);
+                        let mut prev_rank = 0;
+                        let mut prev_events = 0;
+                        for b in &books {
+                            let r = rank(&b["phase"]["latch"]);
+                            assert!(r >= prev_rank, "latch 回退 seed={seed}");
+                            let events = b["phase"]["events"].as_array().unwrap().len();
+                            assert!(events >= prev_events, "阶段事件史被改写 seed={seed}");
+                            if b["phase"]["growth_eligible"]["status"] == "Eligible" {
+                                assert_eq!(b["phase"]["latch"], "EarningShares", "seed={seed}");
+                                assert_eq!(b["phase"]["gate"]["kind"], "SimulatedGateReached");
+                                assert_eq!(
+                                    b["phase"]["growth_enabled"]["status"],
+                                    "AwaitingPolicy"
+                                );
+                            }
+                            (prev_rank, prev_events) = (r, events);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
         }
-    }
+    });
     for b in fixture_books() {
         if b["phase"]["growth_eligible"]["status"] == "Eligible" {
             if b["side"] == "long" {
@@ -496,42 +514,62 @@ fn short_eligibility_implies_capital_recovered_and_never_earning_shares() {
             .position(|x| s == x)
             .unwrap()
     };
-    let (mut eligible, mut lost_after_latch) = (0, 0);
-    let (mut eligible_seeds, mut lost_seeds) = (0, 0);
-    for seed in 1..=12u64 {
-        let (e0, l0) = (eligible, lost_after_latch);
-        let books = random_short_books(seed);
-        assert_eq!(books.len(), 61, "seed={seed}");
-        let (mut prev_rank, mut prev_events) = (0, 0);
-        for b in &books {
-            assert_eq!(b["side"], "short");
-            let r = rank(&b["phase"]["latch"]);
-            assert!(r >= prev_rank, "latch 回退 seed={seed}");
-            assert!(
-                r <= 1,
-                "空头事件把 latch 推进到 EarningShares seed={seed}: {b}"
-            );
-            let events = b["phase"]["events"].as_array().unwrap().len();
-            assert!(events >= prev_events, "阶段事件史被改写 seed={seed}");
-            let status = &b["phase"]["growth_eligible"]["status"];
-            assert_eq!(*status, book::growth_eligible_of(b).unwrap(), "{b}");
-            if status == "Eligible" {
-                eligible += 1;
-                assert!(
-                    r >= 1,
-                    "空头 Eligible 而 latch 未到 CapitalRecovered seed={seed}"
-                );
-                assert_eq!(b["phase"]["gate"]["kind"], "SimulatedGateReached");
-                assert_eq!(b["phase"]["growth_enabled"]["status"], "AwaitingPolicy");
-            } else if r >= 1 {
-                assert_eq!(*status, "NotEligible");
-                lost_after_latch += 1;
-            }
-            (prev_rank, prev_events) = (r, events);
-        }
-        eligible_seeds += usize::from(eligible > e0);
-        lost_seeds += usize::from(lost_after_latch > l0);
-    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    let (eligible, lost_after_latch, eligible_seeds, lost_seeds) = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|tid| {
+                scope.spawn(move || {
+                    let (mut eligible, mut lost_after_latch) = (0, 0);
+                    let (mut eligible_seeds, mut lost_seeds) = (0, 0);
+                    for seed in (1u64 + tid as u64..=12u64).step_by(workers) {
+                        let (e0, l0) = (eligible, lost_after_latch);
+                        let books = random_short_books(seed);
+                        assert_eq!(books.len(), 61, "seed={seed}");
+                        let (mut prev_rank, mut prev_events) = (0, 0);
+                        for b in &books {
+                            assert_eq!(b["side"], "short");
+                            let r = rank(&b["phase"]["latch"]);
+                            assert!(r >= prev_rank, "latch 回退 seed={seed}");
+                            assert!(
+                                r <= 1,
+                                "空头事件把 latch 推进到 EarningShares seed={seed}: {b}"
+                            );
+                            let events = b["phase"]["events"].as_array().unwrap().len();
+                            assert!(events >= prev_events, "阶段事件史被改写 seed={seed}");
+                            let status = &b["phase"]["growth_eligible"]["status"];
+                            assert_eq!(*status, book::growth_eligible_of(b).unwrap(), "{b}");
+                            if status == "Eligible" {
+                                eligible += 1;
+                                assert!(
+                                    r >= 1,
+                                    "空头 Eligible 而 latch 未到 CapitalRecovered seed={seed}"
+                                );
+                                assert_eq!(b["phase"]["gate"]["kind"], "SimulatedGateReached");
+                                assert_eq!(
+                                    b["phase"]["growth_enabled"]["status"],
+                                    "AwaitingPolicy"
+                                );
+                            } else if r >= 1 {
+                                assert_eq!(*status, "NotEligible");
+                                lost_after_latch += 1;
+                            }
+                            (prev_rank, prev_events) = (r, events);
+                        }
+                        eligible_seeds += usize::from(eligible > e0);
+                        lost_seeds += usize::from(lost_after_latch > l0);
+                    }
+                    (eligible, lost_after_latch, eligible_seeds, lost_seeds)
+                })
+            })
+            .collect();
+        handles.into_iter().fold((0, 0, 0, 0), |(e, l, es, ls), h| {
+            let (le, ll, les, lls) = h.join().unwrap();
+            (e + le, l + ll, es + les, ls + lls)
+        })
+    });
     assert!(
         eligible > 0,
         "空头随机序列未触发 Eligible，锁为真空（命中种子 {eligible_seeds}/12）"
