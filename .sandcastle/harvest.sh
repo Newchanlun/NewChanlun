@@ -11,8 +11,8 @@
 #      then comment a delivery registration on the ticket.
 #
 # It never merges, never pushes main, never closes tickets and never deletes branches:
-# merging is gated by main's branch protection (required checks deepagents/review and ci-ok,
-# #1003 ruling 3) and a partial slice must not close its ticket
+# main merges follow the phased rule for deepagents/review, ci-ok and DevSkim
+# under the Main merges rule in graph-engineering.md; partial slices must not close tickets
 # (.sandcastle/docs/graph-engineering.md). Build and tests run in CI; no local cargo (#1588).
 # History: #1003 scripted gate -> #1098 rc/ancestor fixes -> #1660 PR mode (host clone,
 # no worktree on main, no auto close/merge).
@@ -174,7 +174,7 @@ for br in $branches; do
     echo
     echo "Reviewer worker: completed (see \`.sandcastle/logs/sandcastle-issue-$n-reviewer.log\` on the host). Build and tests run in CI; harvest.sh does not run cargo locally."
     echo
-    echo "Opened by harvest.sh. It does not merge and does not close tickets: merging is gated by main's branch protection (required checks deepagents/review and ci-ok), and whether this delivery completes #$n is decided at review time against the ticket's acceptance criteria."
+    echo "Opened by harvest.sh. It does not merge and does not close tickets: main merges follow the phased rule for deepagents/review, ci-ok and DevSkim in [graph-engineering.md: main merges](https://github.com/Newchanlun/NewChanlun/blob/main/.sandcastle/docs/graph-engineering.md#%E4%BA%94%E4%B8%AA%E9%9D%A2), and whether this delivery completes #$n is decided at review time against the ticket's acceptance criteria."
     echo
     echo "Refs #$n"
   } > "$body_file"

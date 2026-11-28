@@ -1,7 +1,7 @@
 // Sequential Reviewer（Codex/Astra 版，#1617）—— #1001/#1002/#1003 裁定落地。
 // 每票：host 侧 frontier 取票 + claim → createSandbox（确定性分支，baseBranch=main）
 //   → Phase 1 实装工蜂 → Phase 2 独立评审工蜂（直接在分支上修正）
-//   → 不合 main（工蜂只交分支；合入由分支保护的 deepagents/review 与 ci-ok 把关，#1003 裁 3）。
+//   → 不合 main（工蜂只交分支；合入按 .sandcastle/docs/graph-engineering.md「main 的合入」分阶段核验 deepagents/review、ci-ok、DevSkim）。
 // 跑法：npx tsx .sandcastle/main.mts
 
 import { useScheduler } from "./scheduler-config.mts";

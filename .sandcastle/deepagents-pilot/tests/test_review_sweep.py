@@ -2,6 +2,7 @@ import copy
 import json
 import os
 from datetime import datetime, timezone
+from email.utils import formatdate
 
 import pytest
 import test_external_review as _external_review
@@ -48,9 +49,12 @@ class FakeGitHub:
         state.update(self.states.get(number, {}))
         return state
 
-    def checks(self, head, bindings):
+    def checks(self, number, state, bindings, review_runs):
         assert bindings.get("DevSkim") == 15368 and all(bindings.get(k) == v for k, v in self.required.items())
-        return dict(self.checks_by_head.get(head, {}))
+        return module.MergeChecks(dict(self.checks_by_head.get(state["head"], {})), 1)
+
+    def server_second(self):
+        return 2
 
     def required_checks(self):
         return dict(self.required)
@@ -1159,7 +1163,8 @@ def test_gh_calls_have_a_timeout_and_a_timeout_is_an_unreadable_source(monkeypat
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
     monkeypatch.setattr(module.subprocess, "run", run)
     cli = module.GhCli("Newchanlun/NewChanlun", timeout=7)
-    for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks("a" * 40, BINDINGS), cli.required_checks,
+    for call in (cli.open_pulls, lambda: cli.pr(5), lambda: cli.checks(5, {"head": HEAD}, BINDINGS, []),
+                 cli.required_checks, cli.server_second,
                  lambda: cli.pr_files(5), lambda: cli.merge(5, "a" * 40), lambda: cli.update_branch(5, "a" * 40),
                  lambda: cli.disable_auto_merge(5)):
         with pytest.raises(SourceUnreadable) as caught:
@@ -1447,59 +1452,192 @@ def test_allow_auto_merge_timeout_skips_the_round(lane):
 
 # ---- 第六轮（1354bc7c，run cfbc868b）：检查结论绑定来源 App；serve 的审查私钥单独给 ----
 
-def _gh_fake(statuses, runs, apps=None):
-    apps = apps or {"newchanlun-deepagents-1742": 5486877, "github-actions": 15368}
+HEAD, BASE = "a" * 40, "b" * 40
+BINDINGS = {"deepagents/review": 5664795, "ci-ok": 15368, "DevSkim": 15368}
+REPOSITORY = "Newchanlun/NewChanlun"
+REVIEW_BOT = "newchanlun-review-gate[bot]"
+RUN_UUID = "83f12ba9-f3c5-49ec-845e-da074743c13e"
+STAMP = "2026-11-28T13:03:48Z"
+SECOND = int(datetime.fromisoformat(STAMP.replace("Z", "+00:00")).timestamp())
+CHECK_STATE = {"head": HEAD, "base": BASE, "repository_id": 1150335160, "pr_id": 5426953656}
+
+
+def _gh_fake(statuses, checks, *, apps=None, second=SECOND + 1, puts=None):
+    apps = apps if apps is not None else {"newchanlun-review-gate": 5664795}
+
     def gh(*args):
         path = next(a for a in args if a.startswith(("repos/", "apps/")))
         if path.startswith("apps/"):
             return json.dumps({"id": apps.get(path.removeprefix("apps/"), -1)})
+        if path.endswith("/merge"):
+            assert puts is not None and args[1:3] == ("-X", "PUT")
+            puts.append((path, *args[4:]))
+            return "{}"
         if "/statuses" in path:
             return "\n".join(json.dumps(x) for x in statuses)
-        return "\n".join(json.dumps(x) for x in runs)
+        if "/check-runs?" in path:
+            assert "filter=all" in path
+            return "\n".join(json.dumps(check) for check, _, _ in checks)
+        if "/actions/runs/" in path:
+            return json.dumps(next(run for _, run, _ in checks if str(run["id"]) == path.rsplit("/", 1)[1]))
+        if "/actions/jobs/" in path:
+            return json.dumps(next(job for _, _, job in checks if str(job["id"]) == path.rsplit("/", 1)[1]))
+        assert path == f"repos/{REPOSITORY}" and "--include" in args and "Cache-Control: no-cache" in args
+        date = formatdate(second() if callable(second) else second, usegmt=True)
+        return f"HTTP/2.0 200 OK\nDate: {date}\n\n{{}}"
+
     return gh
 
 
-def _status(context, state, login):
-    return {"context": context, "state": state, "creator": {"login": login, "type": "Bot"}}
+def _review_record(state=CHECK_STATE, number=1810):
+    description = f"run={RUN_UUID} b={state['base'][:12]} h={state['head'][:12]} success"
+    target = {"run_id": RUN_UUID, "repository_id": state["repository_id"], "pr_number": number,
+              "base_sha": state["base"], "head_sha": state["head"]}
+    status = {"id": 60106514448, "context": "deepagents/review", "state": "success",
+              "description": description, "creator": {"login": REVIEW_BOT, "type": "Bot"},
+              "created_at": "2026-11-28T13:03:35Z", "updated_at": "2026-11-28T13:03:38Z"}
+    publication = {"id": status["id"], "sha": state["head"], "state": status["state"], "description": description}
+    outcome = {"run_id": RUN_UUID, "target": dict(target), "verdict": "PASS", "publication": publication}
+    return status, {"target": target, "outcome": outcome}
 
 
-def _run(name, conclusion, app_id, run_id=1):
-    return {"name": name, "status": "completed", "conclusion": conclusion, "app": {"id": app_id},
-            "id": run_id, "started_at": f"2026-11-09T00:00:0{run_id}Z"}
-
-
-BINDINGS = {"deepagents/review": 5486877, "ci-ok": 15368, "DevSkim": 15368}
+def _run(name, state=CHECK_STATE, *, check_id=140984998172, conclusion="success", app_id=15368,
+         path=None, event="pull_request", number=1810, pr_id=None):
+    run_id = check_id + 1000
+    head = state["head"]
+    check = {"name": name, "status": "completed", "conclusion": conclusion, "app": {"id": app_id},
+             "id": check_id, "head_sha": head, "check_suite": {"id": run_id + 1000}, "completed_at": STAMP,
+             "details_url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}/job/{check_id}"}
+    run = {"id": run_id, "run_attempt": 1, "event": event, "path": path or module.WORKFLOWS.get(name),
+           "repository": {"id": state["repository_id"]}, "head_sha": head, "check_suite_id": run_id + 1000,
+           "pull_requests": [{"id": pr_id or state["pr_id"], "number": number, "base": {"ref": "main"},
+                              "head": {"sha": head}}]}
+    job = {"id": check_id, "name": name, "head_sha": head, "run_attempt": 1, "run_id": run_id,
+           "check_run_url": f"https://api.github.com/repos/{REPOSITORY}/check-runs/{check_id}"}
+    return check, run, job
 
 
 def test_spoofed_same_name_checks_from_other_apps_do_not_count(monkeypatch):
-    """opus 中：同仓 PR 可加一个叫 deepagents/review 或 DevSkim 的 job、或用别的身份发同名 status。
-    只认分支保护（DevSkim 为 GATED_APP_IDS）绑定的来源 App，同名伪造的 success 不算。"""
-    cli = module.GhCli("Newchanlun/NewChanlun")
-    statuses = [_status("deepagents/review", "success", "someone-else[bot]"),   # 最新一条是伪造
-                _status("deepagents/review", "failure", "newchanlun-deepagents-1742[bot]")]
-    runs = [_run("deepagents/review", "success", 15368, 1),   # Actions 里的同名 job
-            _run("DevSkim", "success", 99999, 2),             # 别的 App 跑的 DevSkim
-            _run("ci-ok", "success", 15368, 3)]
-    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs))
-    assert cli.checks("a" * 40, BINDINGS) == {"deepagents/review": "failure", "ci-ok": "success"}
+    cli = module.GhCli(REPOSITORY)
+    status, record = _review_record()
+    spoof = {**status, "context": "DeepAgents/Review", "id": status["id"] + 1,
+             "creator": {"login": "someone-else[bot]", "type": "Bot"}}
+    checks = [_run("deepagents/review"), _run("DevSkim", app_id=99999), _run("ci-ok", check_id=3)]
+    monkeypatch.setattr(cli, "_gh", _gh_fake([status, spoof], checks))
+    actual = cli.checks(1810, CHECK_STATE, BINDINGS, [record])
+    assert actual == module.MergeChecks({"deepagents/review": "pending", "ci-ok": "success"})
 
 
-def test_genuine_checks_from_bound_apps_count(monkeypatch):
-    cli = module.GhCli("Newchanlun/NewChanlun")
-    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
-    runs = [_run("DevSkim", "success", 15368, 1), _run("ci-ok", "success", 15368, 2)]
-    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs))
-    assert cli.checks("a" * 40, BINDINGS) == {name: "success" for name in BINDINGS}
+def test_genuine_checks_from_bound_apps_count_even_with_unrelated_same_name_runs(monkeypatch):
+    cli = module.GhCli(REPOSITORY)
+    status, record = _review_record()
+    checks = [_run("DevSkim", check_id=1), _run("ci-ok", check_id=2),
+              _run("ci-ok", check_id=3, event="workflow_dispatch"),
+              _run("DevSkim", check_id=4, path=".github/workflows/other.yml"),
+              _run("ci-ok", check_id=5, number=1811, pr_id=99)]
+    monkeypatch.setattr(cli, "_gh", _gh_fake([status], checks))
+    assert cli.checks(1810, CHECK_STATE, BINDINGS, [record]) == module.MergeChecks(
+        {name: "success" for name in BINDINGS}, SECOND)
 
 
-@pytest.mark.parametrize("apps", [{"newchanlun-deepagents-1742": 1, "github-actions": 15368}, None])
-def test_status_from_unknown_or_mismatched_app_slug_fails_closed(monkeypatch, apps):
-    """status 只露 bot 账号：bot 由 APP_SLUGS 推出并经 GET /apps/{slug} 核对 id；对不上或不在表里都不算。"""
-    cli = module.GhCli("Newchanlun/NewChanlun")
-    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
-    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, [], apps))
-    bindings = BINDINGS if apps else {**BINDINGS, "deepagents/review": 424242}
-    assert "deepagents/review" not in cli.checks("a" * 40, bindings)
+@pytest.mark.parametrize("apps,bound", [({"newchanlun-review-gate": 1}, 5664795), ({}, 424242)])
+def test_status_from_unknown_or_mismatched_app_slug_fails_closed(monkeypatch, apps, bound):
+    cli = module.GhCli(REPOSITORY)
+    status, record = _review_record()
+    monkeypatch.setattr(cli, "_gh", _gh_fake([status], [], apps=apps))
+    actual = cli.checks(1810, CHECK_STATE, {**BINDINGS, "deepagents/review": bound}, [record])
+    assert actual.conclusions.get("deepagents/review") != "success" and actual.latest_second is None
+
+
+@pytest.fixture
+def transition(lane, monkeypatch):
+    """真实 sweep 决策与 GhCli 检查、时钟、PUT；仅 HTTP、PR 队列及宿主原件用离线夹具。"""
+    sweep, _, github = make(lane, run=False, auto_merge=True)
+    cli = module.GhCli(REPOSITORY)
+    state = {**github.pr(1810), "repository_id": CHECK_STATE["repository_id"], "pr_id": CHECK_STATE["pr_id"]}
+    status, record = _review_record(state)
+    checks = [_run("ci-ok", state, check_id=1), _run("DevSkim", state, check_id=2)]
+    server = [SECOND + 1]
+    puts = []
+    records = [record]
+    monkeypatch.setattr(github, "pr", lambda number: dict(state))
+    monkeypatch.setattr(github, "checks", cli.checks)
+    monkeypatch.setattr(github, "server_second", cli.server_second)
+    monkeypatch.setattr(github, "merge", cli.merge)
+    monkeypatch.setattr(lane, "status", lambda number: records)
+    monkeypatch.setattr(cli, "_gh", _gh_fake([status], checks, second=lambda: server[0], puts=puts))
+    return sweep, state, status, records, checks, server, puts
+
+
+@pytest.mark.parametrize("name", ["ci-ok", "DevSkim"])
+@pytest.mark.parametrize("conclusion", ["neutral", "skipped"])
+def test_transition_never_merges_non_success_actions_conclusions(transition, name, conclusion):
+    sweep, state, _, _, checks, _, puts = transition
+    checks.append(_run(name, state, check_id=5, conclusion=conclusion))
+    assert acts(sweep.tick())[-1] == "waiting" and puts == []
+
+
+@pytest.mark.parametrize("defect", ["wrong-pr", "wrong-full-base-same-prefix", "wrong-base-prefix",
+                                   "wrong-head", "wrong-publication-id", "missing-original"])
+def test_transition_requires_the_exact_review_original(transition, defect):
+    sweep, state, status, records, _, _, puts = transition
+    record = records[0]
+    if defect == "missing-original":
+        records.clear()
+    elif defect == "wrong-publication-id":
+        record["outcome"]["publication"]["id"] += 1
+    elif defect == "wrong-base-prefix":
+        status["description"] = status["description"].replace(state["base"][:12], "f" * 12)
+    else:
+        key, value = {
+            "wrong-pr": ("pr_number", 1811),
+            "wrong-full-base-same-prefix": ("base_sha", state["base"][:12] + ("a" if state["base"][12] != "a" else "f")
+                                           + state["base"][13:]),
+            "wrong-head": ("head_sha", "f" * 40),
+        }[defect]
+        record["target"][key] = record["outcome"]["target"][key] = value
+    assert acts(sweep.tick())[-1] == "waiting" and puts == []
+
+
+@pytest.mark.parametrize("defect", ["workflow_dispatch", "workflow", "pr", "head", "attempt", "unproven-pr", "ambiguous-pr"])
+def test_transition_requires_actions_provenance(transition, defect):
+    sweep, _, _, _, checks, _, puts = transition
+    check, run, job = checks[0]
+    if defect == "workflow_dispatch":
+        run["event"] = defect
+    elif defect == "workflow":
+        run["path"] = ".github/workflows/other.yml"
+    elif defect == "pr":
+        run["pull_requests"] = [{**run["pull_requests"][0], "id": 99, "number": 1811}]
+    elif defect == "head":
+        check["head_sha"] = "f" * 40
+    elif defect == "attempt":
+        run["run_attempt"] = job["run_attempt"] + 1
+    elif defect == "unproven-pr":
+        run["pull_requests"] = []
+    elif defect == "ambiguous-pr":
+        run["pull_requests"].append({**run["pull_requests"][0], "id": 99, "number": 1811})
+    assert "merged" not in acts(sweep.tick()) and puts == []
+
+
+@pytest.mark.parametrize("latest", ["status-created", "status-updated", "ci-ok", "DevSkim"])
+def test_transition_only_puts_after_strictly_later_github_second(transition, latest):
+    sweep, state, status, _, checks, server, puts = transition
+    later = "2026-11-28T13:03:50Z"
+    boundary = SECOND + 2
+    if latest == "status-created":
+        status["created_at"] = status["updated_at"] = later
+    elif latest == "status-updated":
+        status["updated_at"] = later
+    else:
+        check = next(check for check, _, _ in checks if check["name"] == latest)
+        check["completed_at"] = later
+    for early in (boundary - 1, boundary):
+        server[0] = early
+        assert acts(sweep.tick())[-1] == "waiting-check-second" and puts == []
+    server[0] = boundary + 1
+    assert acts(sweep.tick())[-1] == "merged"
+    assert puts == [(f"repos/{REPOSITORY}/pulls/1810/merge", "-f", f"sha={state['head']}", "-f", "merge_method=merge")]
 
 
 @pytest.mark.parametrize("missing", ["enforce_admins", "strict", "binding"])
@@ -1508,7 +1646,7 @@ def test_protection_mismatch_never_merges(lane, missing):
     github = FakeGitHub(lane, required=() if missing != "binding" else ("deepagents/review",))
     green(github, lane.gateway.pr["head"]["sha"])
     if missing != "binding":
-        github.checks = lambda head, bindings: dict(github.checks_by_head.get(head, {}))
+        github.checks = lambda number, state, bindings, runs: module.MergeChecks(github.checks_by_head[state["head"]], 1)
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
     assert any(a["action"] == "auto-merge-unsafe" for a in actions) and github.calls == []
@@ -1531,7 +1669,7 @@ def test_review_binding_not_the_configured_reviewer_app_never_merges(lane, bound
 
 
 def test_reviewer_app_binding_merges_when_green(lane):
-    """对照：绑定审查专用 App 且与身份文件一致时，精确 head 双门全绿照常合入。"""
+    """对照：绑定审查专用 App 且与身份文件一致时，精确 head 三门全绿照常合入。"""
     github = FakeGitHub(lane)
     head = lane.gateway.pr["head"]["sha"]
     green(github, head)
@@ -1542,12 +1680,13 @@ def test_reviewer_app_binding_merges_when_green(lane):
 
 def test_executor_app_status_alone_does_not_satisfy_reviewer_binding(monkeypatch):
     """绑定审查 App 5664795 时，执行器 App 发的 deepagents/review=success 不算（合入看的检查只认绑定来源）。"""
-    cli = module.GhCli("Newchanlun/NewChanlun")
-    statuses = [_status("deepagents/review", "success", "newchanlun-deepagents-1742[bot]")]
-    runs = [_run("DevSkim", "success", 15368, 1), _run("ci-ok", "success", 15368, 2)]
-    apps = {"newchanlun-deepagents-1742": 5486877, "newchanlun-review-gate": 5664795, "github-actions": 15368}
-    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, runs, apps))
-    assert cli.checks("a" * 40, {**BINDINGS, "deepagents/review": 5664795}) == {"ci-ok": "success", "DevSkim": "success"}
+    cli = module.GhCli(REPOSITORY)
+    status, record = _review_record()
+    status["creator"]["login"] = "newchanlun-deepagents-1742[bot]"
+    checks = [_run("DevSkim", check_id=1), _run("ci-ok", check_id=2)]
+    monkeypatch.setattr(cli, "_gh", _gh_fake([status], checks))
+    assert cli.checks(1810, CHECK_STATE, BINDINGS, [record]) == module.MergeChecks(
+        {"deepagents/review": "pending", "ci-ok": "success", "DevSkim": "success"})
 
 
 def test_configured_review_app_reads_identity_file(tmp_path):
