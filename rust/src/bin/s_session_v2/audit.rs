@@ -61,56 +61,49 @@ impl Family {
             fn(&rusqlite::Row<'_>) -> rusqlite::Result<(String, Option<i64>, Value)>,
         ) = match name {
             "witnesses" => (WITNESSES_SQL, |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    Some(r.get::<_, i64>(1)?),
-                    json!({
-                        "witness_id": r.get::<_, String>(0)?,
-                        "object_id": r.get::<_, String>(2)?,
-                        "slot": r.get::<_, i64>(3)?.to_string(),
-                        "merged_source_index": r.get::<_, i64>(4)?.to_string(),
-                        "merged_high": r.get::<_, String>(5)?,
-                        "merged_low": r.get::<_, String>(6)?,
-                        "merged_open": r.get::<_, String>(7)?,
-                        "merged_close": r.get::<_, String>(8)?,
-                        "raw_bars": project_raw_bars(&json_column(r, 9, JsonShape::Array)?)
-                            .map_err(|e| json_column_error(9, e))?,
-                    }),
-                ))
+                let id: String = r.get(0)?;
+                let born_gen = r.get::<_, i64>(1)?;
+                let record = json!({
+                    "witness_id": id.clone(),
+                    "object_id": r.get::<_, String>(2)?,
+                    "slot": r.get::<_, i64>(3)?.to_string(),
+                    "merged_source_index": r.get::<_, i64>(4)?.to_string(),
+                    "merged_high": r.get::<_, String>(5)?,
+                    "merged_low": r.get::<_, String>(6)?,
+                    "merged_open": r.get::<_, String>(7)?,
+                    "merged_close": r.get::<_, String>(8)?,
+                    "raw_bars": project_raw_bars(&json_column(r, 9, JsonShape::Array)?)
+                        .map_err(|e| json_column_error(9, e))?,
+                });
+                Ok((id, Some(born_gen), record))
             }),
             "observations" => (OBSERVATIONS_SQL, |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    Some(r.get::<_, i64>(1)?),
-                    json!({
-                        "observation_id": r.get::<_, String>(0)?,
-                        "batch_id": r.get::<_, String>(2)?,
-                        "kind": r.get::<_, String>(3)?,
-                        "window_start": r.get::<_, Option<i64>>(4)?,
-                        "window_mid": r.get::<_, Option<i64>>(5)?,
-                        "window_end": r.get::<_, Option<i64>>(6)?,
-                        "reason": r.get::<_, String>(7)?,
-                        "detail": json_column(r, 8, JsonShape::Object)?,
-                    }),
-                ))
+                let id: String = r.get(0)?;
+                let born_gen = r.get::<_, i64>(1)?;
+                let record = json!({
+                    "observation_id": id.clone(),
+                    "batch_id": r.get::<_, String>(2)?,
+                    "kind": r.get::<_, String>(3)?,
+                    "window_start": r.get::<_, Option<i64>>(4)?,
+                    "window_mid": r.get::<_, Option<i64>>(5)?,
+                    "window_end": r.get::<_, Option<i64>>(6)?,
+                    "reason": r.get::<_, String>(7)?,
+                    "detail": json_column(r, 8, JsonShape::Object)?,
+                });
+                Ok((id, Some(born_gen), record))
             }),
             "relations" => (RELATIONS_SQL, |r| {
                 let subject: String = r.get(0)?;
                 let relation_type: String = r.get(1)?;
                 let object: String = r.get(2)?;
-                Ok((
-                    canonical_json(&json!({
-                        "subject": subject,
-                        "relation_type": relation_type,
-                        "object": object,
-                    })),
-                    Some(r.get::<_, i64>(3)?),
-                    json!({
-                        "subject": subject,
-                        "relation_type": relation_type,
-                        "object": object,
-                    }),
-                ))
+                let born_gen = r.get::<_, i64>(3)?;
+                let record = json!({
+                    "subject": subject,
+                    "relation_type": relation_type,
+                    "object": object,
+                });
+                let id = canonical_json(&record);
+                Ok((id, Some(born_gen), record))
             }),
             _ => return Err("StorageUnavailable：未知索引族".into()),
         };
@@ -120,25 +113,32 @@ impl Family {
             born: BTreeMap::new(),
             seen: BTreeSet::new(),
         };
-        let mut q = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut q = conn.prepare_cached(sql).map_err(|e| e.to_string())?;
         let mut rows = q.query([]).map_err(|e| e.to_string())?;
+        let is_relations = name == "relations";
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
             let (id, generation, record) = project(r).map_err(|e| e.to_string())?;
             let g = generation.ok_or("StorageUnavailable：索引缺出生代")?;
-            if identity(&record, name)? != id {
+            if !is_relations && identity(&record, name)? != id {
                 return Err(format!(
                     "StorageUnavailable：{name} 独立索引身份与其记录不一致"
                 ));
             }
-            if result.records.contains_key(&id) {
-                return Err(format!("StorageUnavailable：{name} 重复身份"));
+            match result.records.entry(id) {
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(format!("StorageUnavailable：{name} 重复身份"));
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    result.born.entry(g).or_default().insert(slot.key().clone());
+                    // relations 只含三个 String 键，legacy_payload_projection 恒等，id 已是 canonical_json(&record)。
+                    let canonical = if is_relations {
+                        slot.key().clone()
+                    } else {
+                        canonical_json(&legacy_payload_projection(&record))
+                    };
+                    slot.insert((std::sync::Arc::new(record), canonical, g));
+                }
             }
-            result.born.entry(g).or_default().insert(id.clone());
-            // 记录只保留一份不可变投影（`Arc`），不再按视图重复深拷贝整条 payload。
-            let canonical = canonical_json(&legacy_payload_projection(&record));
-            result
-                .records
-                .insert(id, (std::sync::Arc::new(record), canonical, g));
         }
         Ok(result)
     }
@@ -161,46 +161,57 @@ impl Family {
             if !present.insert(id.clone()) {
                 return Err(format!("StorageUnavailable：{} Delta 重复身份", self.name));
             }
-            let (_, canonical, born) = self
+            let (stored, canonical, born) = self
                 .records
                 .get(&id)
                 .ok_or("StorageUnavailable：Delta 没有独立索引端点")?;
-            if *canonical != canonical_json(&legacy_payload_projection(record))
-                || *born > g
-                || (!self.seen.contains(&id) && *born != g)
+            let already_seen = self.seen.contains(&id);
+            if *born > g
+                || (!already_seen && *born != g)
+                || (stored.as_ref() != record
+                    && *canonical != canonical_json(&legacy_payload_projection(record)))
             {
                 return Err(format!(
                     "StorageUnavailable：{} 内容/首次发布代不一致",
                     self.name
                 ));
             }
-            self.seen.insert(id);
+            if !already_seen {
+                self.seen.insert(id);
+            }
         }
         let mut batch_ids = BTreeSet::new();
         for record in batch_records {
             let id = identity(record, self.name)?;
-            if !batch_ids.insert(id.clone()) {
-                return Err(format!(
-                    "StorageUnavailable：{} 封存批次重复身份",
-                    self.name
-                ));
-            }
-            let (_, canonical, born) = self.records.get(&id).ok_or_else(|| {
-                format!(
-                    "StorageUnavailable：{} 封存批次成员没有独立索引端点",
-                    self.name
-                )
-            })?;
-            if *born > g || *canonical != canonical_json(&legacy_payload_projection(record)) {
+            let (stored, canonical, born) = {
+                if !batch_ids.insert(id.clone()) {
+                    return Err(format!(
+                        "StorageUnavailable：{} 封存批次重复身份",
+                        self.name
+                    ));
+                }
+                self.records.get(&id).ok_or_else(|| {
+                    format!(
+                        "StorageUnavailable：{} 封存批次成员没有独立索引端点",
+                        self.name
+                    )
+                })?
+            };
+            if *born > g
+                || (!std::sync::Arc::ptr_eq(record, stored)
+                    && stored.as_ref() != record.as_ref()
+                    && *canonical != canonical_json(&legacy_payload_projection(record)))
+            {
                 return Err(format!(
                     "StorageUnavailable：{} 封存批次内容/发布代与独立索引不一致",
                     self.name
                 ));
             }
         }
-        let born_g = self.born.get(&g).cloned().unwrap_or_default();
+        let empty_born = BTreeSet::new();
+        let born_g = self.born.get(&g).unwrap_or(&empty_born);
         if mode.changes_only() {
-            if present != born_g {
+            if &present != born_g {
                 return Err(format!(
                     "StorageUnavailable：{} 本代 Delta 不等于本代首次发布集（漏 birth 或伪旧 member）",
                     self.name
@@ -262,27 +273,31 @@ impl AuditWalk {
             raw: raw.to_vec(),
             objects: BTreeMap::new(),
         };
-        let mut object_ids = BTreeSet::new();
-        for o in objects.iter().chain(withdrawn.iter()) {
-            if !object_ids.insert(identity(o, "objects")?) {
-                return Err("StorageUnavailable：对象重复身份".into());
-            }
-            // 三个视图共享同一份不可变投影：每个对象只深拷贝一次。
-            let shared = std::sync::Arc::new(o.clone());
-            result
-                .objects
-                .insert(identity(o, "objects")?, shared.clone());
-            result
-                .births
-                .entry(number(o, "first_known_generation")?)
-                .or_default()
-                .push(shared.clone());
-            if !o["withdrawn_generation"].is_null() {
-                result
-                    .deaths
-                    .entry(number(o, "withdrawn_generation")?)
-                    .or_default()
-                    .push(shared);
+        for o in objects.into_iter().chain(withdrawn.into_iter()) {
+            let id = identity(&o, "objects")?;
+            match result.objects.entry(id) {
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err("StorageUnavailable：对象重复身份".into());
+                }
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    let first_gen = number(&o, "first_known_generation")?;
+                    let withdrawn_gen = if !o["withdrawn_generation"].is_null() {
+                        Some(number(&o, "withdrawn_generation")?)
+                    } else {
+                        None
+                    };
+                    // 三个视图共享同一份不可变投影，直接移动所有权零深拷贝。
+                    let shared = std::sync::Arc::new(o);
+                    slot.insert(shared.clone());
+                    result
+                        .births
+                        .entry(first_gen)
+                        .or_default()
+                        .push(shared.clone());
+                    if let Some(wg) = withdrawn_gen {
+                        result.deaths.entry(wg).or_default().push(shared);
+                    }
+                }
             }
         }
         Ok(result)
@@ -415,7 +430,10 @@ impl AuditWalk {
             let mut record = record.clone();
             record["batch_id"] = delta["index_frontier"].clone();
             let mut wire = project_object_wire(&record)?;
-            if let Some(old) = self.active.get(&identity(&wire, "objects")?) {
+            let wire_id = wire["object_id"]
+                .as_str()
+                .ok_or("StorageUnavailable：索引身份缺失")?;
+            if let Some(old) = self.active.get(wire_id) {
                 for key in [
                     "batch_id",
                     "first_known_generation",
@@ -486,8 +504,9 @@ impl AuditWalk {
                 }
                 Some(old) if !mode.changes_only() => {
                     // 旧 full 域：完整活动集重发，既有身份必须逐字段一致（同 ID 异内容不得吞掉）。
-                    if canonical_json(&legacy_payload_projection(old))
-                        != canonical_json(&legacy_payload_projection(o))
+                    if old.as_ref() != o
+                        && canonical_json(&legacy_payload_projection(old))
+                            != canonical_json(&legacy_payload_projection(o))
                     {
                         return Err(
                             "StorageUnavailable：Delta upsert 与既有活动身份内容不一致".into()
@@ -505,9 +524,8 @@ impl AuditWalk {
         for w in required_array(delta, "withdrawals")? {
             let id = w["object_id"]
                 .as_str()
-                .ok_or("StorageUnavailable：Delta 撤回缺 object_id")?
-                .to_string();
-            if delta_next.remove(&id).is_none() {
+                .ok_or("StorageUnavailable：Delta 撤回缺 object_id")?;
+            if delta_next.remove(id).is_none() {
                 return Err("StorageUnavailable：Delta 撤回无活动前件".into());
             }
         }
@@ -525,7 +543,16 @@ impl AuditWalk {
         };
         // 只在首次完整比较成功后复用规范字符串；不再需要这份派生 Value 集合。
         drop(batch_next);
-        {
+        // index_next 已刚通过 normalize_record_iter 与 normalized_batch_next 强相等核验；
+        // 若 delta_next 与 index_next 逐项相同（含指针相等快路径），其规范结果必然一致。
+        let delta_matches_index = delta_next.len() == index_next.len()
+            && delta_next
+                .iter()
+                .zip(index_next.iter())
+                .all(|((k1, v1), (k2, v2))| {
+                    k1 == k2 && (std::sync::Arc::ptr_eq(v1, v2) || v1.as_ref() == v2.as_ref())
+                });
+        if !delta_matches_index {
             let actual = normalize_record_iter(
                 delta_next.values().map(|v| v.as_ref()),
                 "objects/Delta活动集",
@@ -615,23 +642,26 @@ impl AuditWalk {
                 .records
                 .get(&id)
                 .ok_or("StorageUnavailable：观察没有独立端点")?;
-            if !self.original_observations.contains_key(&id) {
-                if *born != g || stored["batch_id"] != delta["index_frontier"] {
-                    return Err("StorageUnavailable：观察首版批次/出生代不一致".into());
+            let original = match self.original_observations.entry(id) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.get().clone(),
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    if *born != g || stored["batch_id"] != delta["index_frontier"] {
+                        return Err("StorageUnavailable：观察首版批次/出生代不一致".into());
+                    }
+                    let mut first = ob.clone();
+                    first["observation_id"] = json!(slot.key());
+                    first["batch_id"] = delta["index_frontier"].clone();
+                    let original = project_observation_wire(&first)?;
+                    if stored.as_ref() != &original {
+                        same_record_iters(
+                            std::iter::once(stored.as_ref()),
+                            std::iter::once(&original),
+                            "observation/原封存首版",
+                        )?;
+                    }
+                    slot.insert(std::sync::Arc::new(original)).clone()
                 }
-                let mut first = ob.clone();
-                first["observation_id"] = json!(id);
-                first["batch_id"] = delta["index_frontier"].clone();
-                let original = project_observation_wire(&first)?;
-                same_record_iters(
-                    std::iter::once(stored.as_ref()),
-                    std::iter::once(&original),
-                    "observation/原封存首版",
-                )?;
-                self.original_observations
-                    .insert(id.clone(), std::sync::Arc::new(original));
-            }
-            let original = self.original_observations.get(&id).unwrap().clone();
+            };
             if *born == g {
                 first_observations.push(original.clone());
             }
