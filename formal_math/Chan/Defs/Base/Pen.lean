@@ -112,6 +112,12 @@ inductive PenTiePolicy where
   | preferEarlier | preferLater
   deriving DecidableEq
 
+/-- 非空等值簇：每个成员保存分型和一条已合法连接的逆序前缀。
+[077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
+structure PenPivotCluster (P : Type _) [LinearOrder P] where
+  first : LocalFractal P × List (LocalFractal P)
+  laterRev : List (LocalFractal P × List (LocalFractal P))
+
 /-- 从左至右保留初始有效极值。新极值反证当前后缀时逐级重试前驱，
 不按全局笔数重选首端；最后只对在线链作饱和三检和可互换等值破平。
 [069:20] 例如，第一个红箭头和第二个绿箭头之间显然不能构成一笔，也就是说，这两个，只能取一个：如果取第一个红箭头，那么第二个绿箭头就不是笔中分型，那么第二个红箭头，显然是一个底分型，因此，就形成两个底分型连续的划分，显然，这时候，第一个就不算了，这和前面说取第一个红箭头对着的底分型矛盾。所以，这里，只能取第二个绿箭头，这时候，第一个绿箭头对应的顶分型，自然就不算笔中的顶了。
@@ -120,43 +126,74 @@ def penPivots (r : PenRule) (bars : List (MergedBar P))
     (tie : PenTiePolicy := .preferEarlier) : List (LocalFractal P) :=
   let allPivots := scanLocalFractals bars
   let edge := fun a b => decide (ValidPenPair r bars a b)
-  let stack := allPivots.foldl (stepPivots tie edge) []
-  saturatePivots tie edge allPivots (allPivots.length ^ 2 + 1) stack.reverse
+  let stack := allPivots.foldl (stepPivots edge) []
+  -- 先取一条合法链作锚；修补时按实际前后邻点破平。
+  let pivots := stack.head?.map (fun c => (c.first.1 :: c.first.2).reverse)
+  saturatePivots tie edge allPivots (2 * allPivots.length ^ 2 + 1) (pivots.getD [])
 where
   /-- 只比较同性质极值，顶取更高、底取更低。
   [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
   betterExtreme (x a : LocalFractal P) : Bool :=
     x.kind = a.kind && (if a.kind = .top then a.extreme < x.extreme else x.extreme < a.extreme)
 
-  /-- 同类极值相等时按显式的先后顺序比较。
+  /-- 同性质且同极值，不比较位置或邻接。
+  [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
+  equalExtreme (x a : LocalFractal P) : Bool := x.kind = a.kind && x.extreme = a.extreme
+
+  /-- 候选均已接通同一组邻点时，严格择优；极值相等才比较下标。
   [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
   preferPivot (tie : PenTiePolicy) (x a : LocalFractal P) : Bool :=
-    betterExtreme x a ||
-      (x.kind = a.kind && x.extreme = a.extreme &&
-        (if tie = .preferEarlier then x.first < a.first else a.first < x.first))
+    betterExtreme x a || (equalExtreme x a &&
+      (if tie = .preferEarlier then x.first < a.first else a.first < x.first))
 
-  /-- 反证后的每一层都重试前驱，直到找到合法连接或重置首端。
-  [069:20] 例如，第一个红箭头和第二个绿箭头之间显然不能构成一笔，也就是说，这两个，只能取一个：如果取第一个红箭头，那么第二个绿箭头就不是笔中分型，那么第二个红箭头，显然是一个底分型，因此，就形成两个底分型连续的划分，显然，这时候，第一个就不算了，这和前面说取第一个红箭头对着的底分型矛盾。所以，这里，只能取第二个绿箭头，这时候，第一个绿箭头对应的顶分型，自然就不算笔中的顶了。 -/
+  /-- 筛出可连的前驱，以其中一条合法前缀作为见证；前驱簇仍完整保留。
+  这一步不按破平策略选边。
+  [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
+  linkPivot (edge : LocalFractal P → LocalFractal P → Bool) (prior : Option (PenPivotCluster P))
+      (x : LocalFractal P) : Option (LocalFractal P × List (LocalFractal P)) :=
+    match prior with
+    | none => some (x, [])
+    | some a =>
+      let compatible := (a.first :: a.laterRev).filter fun (m, _) => edge m x
+      compatible.head?.map fun (m, prefixRev) => (x, m :: prefixRev)
+
+  /-- 从待反证的同性帧开始。每跨一层必须先胜过该层极值或与之等值，
+  并重试其紧邻前驱；孤立异向帧或更强历史帧阻止回溯。
+  [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
   rewindPivots (edge : LocalFractal P → LocalFractal P → Bool)
-      (x : LocalFractal P) : List (LocalFractal P) → List (LocalFractal P)
-    | [] => [x]
-    | a :: rest => if edge a x then x :: a :: rest else rewindPivots edge x rest
+      (x : LocalFractal P) : List (PenPivotCluster P) → Option (List (PenPivotCluster P))
+    | [] => none
+    | p :: rest =>
+      let eqv := equalExtreme x p.first.1
+      if eqv || betterExtreme x p.first.1 then
+        match linkPivot edge rest.head? x with
+        | some m =>
+          let frame := if eqv then { p with laterRev := m :: p.laterRev } else ⟨m, []⟩
+          some (frame :: rest)
+        | none =>
+          match rest with
+          | _ :: earlier => rewindPivots edge x earlier
+          | [] => none
+      else none
 
-  /-- 先试直接延伸，不能延伸时再考虑替换或因更优同性极值回退。
-  [069:20] 例如，第一个红箭头和第二个绿箭头之间显然不能构成一笔，也就是说，这两个，只能取一个：如果取第一个红箭头，那么第二个绿箭头就不是笔中分型，那么第二个红箭头，显然是一个底分型，因此，就形成两个底分型连续的划分，显然，这时候，第一个就不算了，这和前面说取第一个红箭头对着的底分型矛盾。所以，这里，只能取第二个绿箭头，这时候，第一个绿箭头对应的顶分型，自然就不算笔中的顶了。 -/
-  stepPivots (tie : PenTiePolicy) (edge : LocalFractal P → LocalFractal P → Bool)
-      (stack : List (LocalFractal P)) (x : LocalFractal P) : List (LocalFractal P) :=
+  /-- 同性等值接得上前驱便入簇；异性先试簇内连边，只在失败后尝试反证。
+  回溯不成功则原栈不动。
+  [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
+  stepPivots (edge : LocalFractal P → LocalFractal P → Bool)
+      (stack : List (PenPivotCluster P)) (x : LocalFractal P) : List (PenPivotCluster P) :=
     match stack with
-    | [] => [x]
+    | [] => [⟨(x, []), []⟩]
     | a :: rest =>
-      if edge a x then x :: stack
-      else if a.kind = x.kind then
-        if rest.head?.all (edge · x) && preferPivot tie x a then x :: rest
-        else if betterExtreme x a then rewindPivots edge x rest
-        else stack
-      else match rest with
-        | b :: earlier => if betterExtreme x b then rewindPivots edge x earlier else stack
-        | [] => stack
+      if equalExtreme x a.first.1 then
+        match linkPivot edge rest.head? x with
+        | none => stack
+        | some m => { a with laterRev := m :: a.laterRev } :: rest
+      else if x.kind = a.first.1.kind then
+        (rewindPivots edge x stack).getD stack
+      else
+        match linkPivot edge (some a) x with
+        | some m => ⟨m, []⟩ :: stack
+        | none => (rewindPivots edge x rest).getD stack
 
   /-- 仅返回第一处可修补的未饱和取舍；不做全局笔数优化。
   [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
@@ -166,11 +203,19 @@ where
     | [] => none
     | a :: rest =>
       let next := rest.head?
-      let prepend := if prior.isNone then allPivots.find? (edge · a) else none
-      let append := if next.isNone then allPivots.find? (edge a ·) else none
+      -- 扩展时先试当前端点，再试能接通另一侧既有邻点的等值端点。
+      -- 扩展建立新邻边，不在邻点尚未确定时按策略选等值端点。
+      let prepend := if prior.isNone then (a :: allPivots).findSome? (fun x =>
+        if equalExtreme x a && next.all (edge x ·) then
+          (allPivots.find? (edge · x)).map (·, x)
+        else none) else none
+      let append := if next.isNone then (a :: allPivots).findSome? (fun x =>
+        if equalExtreme x a && prior.all (edge · x) then
+          (allPivots.find? (edge x ·)).map (x, ·)
+        else none) else none
       match prepend, append with
-      | some x, _ => some (x :: a :: rest)
-      | _, some x => some [a, x]
+      | some (x, y), _ => some (x :: y :: rest)
+      | _, some (x, y) => some [x, y]
       | _, _ =>
         match allPivots.find? (fun x => preferPivot tie x a && prior.all (edge · x) && next.all (edge x ·)) with
         | some x => some (x :: rest)
@@ -184,8 +229,9 @@ where
           | some (x, y) => some (a :: x :: y :: rest)
           | none => (penRepair tie edge allPivots (some a) rest).map (a :: ·)
 
-  -- 每次修补只插入端点或同性质严格择优。令每个端点按同类极值及破平顺序
-  -- 取 1..n 的秩，秩和严格增加且不超过 n²；修补不会用尽此预算。
+  -- 候选按同类极值及破平顺序各取 1..n 的秩，每个端点计 n + 秩。
+  -- 择优替换严格增秩；细分增加两项；扩展新增一项且至多让一个旧端点降 n-1 秩。
+  -- 每次修补总分严格增加，而链无重复、至多 n 项，总分不超过 2n²。
   /-- 反复修补至端点、替换与细分三项均饱和。
   [077:54] 二、如果前后两分型是同一性质的，对于顶，前面的低于后面的，只保留后面的，前面那个可以X掉；对于底，前面的高于后面的，只保留后面的，前面那个可以X掉。不满足上面情况的，例如相等的，都可以先保留。 -/
   saturatePivots (tie : PenTiePolicy) (edge : LocalFractal P → LocalFractal P → Bool)
