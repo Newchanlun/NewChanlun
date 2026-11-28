@@ -541,6 +541,7 @@ def test_round_trip_http_accepts_multiline_sse_json_event(monkeypatch):
 
     class _FakeResp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self):
             self._buf = io.BytesIO(payload)
@@ -570,6 +571,7 @@ def test_round_trip_http_rejects_unclosed_multiline_sse_event(monkeypatch):
 
     class _FakeResp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self):
             self._buf = io.BytesIO(payload)
@@ -599,6 +601,7 @@ def test_round_trip_http_rejects_unclosed_trailing_event_after_completed(monkeyp
 
     class _FakeResp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self):
             self._buf = io.BytesIO(payload)
@@ -732,6 +735,7 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
     ):
         class _FakeResp:
             status = 200
+            headers = [("Content-Type", "text/event-stream")]
 
             def __init__(self, _p=payload):
                 self._buf = io.BytesIO(_p)
@@ -760,6 +764,7 @@ def test_round_trip_http_rejects_mismatched_event_header_and_orphan_event_at_eof
 
     class _ValidMetaResp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self):
             self._buf = io.BytesIO(valid_meta)
@@ -980,6 +985,7 @@ def test_review_preflight_requires_matching_response_status_on_terminal_events(m
 
     class _Resp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self, raw: bytes):
             self._buf = io.BytesIO(raw)

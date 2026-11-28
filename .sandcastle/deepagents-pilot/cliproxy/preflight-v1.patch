@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..a46c2be 100644
+index e69de29..abed436 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
 @@ -0,0 +1,381 @@
@@ -311,7 +311,7 @@ index e69de29..a46c2be 100644
 +				return
 +			}
 +			var cancel context.CancelFunc
-+			ctx, cancel = context.WithDeadline(ctx, time.Now().Add(preflightreceipt.Lifetime))
++			ctx, cancel = context.WithDeadline(ctx, collector.Deadline())
 +			defer cancel()
 +		}
 +		c.Request = c.Request.WithContext(ctx)
@@ -7175,10 +7175,10 @@ index e69de29..7d0d345 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..7598819 100644
+index e69de29..ca2f6e3 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,331 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -7255,8 +7255,33 @@ index e69de29..7598819 100644
 +			t.Fatalf("attempt %d: controlled transport rejected after Go HTTP/2 TLSClientConfig auto-init", attempt)
 +		}
 +	}
-+	if sealed, ok := directRT.(*controlledPreflightTransport); !ok || sealed.tr.TLSClientConfig == nil {
-+		t.Fatal("expected Go net/http to auto-initialize TLSClientConfig on ForceAttemptHTTP2 transport")
++	if sealed, ok := directRT.(*controlledPreflightTransport); !ok || sealed.tr.DialTLSContext == nil || !sealed.tr.DisableKeepAlives {
++		t.Fatal("expected sealed controlled transport to enforce DialTLSContext and DisableKeepAlives for raw HTTP/1.x framing checks")
++	}
++
++	// Sol P2 #1 (PR #2280 R93): raw HTTP/1.1 upstream response carrying BOTH Transfer-Encoding: chunked
++	// AND Content-Length MUST fail closed before net/http strips Content-Length.
++	rawBadFramingLn, errRawLn := net.Listen("tcp", "127.0.0.1:0")
++	if errRawLn != nil {
++		t.Fatalf("listen raw bad framing: %v", errRawLn)
++	}
++	defer rawBadFramingLn.Close()
++	go func() {
++		conn, errAcc := rawBadFramingLn.Accept()
++		if errAcc != nil {
++			return
++		}
++		defer conn.Close()
++		buf := make([]byte, 2048)
++		_, _ = conn.Read(buf)
++		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
++	}()
++	badFramingReq, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+rawBadFramingLn.Addr().String()+"/v1/responses", nil)
++	if respBad, errBad := directRT.RoundTrip(badFramingReq); errBad == nil {
++		if respBad != nil && respBad.Body != nil {
++			_ = respBad.Body.Close()
++		}
++		t.Fatal("controlled transport accepted HTTP/1.1 response with conflicting Transfer-Encoding + Content-Length")
 +	}
 +
 +	// Same controlled transport for an explicit HTTP proxy MUST complete two consecutive requests cleanly.
@@ -7439,7 +7464,7 @@ index e69de29..7598819 100644
 +		t.Fatalf("ControlledTransportForProxy(inherit): %v", err)
 +	}
 +	wrapped, ok := rt.(*controlledPreflightTransport)
-+	if !ok || wrapped == nil || wrapped.tr == nil || wrapped.tr.Proxy == nil {
++	if !ok || wrapped == nil || wrapped.tr == nil || wrapped.resolveProxy == nil {
 +		t.Fatalf("unexpected ModeInherit transport shape: %T", rt)
 +	}
 +	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
@@ -7457,9 +7482,15 @@ index e69de29..7598819 100644
 +			t.Fatal(uerr)
 +		}
 +		envProxyFunc = func(*http.Request) (*url.URL, error) { return u, nil }
-+		gotURL, gotErr := wrapped.tr.Proxy(req)
++		gotURL, gotErr := wrapped.resolveProxy(req)
 +		if !errors.Is(gotErr, preflightreceipt.ErrUnavailable) || gotURL != nil {
 +			t.Fatalf("ModeInherit proxy(%q) = (%v, %v), want (nil, ErrUnavailable)", badProxy, gotURL, gotErr)
++		}
++		if respRT, errRT := wrapped.RoundTrip(req); !errors.Is(errRT, preflightreceipt.ErrUnavailable) || respRT != nil {
++			if respRT != nil && respRT.Body != nil {
++				_ = respRT.Body.Close()
++			}
++			t.Fatalf("ModeInherit RoundTrip(%q) = (%v, %v), want (nil, ErrUnavailable)", badProxy, respRT, errRT)
 +		}
 +	}
 +	// Allowed schemes (http, socks5, socks5h) and direct (nil) MUST pass.
@@ -7469,13 +7500,13 @@ index e69de29..7598819 100644
 +			t.Fatal(uerr)
 +		}
 +		envProxyFunc = func(*http.Request) (*url.URL, error) { return u, nil }
-+		gotURL, gotErr := wrapped.tr.Proxy(req)
++		gotURL, gotErr := wrapped.resolveProxy(req)
 +		if gotErr != nil || gotURL == nil || gotURL.String() != goodProxy {
 +			t.Fatalf("ModeInherit proxy(%q) = (%v, %v), want (%s, nil)", goodProxy, gotURL, gotErr, goodProxy)
 +		}
 +	}
 +	envProxyFunc = func(*http.Request) (*url.URL, error) { return nil, nil }
-+	if gotURL, gotErr := wrapped.tr.Proxy(req); gotErr != nil || gotURL != nil {
++	if gotURL, gotErr := wrapped.resolveProxy(req); gotErr != nil || gotURL != nil {
 +		t.Fatalf("ModeInherit proxy(nil) = (%v, %v), want (nil, nil)", gotURL, gotErr)
 +	}
 +}
@@ -8162,16 +8193,21 @@ index 0000000..e3a233e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..ca8935f
+index 0000000..ab774b3
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,397 @@
 +package auth
 +
 +import (
++	"bufio"
++	"bytes"
 +	"context"
 +	"crypto/sha256"
++	"crypto/tls"
++	"encoding/base64"
 +	"errors"
++	"io"
 +	"net"
 +	"net/http"
 +	"net/url"
@@ -8185,20 +8221,32 @@ index 0000000..ca8935f
 +	"golang.org/x/net/proxy"
 +)
 +
++type resolvedProxyCtxKey struct{}
++
 +// controlledPreflightTransport seals a proxy-owned *http.Transport behind an unexported
 +// http.RoundTripper wrapper so callers outside package auth can never type-assert *http.Transport,
 +// mutate TLSClientConfig, set DialTLS/DialTLSContext, or call RegisterProtocol("https", ...).
-+// Go's net/http may still lazily initialize tr.TLSClientConfig for HTTP/2 on the first request;
-+// trusting the sealed wrapper avoids both false rejection on reuse and data races against
-+// onceSetNextProtoDefaults().
++// All HTTP/1.x connections use DisableKeepAlives and wrap raw reads in NewStrictHTTP1Framing*Conn
++// so conflicting upstream Transfer-Encoding + Content-Length headers fail closed before net/http
++// can strip Content-Length.
 +type controlledPreflightTransport struct {
-+	tr         *http.Transport
-+	sealed     bool
-+	lastUsedNS atomic.Int64
++	tr           *http.Transport
++	resolveProxy func(*http.Request) (*url.URL, error)
++	sealed       bool
++	lastUsedNS   atomic.Int64
 +}
 +
 +func (c *controlledPreflightTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 +	c.lastUsedNS.Store(time.Now().UnixNano())
++	if c.resolveProxy != nil {
++		proxyURL, err := c.resolveProxy(req)
++		if err != nil {
++			return nil, err
++		}
++		if proxyURL != nil {
++			req = req.Clone(context.WithValue(req.Context(), resolvedProxyCtxKey{}, proxyURL))
++		}
++	}
 +	return c.tr.RoundTrip(req)
 +}
 +
@@ -8222,18 +8270,195 @@ index 0000000..ca8935f
 +	}
 +}
 +
-+func newFreshStandardTransport() *http.Transport {
++type bufferedPrefixConn struct {
++	net.Conn
++	r io.Reader
++}
++
++func (b *bufferedPrefixConn) Read(p []byte) (int, error) {
++	return b.r.Read(p)
++}
++
++func dialSOCKS5Context(ctx context.Context, proxyURL *url.URL, network, addr string, baseDialer *net.Dialer) (net.Conn, error) {
++	var proxyAuth *proxy.Auth
++	if proxyURL.User != nil {
++		username := proxyURL.User.Username()
++		password, _ := proxyURL.User.Password()
++		proxyAuth = &proxy.Auth{User: username, Password: password}
++	}
++	dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, baseDialer)
++	if errSOCKS5 != nil {
++		return nil, preflightreceipt.ErrUnavailable
++	}
++	ctxDialer, ok := dialer.(proxy.ContextDialer)
++	if !ok {
++		return nil, preflightreceipt.ErrUnavailable
++	}
++	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	return ctxDialer.DialContext(dialCtx, network, addr)
++}
++
++func dialHTTPConnectTunnel(ctx context.Context, proxyURL *url.URL, targetAddr string, baseDialer *net.Dialer) (net.Conn, error) {
++	if proxyURL == nil || proxyURL.Host == "" || targetAddr == "" || strings.ContainsAny(targetAddr, "\r\n \t") {
++		return nil, preflightreceipt.ErrUnavailable
++	}
++	conn, err := baseDialer.DialContext(ctx, "tcp", proxyURL.Host)
++	if err != nil {
++		return nil, err
++	}
++	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	if dl, ok := connectCtx.Deadline(); ok {
++		_ = conn.SetDeadline(dl)
++	}
++	var reqBuf strings.Builder
++	reqBuf.WriteString("CONNECT ")
++	reqBuf.WriteString(targetAddr)
++	reqBuf.WriteString(" HTTP/1.1\r\nHost: ")
++	reqBuf.WriteString(targetAddr)
++	reqBuf.WriteString("\r\n")
++	if proxyURL.User != nil {
++		user := proxyURL.User.Username()
++		pass, _ := proxyURL.User.Password()
++		reqBuf.WriteString("Proxy-Authorization: Basic ")
++		reqBuf.WriteString(base64.StdEncoding.EncodeToString([]byte(user + ":" + pass)))
++		reqBuf.WriteString("\r\n")
++	}
++	reqBuf.WriteString("\r\n")
++
++	type connectRes struct {
++		conn net.Conn
++		err  error
++	}
++	done := make(chan connectRes, 1)
++	go func() {
++		if _, werr := io.WriteString(conn, reqBuf.String()); werr != nil {
++			done <- connectRes{err: werr}
++			return
++		}
++		br := bufio.NewReader(io.LimitReader(conn, 64*1024))
++		resp, rerr := http.ReadResponse(br, &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: targetAddr}, Host: targetAddr})
++		if rerr != nil {
++			done <- connectRes{err: rerr}
++			return
++		}
++		if resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		if resp.StatusCode != http.StatusOK || len(resp.TransferEncoding) > 0 || resp.ContentLength > 0 {
++			done <- connectRes{err: preflightreceipt.ErrUnavailable}
++			return
++		}
++		var out net.Conn = conn
++		if n := br.Buffered(); n > 0 {
++			rem := make([]byte, n)
++			if _, perr := io.ReadFull(br, rem); perr != nil {
++				done <- connectRes{err: perr}
++				return
++			}
++			out = &bufferedPrefixConn{Conn: conn, r: io.MultiReader(bytes.NewReader(rem), conn)}
++		}
++		done <- connectRes{conn: out}
++	}()
++	select {
++	case <-connectCtx.Done():
++		_ = conn.Close()
++		<-done
++		return nil, connectCtx.Err()
++	case res := <-done:
++		if res.err != nil {
++			_ = conn.Close()
++			return nil, res.err
++		}
++		_ = conn.SetDeadline(time.Time{})
++		return res.conn, nil
++	}
++}
++
++func newFreshStandardTransport(fixedSOCKS proxy.ContextDialer) *http.Transport {
 +	// Constructed directly without cloning http.DefaultTransport so an external
 +	// RegisterProtocol("https", ...) or TLSClientConfig mutation on DefaultTransport
 +	// can never affect formal review or preflight TLS verification.
-+	dialer := &net.Dialer{
++	baseDialer := &net.Dialer{
 +		Timeout:   30 * time.Second,
 +		KeepAlive: 30 * time.Second,
 +	}
++	dialRaw := func(ctx context.Context, network, addr string) (net.Conn, error) {
++		if fixedSOCKS != nil {
++			dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++			defer cancel()
++			return fixedSOCKS.DialContext(dialCtx, network, addr)
++		}
++		if p, _ := ctx.Value(resolvedProxyCtxKey{}).(*url.URL); p != nil {
++			switch strings.ToLower(p.Scheme) {
++			case "socks5", "socks5h":
++				return dialSOCKS5Context(ctx, p, network, addr, baseDialer)
++			case "http":
++				return dialHTTPConnectTunnel(ctx, p, addr, baseDialer)
++			default:
++				return nil, preflightreceipt.ErrUnavailable
++			}
++		}
++		return baseDialer.DialContext(ctx, network, addr)
++	}
++	dialPlainHTTP := func(ctx context.Context, network, addr string) (net.Conn, error) {
++		var conn net.Conn
++		var err error
++		if fixedSOCKS != nil {
++			dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++			defer cancel()
++			conn, err = fixedSOCKS.DialContext(dialCtx, network, addr)
++		} else if p, _ := ctx.Value(resolvedProxyCtxKey{}).(*url.URL); p != nil && (strings.EqualFold(p.Scheme, "socks5") || strings.EqualFold(p.Scheme, "socks5h")) {
++			conn, err = dialSOCKS5Context(ctx, p, network, addr, baseDialer)
++		} else {
++			conn, err = baseDialer.DialContext(ctx, network, addr)
++		}
++		if err != nil {
++			return nil, err
++		}
++		return preflightreceipt.NewStrictHTTP1FramingConn(conn), nil
++	}
++	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
++		host, _, err := net.SplitHostPort(addr)
++		if err != nil || host == "" {
++			return nil, preflightreceipt.ErrUnavailable
++		}
++		rawConn, err := dialRaw(ctx, network, addr)
++		if err != nil {
++			return nil, err
++		}
++		tlsConn := tls.Client(rawConn, &tls.Config{
++			ServerName: host,
++			MinVersion: tls.VersionTLS12,
++			NextProtos: []string{"h2", "http/1.1"},
++		})
++		hsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
++		defer cancel()
++		if err := tlsConn.HandshakeContext(hsCtx); err != nil {
++			_ = tlsConn.Close()
++			return nil, err
++		}
++		if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
++			return tlsConn, nil
++		}
++		return preflightreceipt.NewStrictHTTP1FramingTLSConn(tlsConn), nil
++	}
 +	return &http.Transport{
-+		Proxy:                 strictEnvProxyFunc,
-+		DialContext:           dialer.DialContext,
++		Proxy: func(req *http.Request) (*url.URL, error) {
++			// HTTPS requests are handled via DialTLSContext (including HTTP CONNECT) so raw
++			// HTTP/1.1 upstream headers inside TLS always pass NewStrictHTTP1FramingTLSConn.
++			if req != nil && req.URL != nil && strings.EqualFold(req.URL.Scheme, "http") {
++				if p, _ := req.Context().Value(resolvedProxyCtxKey{}).(*url.URL); p != nil && strings.EqualFold(p.Scheme, "http") {
++					return p, nil
++				}
++			}
++			return nil, nil
++		},
++		DialContext:           dialPlainHTTP,
++		DialTLSContext:        dialTLS,
 +		ForceAttemptHTTP2:     true,
++		DisableKeepAlives:     true,
 +		DisableCompression:    true,
 +		MaxIdleConns:          100,
 +		IdleConnTimeout:       90 * time.Second,
@@ -8243,8 +8468,8 @@ index 0000000..ca8935f
 +}
 +
 +// ControlledTransportForProxy returns a sealed proxy-owned http.RoundTripper bound strictly to
-+// OS system trust roots (no DialTLS/DialTLSContext, no RegisterProtocol, never exposing *http.Transport).
-+// Unsupported schemes such as https:// proxy (which require DialTLSContext) fail closed.
++// OS system trust roots (never exposing *http.Transport) with raw HTTP/1.x response framing checks.
++// Unsupported schemes such as https:// proxy fail closed.
 +func ControlledTransportForProxy(raw string) (http.RoundTripper, error) {
 +	trimmed := strings.TrimSpace(raw)
 +	cacheKey := sha256.Sum256([]byte(trimmed))
@@ -8261,17 +8486,21 @@ index 0000000..ca8935f
 +	if errParse != nil {
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
-+	tr := newFreshStandardTransport()
++	var resolveProxy func(*http.Request) (*url.URL, error)
++	var fixedSOCKS proxy.ContextDialer
 +	switch setting.Mode {
 +	case proxyutil.ModeInherit:
-+		// Keeps strictEnvProxyFunc (same scheme allowlist as ModeProxy: http/socks5/socks5h only)
-+		// with clean OS trust roots.
++		resolveProxy = strictEnvProxyFunc
 +	case proxyutil.ModeDirect:
-+		tr.Proxy = nil
++		resolveProxy = nil
 +	case proxyutil.ModeProxy:
 +		switch setting.URL.Scheme {
 +		case "http":
-+			tr.Proxy = http.ProxyURL(setting.URL)
++			fixedURL := *setting.URL
++			resolveProxy = func(*http.Request) (*url.URL, error) {
++				u := fixedURL
++				return &u, nil
++			}
 +		case "socks5", "socks5h":
 +			var proxyAuth *proxy.Auth
 +			if setting.URL.User != nil {
@@ -8288,12 +8517,7 @@ index 0000000..ca8935f
 +			if !ok {
 +				return nil, preflightreceipt.ErrUnavailable
 +			}
-+			tr.Proxy = nil
-+			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-+				dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-+				defer cancel()
-+				return ctxDialer.DialContext(dialCtx, network, addr)
-+			}
++			fixedSOCKS = ctxDialer
 +		default:
 +			return nil, preflightreceipt.ErrUnavailable
 +		}
@@ -8301,7 +8525,8 @@ index 0000000..ca8935f
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
 +
-+	wrapped := &controlledPreflightTransport{tr: tr, sealed: true}
++	tr := newFreshStandardTransport(fixedSOCKS)
++	wrapped := &controlledPreflightTransport{tr: tr, resolveProxy: resolveProxy, sealed: true}
 +	wrapped.lastUsedNS.Store(nowNS)
 +	var evicted []*controlledPreflightTransport
 +	controlledTransportMu.Lock()
@@ -8481,11 +8706,264 @@ index 0000000..89341b4
 +func renameatNoReplace(oldfd int, oldname string, newfd int, newname string) error {
 +	return errors.ErrUnsupported
 +}
+diff --git a/sdk/preflightreceipt/http1_framing.go b/sdk/preflightreceipt/http1_framing.go
+new file mode 100644
+index 0000000..2a8c675
+--- /dev/null
++++ b/sdk/preflightreceipt/http1_framing.go
+@@ -0,0 +1,247 @@
++package preflightreceipt
++
++import (
++	"bytes"
++	"crypto/tls"
++	"net"
++	"strconv"
++	"strings"
++)
++
++const (
++	maxRawHTTP1HeaderBytes = 64 * 1024
++	maxRawHTTP1HeaderCount = 512
++	maxRawHTTP1InfoCount   = 4
++)
++
++func isRFC9110TokenChar(b byte) bool {
++	if (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') {
++		return true
++	}
++	switch b {
++	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
++		return true
++	default:
++		return false
++	}
++}
++
++func isValidHTTP1HeaderValueBytes(v []byte) bool {
++	for _, b := range v {
++		if b == '\t' || (b >= 0x20 && b <= 0x7E) || b >= 0x80 {
++			continue
++		}
++		return false
++	}
++	return true
++}
++
++func validateRawHTTP1HeaderBlock(block []byte) (statusCode int, ok bool) {
++	if len(block) == 0 || len(block) > maxRawHTTP1HeaderBytes {
++		return 0, false
++	}
++	lines := bytes.Split(block, []byte("\r\n"))
++	if len(lines) == 0 || len(lines)-1 > maxRawHTTP1HeaderCount {
++		return 0, false
++	}
++	// Parse status line: HTTP/1.0 SP 3DIGIT SP reason | HTTP/1.1 SP 3DIGIT SP reason
++	statusLine := lines[0]
++	if bytes.IndexByte(statusLine, '\r') >= 0 || bytes.IndexByte(statusLine, '\n') >= 0 {
++		return 0, false
++	}
++	var isHTTP10 bool
++	switch {
++	case bytes.HasPrefix(statusLine, []byte("HTTP/1.1 ")):
++		isHTTP10 = false
++	case bytes.HasPrefix(statusLine, []byte("HTTP/1.0 ")):
++		isHTTP10 = true
++	default:
++		return 0, false
++	}
++	rest := statusLine[len("HTTP/1.1 "):]
++	if len(rest) < 3 {
++		return 0, false
++	}
++	if rest[0] < '1' || rest[0] > '5' || rest[1] < '0' || rest[1] > '9' || rest[2] < '0' || rest[2] > '9' {
++		return 0, false
++	}
++	if len(rest) > 3 && rest[3] != ' ' {
++		return 0, false
++	}
++	if len(rest) > 4 && !isValidHTTP1HeaderValueBytes(rest[4:]) {
++		return 0, false
++	}
++	code := int(rest[0]-'0')*100 + int(rest[1]-'0')*10 + int(rest[2]-'0')
++
++	var teVals []string
++	var clVals []string
++	for _, line := range lines[1:] {
++		if len(line) == 0 || bytes.IndexByte(line, '\r') >= 0 || bytes.IndexByte(line, '\n') >= 0 {
++			return 0, false
++		}
++		colon := bytes.IndexByte(line, ':')
++		if colon <= 0 {
++			return 0, false
++		}
++		nameBytes := line[:colon]
++		for _, b := range nameBytes {
++			if !isRFC9110TokenChar(b) {
++				return 0, false
++			}
++		}
++		valBytes := line[colon+1:]
++		if !isValidHTTP1HeaderValueBytes(valBytes) {
++			return 0, false
++		}
++		lowerName := strings.ToLower(string(nameBytes))
++		val := strings.Trim(string(valBytes), " \t")
++		switch lowerName {
++		case "transfer-encoding":
++			teVals = append(teVals, val)
++		case "content-length":
++			clVals = append(clVals, val)
++		}
++	}
++
++	if code >= 100 && code < 200 {
++		if isHTTP10 || code == 101 || len(teVals) > 0 || len(clVals) > 0 {
++			return 0, false
++		}
++		return code, true
++	}
++	if isHTTP10 && len(teVals) > 0 {
++		return 0, false
++	}
++	// RFC 9112 §6.3: reject any response carrying BOTH Transfer-Encoding and Content-Length
++	// BEFORE net/http can strip Content-Length and hide the framing conflict.
++	if len(teVals) > 0 && len(clVals) > 0 {
++		return 0, false
++	}
++	if len(teVals) > 0 {
++		var codings []string
++		for _, raw := range teVals {
++			for _, tok := range strings.Split(raw, ",") {
++				c := strings.ToLower(strings.Trim(tok, " \t"))
++				if c == "" {
++					return 0, false
++				}
++				codings = append(codings, c)
++			}
++		}
++		if len(codings) != 1 || codings[0] != "chunked" {
++			return 0, false
++		}
++	}
++	if len(clVals) > 0 {
++		var parsed int64 = -1
++		for _, raw := range clVals {
++			parts := strings.Split(raw, ",")
++			for _, part := range parts {
++				tok := strings.Trim(part, " \t")
++				if len(tok) == 0 {
++					return 0, false
++				}
++				for i := 0; i < len(tok); i++ {
++					if tok[i] < '0' || tok[i] > '9' {
++						return 0, false
++					}
++				}
++				v, err := strconv.ParseInt(tok, 10, 64)
++				if err != nil || v < 0 {
++					return 0, false
++				}
++				if parsed < 0 {
++					parsed = v
++				} else if parsed != v {
++					return 0, false
++				}
++			}
++		}
++	}
++	return code, true
++}
++
++// strictHTTP1FramingConn wraps a single-response (DisableKeepAlives) HTTP/1.x connection and
++// inspects raw response header bytes BEFORE net/http parses them so conflicting framing headers
++// (such as simultaneous Transfer-Encoding: chunked and Content-Length) fail closed with ErrUnavailable.
++type strictHTTP1FramingConn struct {
++	net.Conn
++	buf       []byte
++	infoCount int
++	done      bool
++	failed    error
++}
++
++type strictHTTP1FramingTLSConn struct {
++	*strictHTTP1FramingConn
++	tlsConn *tls.Conn
++}
++
++func (c *strictHTTP1FramingTLSConn) ConnectionState() tls.ConnectionState {
++	return c.tlsConn.ConnectionState()
++}
++
++// NewStrictHTTP1FramingConn wraps a non-keep-alive HTTP/1.x net.Conn with raw response header framing verification.
++func NewStrictHTTP1FramingConn(conn net.Conn) net.Conn {
++	if conn == nil {
++		return nil
++	}
++	return &strictHTTP1FramingConn{Conn: conn}
++}
++
++// NewStrictHTTP1FramingTLSConn wraps a non-keep-alive HTTP/1.x *tls.Conn while preserving ConnectionState().
++func NewStrictHTTP1FramingTLSConn(conn *tls.Conn) net.Conn {
++	if conn == nil {
++		return nil
++	}
++	return &strictHTTP1FramingTLSConn{
++		strictHTTP1FramingConn: &strictHTTP1FramingConn{Conn: conn},
++		tlsConn:                conn,
++	}
++}
++
++func (c *strictHTTP1FramingConn) feedHeaderBytes(data []byte) error {
++	for i := 0; i < len(data) && !c.done; i++ {
++		if len(c.buf) >= maxRawHTTP1HeaderBytes+4 {
++			return ErrUnavailable
++		}
++		c.buf = append(c.buf, data[i])
++		n := len(c.buf)
++		if n >= 4 && c.buf[n-4] == '\r' && c.buf[n-3] == '\n' && c.buf[n-2] == '\r' && c.buf[n-1] == '\n' {
++			block := c.buf[:n-4]
++			code, ok := validateRawHTTP1HeaderBlock(block)
++			if !ok {
++				return ErrUnavailable
++			}
++			c.buf = c.buf[:0]
++			if code >= 100 && code < 200 {
++				c.infoCount++
++				if c.infoCount > maxRawHTTP1InfoCount {
++					return ErrUnavailable
++				}
++				continue
++			}
++			c.buf = nil
++			c.done = true
++		}
++	}
++	return nil
++}
++
++func (c *strictHTTP1FramingConn) Read(p []byte) (int, error) {
++	if c.done {
++		return c.Conn.Read(p)
++	}
++	if c.failed != nil {
++		return 0, c.failed
++	}
++	n, err := c.Conn.Read(p)
++	if n > 0 {
++		if ferr := c.feedHeaderBytes(p[:n]); ferr != nil {
++			c.failed = ferr
++			_ = c.Conn.Close()
++			return 0, ferr
++		}
++	}
++	return n, err
++}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..22f9e08 100644
+index e69de29..9645827 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,14793 @@
+@@ -0,0 +1,14902 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -9991,6 +10469,7 @@ index e69de29..22f9e08 100644
 +	callID           string
 +	name             string
 +	serverLabel      string
++	containerID      string
 +	argsSHA          string
 +	inputSHA         string
 +	codeSHA          string
@@ -10009,6 +10488,7 @@ index e69de29..22f9e08 100644
 +	callID          string
 +	name            string
 +	serverLabel     string
++	containerID     string
 +	hasValidAction  bool
 +	hasValidQueries bool
 +	hasValidResult  bool
@@ -10293,10 +10773,22 @@ index e69de29..22f9e08 100644
 +	return target == want || target == "/"+want
 +}
 +
++var (
++	lstatPathFn           = os.Lstat
++	preflightPathCheckSem = make(chan struct{}, maxPendingReviewInFlight)
++)
++
 +// pathHasDisallowedSymlink walks every existing path prefix from / down to path and rejects
 +// any symlink component (except macOS's fixed OS-level /var, /tmp, /etc -> private/* links)
 +// so a symlinked ancestor directory can never redirect receipt reads, writes, or reclamation.
 +func pathHasDisallowedSymlink(path string) bool {
++	return pathHasDisallowedSymlinkWithCancel(nil, path, lstatPathFn)
++}
++
++func pathHasDisallowedSymlinkWithCancel(ctx context.Context, path string, lstatFn func(string) (os.FileInfo, error)) bool {
++	if lstatFn == nil {
++		lstatFn = os.Lstat
++	}
 +	if path == "" || !filepath.IsAbs(path) || hasDotDotSegment(path) {
 +		return true
 +	}
@@ -10313,8 +10805,11 @@ index e69de29..22f9e08 100644
 +		if part == "" {
 +			continue
 +		}
++		if ctx != nil && ctx.Err() != nil {
++			return true
++		}
 +		cur += string(filepath.Separator) + part
-+		fi, err := os.Lstat(cur)
++		fi, err := lstatFn(cur)
 +		if err != nil {
 +			if errors.Is(err, os.ErrNotExist) {
 +				return false
@@ -10338,16 +10833,68 @@ index e69de29..22f9e08 100644
 +	return false
 +}
 +
++func pathHasDisallowedSymlinkContext(ctx context.Context, path string) bool {
++	lstatFn := lstatPathFn
++	if ctx == nil {
++		return pathHasDisallowedSymlinkWithCancel(nil, path, lstatFn)
++	}
++	if ctx.Err() != nil {
++		return true
++	}
++	select {
++	case preflightPathCheckSem <- struct{}{}:
++	case <-ctx.Done():
++		return true
++	}
++	done := make(chan bool, 1)
++	go func() {
++		released := false
++		releaseSem := func() {
++			if !released {
++				released = true
++				<-preflightPathCheckSem
++			}
++		}
++		defer releaseSem()
++		disallowed := pathHasDisallowedSymlinkWithCancel(ctx, path, lstatFn)
++		releaseSem()
++		done <- disallowed
++	}()
++	select {
++	case disallowed := <-done:
++		return disallowed
++	case <-ctx.Done():
++		return true
++	}
++}
++
 +// Begin binds the inbound nonce. Disk reservation waits for authenticated execution.
 +// The directory must be private to the proxy, outside the credential/state volume.
++// The 50-second Lifetime clock starts BEFORE any filesystem access and bounds entry path checks.
 +func Begin(ctx context.Context, root, session string) (context.Context, *Collector, error) {
++	now := time.Now()
++	deadline := now.Add(Lifetime)
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	if ctxDL, hasDL := ctx.Deadline(); hasDL && ctxDL.Before(deadline) {
++		deadline = ctxDL
++	}
++	if !deadline.After(now) {
++		return ctx, nil, ErrUnavailable
++	}
 +	cleanRoot, ok := cleanPrivateRoot(root)
-+	if !ok || !sessionPattern.MatchString(session) || pathHasDisallowedSymlink(cleanRoot) {
++	if !ok || !sessionPattern.MatchString(session) {
++		return ctx, nil, ErrUnavailable
++	}
++	checkCtx, cancel := context.WithDeadline(ctx, deadline)
++	disallowed := pathHasDisallowedSymlinkContext(checkCtx, cleanRoot)
++	cancel()
++	if disallowed || time.Now().After(deadline) {
 +		return ctx, nil, ErrUnavailable
 +	}
 +	directory := filepath.Join(cleanRoot, session)
-+	now := time.Now()
-+	c := &Collector{directory: directory, deadline: now.Add(Lifetime), receipt: Receipt{Schema: Schema, Session: session, Started: now.UnixNano()}}
++	c := &Collector{directory: directory, deadline: deadline, receipt: Receipt{Schema: Schema, Session: session, Started: now.UnixNano()}}
 +	return context.WithValue(ctx, contextKey{}, c), c, nil
 +}
 +
@@ -10388,6 +10935,7 @@ index e69de29..22f9e08 100644
 +	CallID           string                      `json:"call_id"`
 +	Name             string                      `json:"name"`
 +	ServerLabel      string                      `json:"server_label"`
++	ContainerID      string                      `json:"container_id"`
 +	ArgsSHA          string                      `json:"-"`
 +	ArgsStr          string                      `json:"-"`
 +	ArgsIsStr        bool                        `json:"-"`
@@ -10409,7 +10957,7 @@ index e69de29..22f9e08 100644
 +	return status == "" || status == "completed"
 +}
 +
-+func isValidCompletedToolItem(itemType, callID, name, serverLabel string, argsIsStr, inputIsStr, codeIsStr, hasValidAction, hasValidQueries, hasValidResult bool) bool {
++func isValidCompletedToolItem(itemType, callID, name, serverLabel, containerID string, argsIsStr, inputIsStr, codeIsStr, hasValidAction, hasValidQueries, hasValidResult bool) bool {
 +	switch itemType {
 +	// Supported tool call item types (each strictly validated):
 +	case "function_call":
@@ -10429,7 +10977,8 @@ index e69de29..22f9e08 100644
 +	case "file_search_call":
 +		return hasValidQueries
 +	case "code_interpreter_call":
-+		return codeIsStr
++		return containerID != "" && strings.TrimSpace(containerID) == containerID &&
++			codeIsStr
 +	case "image_generation_call":
 +		return hasValidResult
 +	// Explicitly allowed non-tool non-message item types:
@@ -10488,6 +11037,7 @@ index e69de29..22f9e08 100644
 +	if doneRec.itemType != item.Type || doneRec.itemRole != item.Role || doneRec.itemPhase != item.Phase ||
 +		!doneItemStatusCompatible(doneRec.itemStatus, item.Status) ||
 +		doneRec.callID != item.CallID || doneRec.name != item.Name || doneRec.serverLabel != item.ServerLabel ||
++		doneRec.containerID != item.ContainerID ||
 +		doneRec.argsSHA != item.ArgsSHA || doneRec.inputSHA != item.InputSHA || doneRec.codeSHA != item.CodeSHA ||
 +		(doneRec.canonicalItemSHA != "" && item.CanonicalItemSHA != "" && doneRec.canonicalItemSHA != item.CanonicalItemSHA) ||
 +		doneRec.isFinal != isFinalAssistantOutputItem(item) {
@@ -10733,7 +11283,7 @@ index e69de29..22f9e08 100644
 +				return false
 +			}
 +		} else if !isCompletedNonMessageItemStatus(item.Status) ||
-+			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
++			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ContainerID, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
 +			return false
 +		}
 +	}
@@ -10988,7 +11538,7 @@ index e69de29..22f9e08 100644
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
 +		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
-+		"call_id": {}, "name": {}, "server_label": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {}, "result": {},
++		"call_id": {}, "name": {}, "server_label": {}, "container_id": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {}, "result": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {}, "refusal": {},
@@ -11420,8 +11970,10 @@ index e69de29..22f9e08 100644
 +	callID, ok1 := exactOptionalString(fields, "call_id")
 +	name, ok2 := exactOptionalString(fields, "name")
 +	serverLabel, ok3 := exactOptionalString(fields, "server_label")
-+	if !ok1 || !ok2 || !ok3 ||
-+		len(callID) > maxStrictIdentityBytes || len(name) > maxStrictIdentityBytes || len(serverLabel) > maxStrictIdentityBytes {
++	containerID, ok4 := exactOptionalString(fields, "container_id")
++	if !ok1 || !ok2 || !ok3 || !ok4 ||
++		len(callID) > maxStrictIdentityBytes || len(name) > maxStrictIdentityBytes ||
++		len(serverLabel) > maxStrictIdentityBytes || len(containerID) > maxStrictIdentityBytes {
 +		return toolItemMeta{}, toolPayloadField{}, toolPayloadField{}, toolPayloadField{}, false
 +	}
 +	args, okArgs := extractToolPayloadField(fields, "arguments")
@@ -11461,6 +12013,7 @@ index e69de29..22f9e08 100644
 +		callID:          callID,
 +		name:            name,
 +		serverLabel:     serverLabel,
++		containerID:     containerID,
 +		hasValidAction:  hasValidAction,
 +		hasValidQueries: hasValidQueries,
 +		hasValidResult:  hasValidResult,
@@ -11565,6 +12118,7 @@ index e69de29..22f9e08 100644
 +			CallID:           meta.callID,
 +			Name:             meta.name,
 +			ServerLabel:      meta.serverLabel,
++			ContainerID:      meta.containerID,
 +			ArgsSHA:          argsField.sha,
 +			ArgsStr:          argsField.str,
 +			ArgsIsStr:        argsField.isStr,
@@ -12863,7 +13417,7 @@ index e69de29..22f9e08 100644
 +}
 +
 +func (t *strictStreamTracker) recordToolMeta(canonKey string, meta toolItemMeta) bool {
-+	if canonKey == "" || (meta.callID == "" && meta.name == "" && meta.serverLabel == "") {
++	if canonKey == "" || (meta.callID == "" && meta.name == "" && meta.serverLabel == "" && meta.containerID == "") {
 +		return true
 +	}
 +	prev, exists := t.toolMetaByKey[canonKey]
@@ -12879,6 +13433,9 @@ index e69de29..22f9e08 100644
 +	if prev.serverLabel != "" && meta.serverLabel != "" && prev.serverLabel != meta.serverLabel {
 +		return false
 +	}
++	if prev.containerID != "" && meta.containerID != "" && prev.containerID != meta.containerID {
++		return false
++	}
 +	if meta.callID != "" {
 +		prev.callID = meta.callID
 +	}
@@ -12887,6 +13444,9 @@ index e69de29..22f9e08 100644
 +	}
 +	if meta.serverLabel != "" {
 +		prev.serverLabel = meta.serverLabel
++	}
++	if meta.containerID != "" {
++		prev.containerID = meta.containerID
 +	}
 +	if t.toolMetaByKey == nil {
 +		t.toolMetaByKey = make(map[string]toolItemMeta)
@@ -12910,6 +13470,9 @@ index e69de29..22f9e08 100644
 +		return false
 +	}
 +	if prev.serverLabel != "" && meta.serverLabel != prev.serverLabel {
++		return false
++	}
++	if prev.containerID != "" && meta.containerID != prev.containerID {
 +		return false
 +	}
 +	return true
@@ -13915,7 +14478,7 @@ index e69de29..22f9e08 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
-+			} else if item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
++			} else if item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ContainerID, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -14490,7 +15053,7 @@ index e69de29..22f9e08 100644
 +				return
 +			}
 +		} else if !isCompletedNonMessageItemStatus(itemStatus) ||
-+			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneArgs.isStr, doneInput.isStr, doneCode.isStr, doneMeta.hasValidAction, doneMeta.hasValidQueries, doneMeta.hasValidResult) {
++			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneMeta.containerID, doneArgs.isStr, doneInput.isStr, doneCode.isStr, doneMeta.hasValidAction, doneMeta.hasValidQueries, doneMeta.hasValidResult) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
@@ -14649,6 +15212,7 @@ index e69de29..22f9e08 100644
 +				if prevRec.itemType != itemType || prevRec.itemRole != itemRole || prevRec.itemPhase != itemPhase ||
 +					!doneItemStatusCompatible(prevRec.itemStatus, itemStatus) ||
 +					prevRec.callID != doneMeta.callID || prevRec.name != doneMeta.name || prevRec.serverLabel != doneMeta.serverLabel ||
++					prevRec.containerID != doneMeta.containerID ||
 +					prevRec.argsSHA != doneArgs.sha || prevRec.inputSHA != doneInput.sha || prevRec.codeSHA != doneCode.sha ||
 +					(prevRec.canonicalItemSHA != "" && prevRec.canonicalItemSHA != canonItemSHA) ||
 +					prevRec.isFinal != isFinalCandidate || prevRec.isAssistantMsg != isAssistantMsg ||
@@ -14692,6 +15256,7 @@ index e69de29..22f9e08 100644
 +				callID:           doneMeta.callID,
 +				name:             doneMeta.name,
 +				serverLabel:      doneMeta.serverLabel,
++				containerID:      doneMeta.containerID,
 +				argsSHA:          doneArgs.sha,
 +				inputSHA:         doneInput.sha,
 +				codeSHA:          doneCode.sha,
@@ -18899,12 +19464,11 @@ index e69de29..22f9e08 100644
 +	return false
 +}
 +
++// isRecoverableStagingKeyTemp accepts ONLY an exact byte-for-byte prefix (including the full
++// 109-byte canonical serialization) of json.Marshal(stagingKeyFile{Schema: stagingKeySchema, Key: <64-lower-hex>}).
++// Non-canonical JSON (such as reordered keys or extra whitespace) fails closed and is preserved untouched.
 +func isRecoverableStagingKeyTemp(raw []byte) bool {
 +	if len(raw) == 0 {
-+		return true
-+	}
-+	var sk stagingKeyFile
-+	if decodeExactReceiptJSON(raw, stagingKeyJSONKeys, &sk) == nil && sk.Schema == stagingKeySchema && isSHA256Hex(sk.Key) {
 +		return true
 +	}
 +	prefixBytes := []byte(stagingKeyWirePrefix)
@@ -18915,14 +19479,11 @@ index e69de29..22f9e08 100644
 +		return false
 +	}
 +	rest := raw[len(prefixBytes):]
-+	if len(rest) > 65 {
++	if len(rest) > 66 {
 +		return false
 +	}
 +	hexLen := len(rest)
-+	if hexLen == 65 {
-+		if rest[64] != '"' {
-+			return false
-+		}
++	if hexLen > 64 {
 +		hexLen = 64
 +	}
 +	for i := 0; i < hexLen; i++ {
@@ -18930,6 +19491,12 @@ index e69de29..22f9e08 100644
 +		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 +			return false
 +		}
++	}
++	if len(rest) == 65 {
++		return rest[64] == '"'
++	}
++	if len(rest) == 66 {
++		return rest[64] == '"' && rest[65] == '}'
 +	}
 +	return true
 +}
@@ -22263,17 +22830,37 @@ index e69de29..22f9e08 100644
 +			return nil, ErrUnavailable
 +		}
 +	}
-+	// Reject close-delimited HTTP/1.x upstream responses for ALL status codes carrying a body
-+	// (no Content-Length and no chunked Transfer-Encoding): Go's crypto/tls reports a truncated
-+	// TCP FIN at a TLS record boundary (without close_notify) as ordinary io.EOF, which would
-+	// falsely count even a truncated 503 retry attempt as a complete read. HTTP/2 (END_STREAM),
-+	// chunked encoding (0\r\n\r\n), and explicit Content-Length enforce independent framing.
++	// Reject close-delimited HTTP/1.x upstream responses AND conflicting/disallowed framing headers
++	// for ALL status codes carrying a body: Go's crypto/tls reports a truncated TCP FIN at a TLS
++	// record boundary (without close_notify) as ordinary io.EOF, and net/http strips Content-Length
++	// when Transfer-Encoding: chunked is present (raw HTTP/1.x wire conflicts are also intercepted
++	// before net/http parsing via NewStrictHTTP1Framing*Conn on ControlledTransportForProxy).
 +	hasResponseBody := resp.Body != nil && resp.Body != http.NoBody &&
 +		resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified &&
 +		!(resp.StatusCode >= 100 && resp.StatusCode < 200)
-+	hasChunkedTE := len(resp.TransferEncoding) > 0 && strings.EqualFold(resp.TransferEncoding[len(resp.TransferEncoding)-1], "chunked")
-+	if hasResponseBody && resp.ProtoMajor < 2 && resp.ContentLength < 0 && !hasChunkedTE {
-+		_ = resp.Body.Close()
++	hasRawTEHeader := len(resp.Header.Values("Transfer-Encoding")) > 0
++	hasRawCLHeader := len(resp.Header.Values("Content-Length")) > 0
++	hasChunkedTE := len(resp.TransferEncoding) == 1 && strings.EqualFold(resp.TransferEncoding[0], "chunked")
++	framingInvalid := false
++	if resp.ProtoMajor >= 2 {
++		if len(resp.TransferEncoding) > 0 || hasRawTEHeader {
++			framingInvalid = true
++		}
++	} else {
++		if len(resp.TransferEncoding) > 0 && !hasChunkedTE {
++			framingInvalid = true
++		}
++		if (len(resp.TransferEncoding) > 0 || hasRawTEHeader) && (resp.ContentLength >= 0 || hasRawCLHeader) {
++			framingInvalid = true
++		}
++		if hasResponseBody && resp.ContentLength < 0 && !hasChunkedTE {
++			framingInvalid = true
++		}
++	}
++	if framingInvalid {
++		if resp.Body != nil {
++			_ = resp.Body.Close()
++		}
 +		if strict && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 +			c.Taint()
 +		} else {
@@ -23280,10 +23867,10 @@ index e69de29..22f9e08 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..ef005de 100644
+index e69de29..e589c5e 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,18391 @@
+@@ -0,0 +1,18535 @@
 +package preflightreceipt
 +
 +import (
@@ -28033,9 +28620,9 @@ index e69de29..ef005de 100644
 +	}
 +	sseCodeInterpMismatch := "data: " + `{"type":"response.created","response":{"id":"resp_cim","status":"in_progress","model":"gpt-6.2-sol"}}` + "\n\n" +
 +		"data: " + `{"type":"response.code_interpreter_call_code.delta","output_index":0,"item_id":"ci_1","delta":"print(1)"}` + "\n\n" +
-+		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"print(2)"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ci_1","type":"code_interpreter_call","status":"completed","container_id":"cntr_1","code":"print(2)"}}` + "\n\n" +
 +		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_ci","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
-+		"data: " + `{"type":"response.completed","response":{"id":"resp_cim","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed","code":"print(2)"},{"id":"msg_ci","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++		"data: " + `{"type":"response.completed","response":{"id":"resp_cim","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed","container_id":"cntr_1","code":"print(2)"},{"id":"msg_ci","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-d1111111-2222-4333-8444-555555555599", "019d0000-0000-7000-8000-888888888199", sseCodeInterpMismatch); st != SealRejected {
 +		t.Fatalf("code_interpreter_call_code.delta mismatch seal = %v, want SealRejected", st)
 +	}
@@ -40552,7 +41139,19 @@ index e69de29..ef005de 100644
 +			name:   "code_interpreter_call_missing_code_completed_only",
 +			launch: "review-e2010101-2222-4333-8444-555555555508",
 +			sess:   "019d0000-0000-7000-8000-e20101010108",
-+			sse:    `data: {"type":"response.completed","response":{"id":"resp_ci1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_ci1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_1","type":"code_interpreter_call","status":"completed","container_id":"cntr_1"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "code_interpreter_call_missing_container_id_completed_only",
++			launch: "review-e2010101-2222-4333-8444-55555555550b",
++			sess:   "019d0000-0000-7000-8000-e2010101010b",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_ci2","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_2","type":"code_interpreter_call","status":"completed","code":"print(1)"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name:   "code_interpreter_call_blank_container_id_completed_only",
++			launch: "review-e2010101-2222-4333-8444-55555555550c",
++			sess:   "019d0000-0000-7000-8000-e2010101010c",
++			sse:    `data: {"type":"response.completed","response":{"id":"resp_ci3","status":"completed","model":"gpt-6.2-sol","output":[{"id":"ci_3","type":"code_interpreter_call","status":"completed","container_id":"   ","code":"print(1)"},{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
 +		},
 +		{
 +			name:   "image_generation_call_missing_result_completed_only",
@@ -40570,7 +41169,7 @@ index e69de29..ef005de 100644
 +	validSSE := `data: {"type":"response.completed","response":{"id":"resp_allok","status":"completed","model":"gpt-6.2-sol","output":[` +
 +		`{"id":"ws_ok","type":"web_search_call","status":"completed","action":{"type":"search","query":"chanlun"}},` +
 +		`{"id":"fs_ok","type":"file_search_call","status":"completed","queries":["q1"]},` +
-+		`{"id":"ci_ok","type":"code_interpreter_call","status":"completed","code":"print(1)"},` +
++		`{"id":"ci_ok","type":"code_interpreter_call","status":"completed","container_id":"cntr_1","code":"print(1)"},` +
 +		`{"id":"ig_ok","type":"image_generation_call","status":"completed","result":"aGVsbG8="},` +
 +		`{"id":"msg_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
 +	if st := runSSE("review-e2010101-2222-4333-8444-55555555550a", "019d0000-0000-7000-8000-e2010101010a", validSSE); st != SealOK {
@@ -41558,6 +42157,9 @@ index e69de29..ef005de 100644
 +		raw  []byte
 +	}{
 +		{"bad_hex", []byte(`{"schema":"cliproxy-staging-key-v1","key":"ZZZZ`)},
++		{"reordered_keys", []byte(`{"key":"` + strings.Repeat("ab", 32) + `","schema":"cliproxy-staging-key-v1"}`)},
++		{"pretty_whitespace", []byte(`{ "schema": "cliproxy-staging-key-v1", "key": "` + strings.Repeat("ab", 32) + `" }`)},
++		{"trailing_newline", []byte(`{"schema":"cliproxy-staging-key-v1","key":"` + strings.Repeat("ab", 32) + `"}` + "\n")},
 +		{"foreign_json", []byte(`{"other":1}`)},
 +		{"plain_text", []byte(`user-notes`)},
 +	}
@@ -41673,6 +42275,135 @@ index e69de29..ef005de 100644
 +		if _, serr := os.Stat(filepath.Join(rootForeign, fmt.Sprintf("foreign-keep-%02d", i))); serr != nil {
 +			t.Fatalf("foreign dir %02d was deleted from oversized root: %v", i, serr)
 +		}
++	}
++}
++
++func TestR93UpstreamHTTP1ConflictingFramingAndBeginDeadlineEnforcement(t *testing.T) {
++	// 1. Sol P2 #1 (PR #2280 R93): NewStrictHTTP1FramingConn MUST intercept conflicting
++	//    Transfer-Encoding + Content-Length (and 100 Continue + conflicting 200 OK, conflicting CL,
++	//    non-chunked TE) on raw HTTP/1.x wire bytes BEFORE net/http strips Content-Length.
++	sendRawHTTP := func(rawResp string) (*http.Response, error) {
++		ln, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer ln.Close()
++		go func() {
++			conn, errAcc := ln.Accept()
++			if errAcc != nil {
++				return
++			}
++			defer conn.Close()
++			buf := make([]byte, 2048)
++			_, _ = conn.Read(buf)
++			_, _ = io.WriteString(conn, rawResp)
++		}()
++		dialer := &net.Dialer{Timeout: 5 * time.Second}
++		tr := &http.Transport{
++			DisableKeepAlives: true,
++			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++				c, derr := dialer.DialContext(ctx, network, addr)
++				if derr != nil {
++					return nil, derr
++				}
++				return NewStrictHTTP1FramingConn(c), nil
++			},
++		}
++		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+ln.Addr().String()+"/v1/responses", nil)
++		return tr.RoundTrip(req)
++	}
++	badRawCases := []struct {
++		name string
++		raw  string
++	}{
++		{"te_and_cl_conflict", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n"},
++		{"100_then_te_and_cl", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"},
++		{"conflicting_cl", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello"},
++		{"non_chunked_te", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"},
++		{"1xx_with_cl", "HTTP/1.1 103 Early Hints\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
++		{"http10_with_te", "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"},
++	}
++	for _, tc := range badRawCases {
++		resp, err := sendRawHTTP(tc.raw)
++		if resp != nil && resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		if err == nil {
++			t.Fatalf("case %s: NewStrictHTTP1FramingConn unexpectedly accepted bad framing", tc.name)
++		}
++	}
++	goodRawCases := []struct {
++		name string
++		raw  string
++		want string
++	}{
++		{"chunked_only", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello"},
++		{"cl_only", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", "hello"},
++		{"100_then_cl", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", "ok"},
++	}
++	for _, tc := range goodRawCases {
++		resp, err := sendRawHTTP(tc.raw)
++		if err != nil {
++			t.Fatalf("case %s: valid framing rejected: %v", tc.name, err)
++		}
++		bodyBytes, rerr := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		if rerr != nil || string(bodyBytes) != tc.want {
++			t.Fatalf("case %s: body=(%q, %v), want %q", tc.name, string(bodyBytes), rerr, tc.want)
++		}
++	}
++
++	// 2. Astra P2 #3 (PR #2280 R93): legacy Begin() MUST record Started & Deadline BEFORE
++	//    pathHasDisallowedSymlink and MUST abort when Lstat stalls past ctx/Lifetime deadline.
++	root := filepath.Join(t.TempDir(), "r93-begin-deadline")
++	sess1 := "preflight-e9040404-2222-4333-8444-555555550001"
++	sess2 := "preflight-e9040404-2222-4333-8444-555555550002"
++	origLstat := lstatPathFn
++	defer func() { lstatPathFn = origLstat }()
++
++	// 2a. Brief 120ms Lstat delay MUST be accounted for inside Started and Deadline.
++	var stalledOnce atomic.Bool
++	lstatPathFn = func(p string) (os.FileInfo, error) {
++		if p == filepath.Clean(root) && stalledOnce.CompareAndSwap(false, true) {
++			time.Sleep(120 * time.Millisecond)
++		}
++		return origLstat(p)
++	}
++	beforeBegin := time.Now()
++	_, col, err := Begin(context.Background(), root, sess1)
++	afterBegin := time.Now()
++	if err != nil || col == nil {
++		t.Fatalf("Begin with brief Lstat delay failed: col=%v err=%v", col, err)
++	}
++	if afterBegin.Sub(time.Unix(0, col.receipt.Started)) < 100*time.Millisecond {
++		t.Fatalf("Begin recorded Started AFTER Lstat delay: elapsed=%v", afterBegin.Sub(time.Unix(0, col.receipt.Started)))
++	}
++	if col.Deadline().Sub(beforeBegin) > Lifetime+50*time.Millisecond {
++		t.Fatalf("Begin Deadline excluded Lstat delay: deadline-before=%v > Lifetime=%v", col.Deadline().Sub(beforeBegin), Lifetime)
++	}
++
++	// 2b. Stalled Lstat exceeding deadline MUST abort promptly with ErrUnavailable.
++	unblock := make(chan struct{})
++	lstatDone := make(chan struct{})
++	lstatPathFn = func(p string) (os.FileInfo, error) {
++		if p == filepath.Clean(root) {
++			<-unblock
++			close(lstatDone)
++		}
++		return origLstat(p)
++	}
++	shortCtx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
++	defer cancel()
++	t0 := time.Now()
++	_, col2, err2 := Begin(shortCtx, root, sess2)
++	elapsed := time.Since(t0)
++	close(unblock)
++	<-lstatDone
++	if !errors.Is(err2, ErrUnavailable) || col2 != nil {
++		t.Fatalf("Begin with stalled Lstat = (%v, %v), want (nil, ErrUnavailable)", col2, err2)
++	}
++	if elapsed > 2*time.Second {
++		t.Fatalf("Begin did not abort stalled Lstat within deadline: elapsed=%v", elapsed)
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go

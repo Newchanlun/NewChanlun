@@ -103,6 +103,8 @@ class FakeProxy:
                 else:
                     payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
                 self.send_response(code)
+                if code == 200:
+                    self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 if terminal_tail_delay and code == 200:
@@ -491,6 +493,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     if framing == "obs-text-reason":
                         raw_resp = (
                             b"HTTP/1.1 200 OK-\xe9\xff\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -498,6 +501,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     elif framing == "empty-reason":
                         raw_resp = (
                             b"HTTP/1.1 200 \r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -505,18 +509,20 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     elif framing == "missing-status-sp":
                         raw_resp = (
                             b"HTTP/1.1 200\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
                         )
                     elif framing == "close-delimited-200":
                         # 明文 HTTP 200 无 Content-Length 且无 Transfer-Encoding 时，TCP 断流不可区分于正常 EOF，须拒绝。
-                        raw_resp = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
+                        raw_resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + payload
                     elif framing == "early-hints-103":
                         raw_resp = (
                             b"HTTP/1.1 103 Early Hints\r\n"
                             b"Link: </hint>; rel=preload\r\n\r\n"
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -526,6 +532,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                             b"HTTP/1.1 103 Early Hints\r\n"
                             b"Content-Length: 0\r\n\r\n"
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -535,6 +542,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                             b"HTTP/1.1 103 Early Hints\r\n"
                             b"Transfer-Encoding: chunked\r\n\r\n"
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -542,6 +550,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     elif framing == "http10-chunked":
                         raw_resp = (
                             b"HTTP/1.0 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Transfer-Encoding: chunked\r\n\r\n"
                             + f"{len(payload):x}\r\n".encode()
                             + payload
@@ -551,6 +560,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                         raw_resp = (
                             b"HTTP/1.0 103 Early Hints\r\n\r\n"
                             b"HTTP/1.0 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
                         )
@@ -558,10 +568,11 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                         raw_resp = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\n"
                     elif framing == "status-204":
                         # 204 禁止正文，即使非法附带完整 SSE 终态也必须拒绝。
-                        raw_resp = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n" + payload
+                        raw_resp = b"HTTP/1.1 204 No Content\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + payload
                     elif framing == "status-201":
                         raw_resp = (
                             b"HTTP/1.1 201 Created\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
                             + payload
@@ -569,6 +580,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     elif framing == "gzip-encoding":
                         raw_resp = (
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             b"Content-Encoding: gzip\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
@@ -577,6 +589,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     elif framing == "bad-header":
                         raw_resp = (
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             b"MalformedHeaderWithoutColon\r\n"
                             b"Content-Length: 999\r\n\r\n"
@@ -587,6 +600,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                         # 原始 HTTP/1.1 校验必须在读体前直接拒绝，即使正文含完整成功终态。
                         raw_resp = (
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             b"\rContent-Length: 999\r\n\r\n"
                             + payload
@@ -594,6 +608,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                     else:
                         raw_resp = (
                             b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
                             b"Connection: close\r\n"
                             b"X-Bad: foo\x07bar\r\n"
                             + f"Content-Length: {len(payload)}\r\n\r\n".encode()
@@ -616,6 +631,7 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                 self.close_connection = True
                 return
             self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close")
             if framing in ("length", "short-length"):
                 self.send_header("Content-Length", str(len(payload) + (100 if framing == "short-length" else 0)))
@@ -704,6 +720,7 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 
     class Response:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
         exhausted = False
 
         def __enter__(self):
@@ -956,6 +973,7 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -1078,6 +1096,7 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -1132,6 +1151,7 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -1221,6 +1241,7 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -2179,6 +2200,7 @@ def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypa
         status = 200
 
         def __init__(self):
+            self.headers = [("Content-Type", "text/event-stream")]
             self.bytes_read = 0
             self.reads = 0
 
@@ -2206,6 +2228,7 @@ def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypa
 
     class _BytesStreamResp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self, data: bytes, max_chunk: int = 8192):
             self._buf = io.BytesIO(data)
@@ -2248,6 +2271,7 @@ def test_round_trip_rejects_response_done_and_bounds_http_error_read(monkeypatch
 
     class _StreamResp:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __init__(self, data: bytes):
             self._buf = io.BytesIO(data)
@@ -2435,7 +2459,7 @@ def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
     )
 
     payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
-    raw_http = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + payload
+    raw_http = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + payload
     server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     server_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
 
@@ -2552,6 +2576,8 @@ def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatc
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.close_connection = True
             self.send_response(mode["status"])
+            if mode["status"] == 200:
+                self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
             self.send_header("Connection", "close")
             self.end_headers()
@@ -2763,6 +2789,62 @@ def test_round_trip_enforces_consistent_response_id_when_present():
         ).encode()
         res_omitted = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-omitted", preflight.Deadline(3))
         assert res_omitted["ok"] is True, res_omitted
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_requires_event_stream_content_type():
+    """Sol P2 #2 + Astra P2 #4 (R93): HTTP 200 响应在解析 SSE 前与最终放行前都必须核验唯一且合法的
+    Content-Type: text/event-stream（允许 RFC 9110 参数），缺少、重复或非 SSE 媒体类型一律拒绝。"""
+    payload = b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    current = {"headers": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            for k, v in current["headers"]:
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 SSE Content-Type 回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 SSE Content-Type 回归
+        # 1. 合法的 text/event-stream（含大小写与 RFC 9110 参数）须通过。
+        for good_headers in (
+            [("Content-Type", "text/event-stream")],
+            [("Content-Type", "TEXT/EVENT-STREAM; charset=utf-8")],
+            [("Content-Type", 'text/event-stream ; charset="utf-8" ; version=1')],
+        ):
+            current["headers"] = good_headers
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-ct-ok", preflight.Deadline(3))
+            assert res["ok"] is True, (good_headers, res)
+
+        # 2. 缺失、非 SSE 媒体类型、重复头、非法参数均须拒绝且不消费为终态成功。
+        for bad_headers in (
+            [],
+            [("Content-Type", "")],
+            [("Content-Type", "text/plain")],
+            [("Content-Type", "application/json")],
+            [("Content-Type", "text/event-stream-extra")],
+            [("Content-Type", "text/event-stream"), ("Content-Type", "text/plain")],
+            [("Content-Type", "text/event-stream"), ("Content-Type", "text/event-stream")],
+            [("Content-Type", "text/event-stream; badparam")],
+            [("Content-Type", 'text/event-stream; charset="unterminated')],
+        ):
+            current["headers"] = bad_headers
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-ct-bad", preflight.Deadline(3))
+            assert res["ok"] is False and res["terminal"] is None, (bad_headers, res)
     finally:
         srv.shutdown()
         srv.server_close()

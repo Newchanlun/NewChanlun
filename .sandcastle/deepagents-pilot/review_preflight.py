@@ -1065,6 +1065,92 @@ def _iter_bounded_sse_lines(
         yield bytes(line_buf)
 
 
+def _is_valid_media_type_params(raw_params: str) -> bool:
+    """按 RFC 9110 §8.3.1 / §5.6.6 校验媒体类型参数列表（; key=val | ; key="quoted"）。"""
+    raw = raw_params.encode("latin-1", "strict")
+    i, n = 0, len(raw)
+    while i < n:
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        if i == n:
+            return True
+        if raw[i] == 59:  # 空参数 `; ;`（RFC 9110 允许忽略）
+            i += 1
+            continue
+        name_start = i
+        while i < n and raw[i] in _TCHAR_BYTES:
+            i += 1
+        if i == name_start or i >= n or raw[i] != 61:  # '='
+            return False
+        i += 1
+        if i >= n:
+            return False
+        if raw[i] == 34:  # '"'
+            i += 1
+            closed = False
+            while i < n:
+                b = raw[i]
+                if b == 34:
+                    i += 1
+                    closed = True
+                    break
+                if b == 92:  # '\\'
+                    i += 1
+                    if i >= n:
+                        return False
+                    qb = raw[i]
+                    if not (qb in (9, 32) or 0x21 <= qb <= 0x7E or qb >= 0x80):
+                        return False
+                    i += 1
+                elif b in (9, 32, 0x21) or (0x23 <= b <= 0x5B) or (0x5D <= b <= 0x7E) or b >= 0x80:
+                    i += 1
+                else:
+                    return False
+            if not closed:
+                return False
+        else:
+            val_start = i
+            while i < n and raw[i] in _TCHAR_BYTES:
+                i += 1
+            if i == val_start:
+                return False
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        if i == n:
+            return True
+        if raw[i] == 59:
+            i += 1
+            continue
+        return False
+    return True
+
+
+def _is_event_stream_content_type(headers) -> bool:
+    """严格核对 HTTP 200 响应携带唯一且合法的 text/event-stream Content-Type（允许 RFC 9110 合法参数）。"""
+    if headers is None:
+        return False
+    if isinstance(headers, list):
+        ct_vals = [v for k, v in headers if isinstance(k, str) and k.lower() == "content-type" and isinstance(v, str)]
+    elif hasattr(headers, "get_all"):
+        ct_vals = [v for v in (headers.get_all("Content-Type") or []) if isinstance(v, str)]
+    elif isinstance(headers, dict):
+        ct_vals = [v for k, v in headers.items() if isinstance(k, str) and k.lower() == "content-type" and isinstance(v, str)]
+    else:
+        return False
+    if len(ct_vals) != 1:
+        return False
+    val = ct_vals[0].strip(" \t")
+    media_part, sep, params_raw = val.partition(";")
+    if media_part.rstrip(" \t").lower() != "text/event-stream":
+        return False
+    if sep:
+        try:
+            return _is_valid_media_type_params(params_raw)
+        except UnicodeEncodeError:
+            return False
+    return True
+
+
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
@@ -1086,6 +1172,10 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
     try:
         with _open_http(request, timeout=timeout) as response:
+            is_sse_content_type = _is_event_stream_content_type(getattr(response, "headers", None))
+            if not is_sse_content_type:
+                return {"http_status": response.status, "terminal": None, "status": None, "ok": False,
+                        "error": _error_info("响应 Content-Type 非 text/event-stream")}
             terminal, detail, status = None, "流在终态事件前结束", None
             has_response_dict = False
             seen_response_id: str | None = None
@@ -1231,8 +1321,8 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
                 detail = "流尾存在未闭合 SSE 事件头"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 事件名成功还不够：须 HTTP 200、存在合法 response 对象且 status 与终态事件一致，且 error/message 均须为 null/缺省。
-            ok = (response.status == 200 and detail is None and has_response_dict and (
+            # 事件名成功还不够：须 HTTP 200、唯一合法的 text/event-stream Content-Type、存在合法 response 对象且 status 与终态事件一致，且 error/message 均须为 null/缺省。
+            ok = (response.status == 200 and is_sse_content_type and detail is None and has_response_dict and (
                 (terminal == "response.completed" and status == "completed")
                 or (terminal == "response.incomplete" and status == "incomplete")
             ))
