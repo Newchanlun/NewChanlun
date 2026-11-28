@@ -323,7 +323,7 @@ def segPairConfirmsDestructionBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bo
          segCase1InsideScanBool .up t1.startPrice t1.endPrice rest)
       else
         let prefix2 := segTakeThroughNewExtreme .up t1.startPrice st2
-        let postFirst := segMergeCharElems false (segExtractOddPosElems prefix2)
+        let postFirst := segMergeCharElems true (segExtractOddPosElems prefix2)
         match postFirst with
         | e2' :: e3' :: _ =>
           segRangeIsTopFractalBool e1 e2' e3' &&
@@ -337,7 +337,7 @@ def segPairConfirmsDestructionBool (d1 : SegDir) (st1 st2 : List PenStroke) : Bo
          segCase1InsideScanBool .down t1.startPrice t1.endPrice rest)
       else
         let prefix2 := segTakeThroughNewExtreme .down t1.startPrice st2
-        let postFirst := segMergeCharElems true (segExtractOddPosElems prefix2)
+        let postFirst := segMergeCharElems false (segExtractOddPosElems prefix2)
         match postFirst with
         | e2' :: e3' :: _ =>
           segRangeIsBottomFractalBool e1 e2' e3' &&
