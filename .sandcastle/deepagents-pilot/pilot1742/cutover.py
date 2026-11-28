@@ -19,6 +19,10 @@ STATE_ROOT = Path('/Volumes/AgentStorage/deepagents-exec')
 DRAIN_ROOT = Path('/Volumes/AgentStorage/newchanlun-legacy-drain')
 RELEASE_LABEL = str(json.loads((Path(__file__).resolve().parents[2] / 'queue-policy.json').read_text())['release_label'])
 LEGACY_SERVICES = ('com.newchanlun.sandcastle-claimer', 'com.newchanlun.sandcastle-harvest')
+# The legacy agent workflow files were deleted from the repo, but GitHub still lists them under
+# /actions/workflows, so the drain barrier checks the remote inventory by name.
+LEGACY_WORKFLOWS = frozenset({'agent-explore.yml', 'agent-implement.yml', 'agent-implement-pr.yml',
+                              'agent-review.yml', 'agent-update-branch.yml'})
 # 与旧 launchd / 受管 launcher 的真实执行 cwd 对齐，不接受调用者路径覆盖。
 LEGACY_HOST_REPO = Path('/Users/silencehan/Projects/NewChanlun-sandcastle-host')
 # #1481：launch[-s1d..s1j].pl 以 sandcastle-host 为 cwd，exec tsx + 绝对 runner 路径。
@@ -449,9 +453,8 @@ def remote_barrier(gateway: Any) -> RemoteBarrier:
                 return rows
         raise CutoverError('Actions pagination limit exceeded')
     workflows = pages('/actions/workflows', 'workflows')
-    required = {p.name for p in Path(__file__).resolve().parents[3].joinpath('.github/workflows').glob('agent-*.yml')}
     observed = {Path(str(w.get('path', ''))).name for w in workflows}
-    if not required or not required <= observed:
+    if not LEGACY_WORKFLOWS <= observed:
         raise CutoverError('legacy workflow inventory incomplete')
     for workflow in workflows:
         if not Path(str(workflow.get('path', ''))).name.startswith('agent-'):
