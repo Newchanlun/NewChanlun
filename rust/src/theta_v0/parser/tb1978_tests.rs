@@ -157,7 +157,30 @@ fn both_entries(bars: &[Bar], config: &ThetaConfig) -> [SegmentFacts; 2] {
     [plain, stored].map(|f| f.segment_facts.expect("观察模式必有段事实"))
 }
 
+fn worker_count(items: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(4)
+        .min(items)
+        .max(1)
+}
+
+fn has_outside_own_range(c: &SegmentCandidateFact) -> bool {
+    c.first
+        .raw_elements
+        .iter()
+        .any(|e| e.stroke_idx < c.start_stroke || e.stroke_idx > c.observed_through)
+        || c.second.iter().any(|s| {
+            s.raw_elements
+                .iter()
+                .any(|e| e.stroke_idx < c.start_stroke || e.stroke_idx > c.observed_through)
+        })
+}
+
 fn outside_own_range(c: &SegmentCandidateFact) -> Vec<usize> {
+    if !has_outside_own_range(c) {
+        return Vec::new();
+    }
     c.first
         .raw_elements
         .iter()
@@ -203,18 +226,52 @@ fn s86_first_segment_members_start_at_its_own_start() {
 #[test]
 fn zigzag_candidate_members_start_at_their_own_start() {
     let config = ThetaConfig::for_s_structure_writer().unwrap();
-    let (mut moved, mut outside) = (0, Vec::new());
-    for series in 0..200u64 {
-        let all = zigzag(series);
-        for n in 1..=all.len() {
-            for facts in both_entries(&all[..n], &config) {
-                moved += usize::from(first_start_moved(&facts));
-                for c in &facts.candidates {
-                    let bad = outside_own_range(c);
-                    if !bad.is_empty() && outside.len() < 5 {
-                        outside.push((series, n, c.start_stroke, c.observed_through, bad));
-                    }
+    let total = 200usize;
+    let workers = worker_count(total);
+    let chunk = total.div_ceil(workers);
+    let results: Vec<(usize, Vec<(u64, usize, usize, usize, Vec<usize>)>)> =
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for w in 0..workers {
+                let start = w * chunk;
+                let end = (start + chunk).min(total);
+                if start >= end {
+                    continue;
                 }
+                let config = &config;
+                handles.push(scope.spawn(move || {
+                    let (mut moved, mut outside) = (0usize, Vec::new());
+                    for series in start as u64..end as u64 {
+                        let all = zigzag(series);
+                        for n in 1..=all.len() {
+                            for facts in both_entries(&all[..n], config) {
+                                moved += usize::from(first_start_moved(&facts));
+                                for c in &facts.candidates {
+                                    if has_outside_own_range(c) && outside.len() < 5 {
+                                        outside.push((
+                                            series,
+                                            n,
+                                            c.start_stroke,
+                                            c.observed_through,
+                                            outside_own_range(c),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    (moved, outside)
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+    let mut moved = 0usize;
+    let mut outside = Vec::new();
+    for (m, chunk_outside) in results {
+        moved += m;
+        for item in chunk_outside {
+            if outside.len() < 5 {
+                outside.push(item);
             }
         }
     }
@@ -561,24 +618,38 @@ fn first_start_scans_match_the_independent_reference() {
     for series in 0..40u64 {
         corpora.push(super::parse_layer(&zigzag(series), &theta).strokes.to_vec());
     }
-    let (mut moved, mut sealed) = (0, 0);
-    for all in &corpora {
-        let mut incr = IncrSegments::empty();
-        for n in 1..=all.len() {
-            let strokes = &all[..n];
-            let want = reference_spans(strokes, config);
-            let (spans, pending, facts) = first_spans_with(strokes, config);
-            assert_eq!((&spans, pending), (&want.0, want.1), "前缀 {n} 与参照不同");
-            let batch = divide_segments_with_tail(strokes, config);
-            assert_eq!(batch.1, pending);
-            assert_eq!(batch.0.len(), spans.len());
-            incr = incr.append(strokes, config);
-            assert_eq!(incr.to_result_vec(), batch, "前缀 {n} 增量与全量不同");
-            let seed = facts.seeds.last().map(|s| s.start_stroke);
-            moved += usize::from(spans.first().is_some_and(|f| Some(f.0) > seed));
-            sealed += usize::from(facts.waiting_reasons.contains(&FIRST_START_SEALED));
+    let workers = worker_count(corpora.len());
+    let chunk = corpora.len().div_ceil(workers);
+    let (moved, sealed) = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for slice in corpora.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                let (mut moved, mut sealed) = (0usize, 0usize);
+                for all in slice {
+                    let mut incr = IncrSegments::empty();
+                    for n in 1..=all.len() {
+                        let strokes = &all[..n];
+                        let want = reference_spans(strokes, config);
+                        let (spans, pending, facts) = first_spans_with(strokes, config);
+                        assert_eq!((&spans, pending), (&want.0, want.1), "前缀 {n} 与参照不同");
+                        let batch = divide_segments_with_tail(strokes, config);
+                        assert_eq!(batch.1, pending);
+                        assert_eq!(batch.0.len(), spans.len());
+                        incr = incr.append(strokes, config);
+                        assert_eq!(incr.to_result_vec(), batch, "前缀 {n} 增量与全量不同");
+                        let seed = facts.seeds.last().map(|s| s.start_stroke);
+                        moved += usize::from(spans.first().is_some_and(|f| Some(f.0) > seed));
+                        sealed += usize::from(facts.waiting_reasons.contains(&FIRST_START_SEALED));
+                    }
+                }
+                (moved, sealed)
+            }));
         }
-    }
+        handles.into_iter().fold((0usize, 0usize), |(m, s), h| {
+            let (cm, cs) = h.join().unwrap();
+            (m + cm, s + cs)
+        })
+    });
     println!("tb1978 参照对拍：起点越过种子的已确认流首段前缀 {moved}，封住前缀 {sealed}");
     assert!(moved > 100 && sealed > 0, "语料覆盖不足：{moved}／{sealed}");
 }
@@ -588,20 +659,32 @@ fn first_start_scans_match_the_independent_reference() {
 #[test]
 fn confirmed_segments_are_never_rewritten_on_random_polylines() {
     let config = &ThetaConfig::for_s_structure_writer().unwrap().parse;
-    let mut released = 0;
-    for all in random_polylines(0x1978_1000, 1000) {
-        let (mut prev, mut was_sealed) = (vec![], false);
-        for n in 1..=all.len() {
-            let (spans, _, facts) = first_spans_with(&all[..n], config);
-            assert!(
-                spans.starts_with(&prev),
-                "前缀 {n} 改写了已确认段：{prev:?} → {spans:?}"
-            );
-            let sealed = facts.waiting_reasons.contains(&FIRST_START_SEALED);
-            released += usize::from(was_sealed && !sealed && !spans.is_empty());
-            (prev, was_sealed) = (spans, sealed);
+    let corpora = random_polylines(0x1978_1000, 1000);
+    let workers = worker_count(corpora.len());
+    let chunk = corpora.len().div_ceil(workers);
+    let released: usize = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for slice in corpora.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                let mut released = 0usize;
+                for all in slice {
+                    let (mut prev, mut was_sealed) = (vec![], false);
+                    for n in 1..=all.len() {
+                        let (spans, _, facts) = first_spans_with(&all[..n], config);
+                        assert!(
+                            spans.starts_with(&prev),
+                            "前缀 {n} 改写了已确认段：{prev:?} → {spans:?}"
+                        );
+                        let sealed = facts.waiting_reasons.contains(&FIRST_START_SEALED);
+                        released += usize::from(was_sealed && !sealed && !spans.is_empty());
+                        (prev, was_sealed) = (spans, sealed);
+                    }
+                }
+                released
+            }));
         }
-    }
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
     println!("tb1978 封住后发布 {released} 次");
     assert!(released > 0, "语料须走到封住后再发布");
 }
@@ -612,60 +695,73 @@ fn confirmed_segments_are_never_rewritten_on_random_polylines() {
 #[test]
 fn s_writer_cursor_book_path_matches_the_reference_across_generations() {
     let config = &ThetaConfig::for_s_structure_writer().unwrap().parse;
-    let mut carried = 0;
-    for budget in [0u32, 2] {
-        for all in random_polylines(0x1978_2000, 150) {
-            let (mut checkpoint, mut prev) = (Vec::new(), vec![]);
-            let round = |strokes: &[Stroke], checkpoint: &mut Vec<serde_json::Value>| {
-                let mut store = SecondFoldStore::new(budget, config.scan_budget);
-                for wire in checkpoint.iter() {
-                    store.restore(wire);
+    let corpora = random_polylines(0x1978_2000, 150);
+    let workers = worker_count(corpora.len());
+    let chunk = corpora.len().div_ceil(workers);
+    let carried: usize = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for slice in corpora.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                let mut carried = 0usize;
+                for budget in [0u32, 2] {
+                    for all in slice {
+                        let (mut checkpoint, mut prev) = (Vec::new(), vec![]);
+                        let round =
+                            |strokes: &[Stroke], checkpoint: &mut Vec<serde_json::Value>| {
+                                let mut store = SecondFoldStore::new(budget, config.scan_budget);
+                                for wire in checkpoint.iter() {
+                                    store.restore(wire);
+                                }
+                                let (_, pending, facts, store) =
+                                    divide_segments_with_facts_store(strokes, config, store);
+                                for c in &facts.candidates {
+                                    assert_eq!(outside_own_range(c), Vec::<usize>::new());
+                                    let Some(second) = &c.second else { continue };
+                                    let id = SecondCandidateId {
+                                        seg_dir: strokes[c.start_stroke].direction,
+                                        b_stroke: second.from_stroke - 1,
+                                        candidate_extreme: second.candidate_extreme,
+                                    };
+                                    assert!(
+                                        store.cursor(&id).is_some(),
+                                        "第二种候选不在返回的簿：{id:?}"
+                                    );
+                                }
+                                *checkpoint = store.checkpoint();
+                                let spans: Vec<(usize, usize)> = facts
+                                    .candidates
+                                    .iter()
+                                    .filter_map(|c| c.end_stroke.map(|e| (c.start_stroke, e)))
+                                    .collect();
+                                (spans, pending)
+                            };
+                        for n in 1..=all.len() {
+                            let got = round(&all[..n], &mut checkpoint);
+                            carried += checkpoint.len();
+                            assert!(
+                                got.0.starts_with(&prev),
+                                "预算 {budget} 前缀 {n} 改写了已确认段"
+                            );
+                            if budget == 0 {
+                                assert_eq!(got, reference_spans(&all[..n], config), "前缀 {n}");
+                            }
+                            prev = got.0;
+                        }
+                        let mut last = round(all, &mut checkpoint);
+                        for _ in 0..all.len() {
+                            last = round(all, &mut checkpoint);
+                        }
+                        assert_eq!(
+                            last,
+                            reference_spans(all, config),
+                            "预算 {budget} 续足后须收敛到参照"
+                        );
+                    }
                 }
-                let (_, pending, facts, store) =
-                    divide_segments_with_facts_store(strokes, config, store);
-                for c in &facts.candidates {
-                    assert_eq!(outside_own_range(c), Vec::<usize>::new());
-                    let Some(second) = &c.second else { continue };
-                    let id = SecondCandidateId {
-                        seg_dir: strokes[c.start_stroke].direction,
-                        b_stroke: second.from_stroke - 1,
-                        candidate_extreme: second.candidate_extreme,
-                    };
-                    assert!(
-                        store.cursor(&id).is_some(),
-                        "第二种候选不在返回的簿：{id:?}"
-                    );
-                }
-                *checkpoint = store.checkpoint();
-                let spans: Vec<(usize, usize)> = facts
-                    .candidates
-                    .iter()
-                    .filter_map(|c| c.end_stroke.map(|e| (c.start_stroke, e)))
-                    .collect();
-                (spans, pending)
-            };
-            for n in 1..=all.len() {
-                let got = round(&all[..n], &mut checkpoint);
-                carried += checkpoint.len();
-                assert!(
-                    got.0.starts_with(&prev),
-                    "预算 {budget} 前缀 {n} 改写了已确认段"
-                );
-                if budget == 0 {
-                    assert_eq!(got, reference_spans(&all[..n], config), "前缀 {n}");
-                }
-                prev = got.0;
-            }
-            let mut last = round(&all, &mut checkpoint);
-            for _ in 0..all.len() {
-                last = round(&all, &mut checkpoint);
-            }
-            assert_eq!(
-                last,
-                reference_spans(&all, config),
-                "预算 {budget} 续足后须收敛到参照"
-            );
+                carried
+            }));
         }
-    }
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
     assert!(carried > 0, "每轮 2 笔时须有游标跨代带入");
 }
