@@ -1,15 +1,17 @@
-import { test } from "node:test";
+import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { runManagedMerge, type MergeOptions, type MergeManifest, type MergeCheck } from "./managed-merge.mts";
 const report = (files: string[], status = "ready") => `<sandcastle-result>${JSON.stringify({ status, files, verification: [] })}</sandcastle-result>`;
-function fixture(t: { after: (fn: () => void) => void }, conflict = false) {
-  const cwd = mkdtempSync(join(tmpdir(), "nc-merge-"));
-  const evidence = mkdtempSync(join(tmpdir(), "nc-merge-evidence-"));
-  t.after(() => { rmSync(cwd, { recursive: true, force: true }); rmSync(evidence, { recursive: true, force: true }); });
+type SeedRepo = { cwd: string; base: string; shas: string[] };
+const seedCache = new Map<boolean, SeedRepo>();
+function getSeed(conflict: boolean): SeedRepo {
+  const cached = seedCache.get(conflict);
+  if (cached) return cached;
+  const cwd = mkdtempSync(join(tmpdir(), "nc-merge-seed-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
   git("init", "-b", "main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
   writeFileSync(join(cwd, "a.txt"), "base\n"); writeFileSync(join(cwd, "b.txt"), "base\n");
@@ -20,11 +22,26 @@ function fixture(t: { after: (fn: () => void) => void }, conflict = false) {
     writeFileSync(join(cwd, issue === 1 || conflict ? "a.txt" : "b.txt"), `issue${issue}\n`);
     git("add", "."); git("commit", "-m", `issue${issue}`); shas.push(git("rev-parse", "HEAD"));
   }
+  git("checkout", "-b", "sandcastle/merge-fixture", base);
+  const created: SeedRepo = { cwd, base, shas };
+  seedCache.set(conflict, created);
+  return created;
+}
+after(() => { for (const seed of seedCache.values()) rmSync(seed.cwd, { recursive: true, force: true }); });
+
+function fixture(t: { after: (fn: () => void) => void }, conflict = false) {
+  const seed = getSeed(conflict);
+  const cwd = mkdtempSync(join(tmpdir(), "nc-merge-"));
+  const evidence = mkdtempSync(join(tmpdir(), "nc-merge-evidence-"));
+  t.after(() => { rmSync(cwd, { recursive: true, force: true }); rmSync(evidence, { recursive: true, force: true }); });
+  cpSync(seed.cwd, cwd, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+  const { base } = seed;
+  const shas = [...seed.shas];
   const manifest: MergeManifest = { runId: "fixture", branch: "sandcastle/merge-fixture", base,
     inputs: shas.map((sha, n) => ({ issue: n + 1, branch: `sandcastle/issue-${n + 1}`, sha,
       acceptance: { head: sha, status: "accepted", reviewEvidence: `review-${sha}`, verificationEvidence: `verification-${sha}` } })),
   };
-  git("checkout", "-b", manifest.branch, base);
   const verified: string[] = [];
   const pass = async (head: string): Promise<MergeCheck> => { verified.push(head); return { head, checkId: "fixture-v1", status: "passed", evidence: "fixture check" }; };
   const opts: MergeOptions = { cwd, manifest, checkpoint: join(evidence, "checkpoint.json"), checkId: "fixture-v1", verify: pass,
@@ -33,6 +50,7 @@ function fixture(t: { after: (fn: () => void) => void }, conflict = false) {
   return { cwd, git, base, shas, opts, verified, pass };
 }
 
+describe("managed-merge", { concurrency: 4 }, () => {
 test("无冲突固定 SHA 双父归并逐步验证，main/来源票引用不改；重入不重复", async t => {
   const f = fixture(t); const r = await runManagedMerge(f.opts);
   assert.equal(r.phase, "done"); assert.equal(r.entries.length, 2); assert.equal(f.verified.length, 2);
@@ -159,4 +177,5 @@ test("checkpoint 不能放进工蜂 worktree（包括以 .. 开头的普通目�
   const f = fixture(t);
   await assert.rejects(runManagedMerge({ ...f.opts, checkpoint: join(f.cwd, "..host", "checkpoint.json") }), /不得放进/);
   assert.equal(f.git("rev-parse", "HEAD"), f.base);
+});
 });
