@@ -808,53 +808,80 @@ fn store_corpora() -> Vec<Vec<i64>> {
 /// 下一 cut 续扫等于无中断折叠；线形被改则不采纳，续扫退回重折叠，结果仍相同。
 #[test]
 fn tb02w_k1_wire_restore_verifies_then_resumes() {
-    let mut verified_nonempty = 0usize;
-    for sign in [1, -1] {
-        for (ci, prices) in store_corpora().iter().enumerate() {
-            let ss = chain(prices, sign);
-            for b in 0..ss.len() {
-                let seg_dir = ss[b].direction.flip();
-                let (hi, lo) = (
-                    ss[b].start_price.max(ss[b].end_price),
-                    ss[b].start_price.min(ss[b].end_price),
-                );
-                let c = SecondCandidateId {
-                    seg_dir,
-                    b_stroke: b,
-                    candidate_extreme: if seg_dir == Direction::Up { hi } else { lo },
-                };
-                for window in [0u32, 5] {
-                    let full = second_sequence(&ss, seg_dir, b, c.candidate_extreme, window);
-                    for p in (b + 1)..ss.len() {
-                        let label = format!("corpus{ci} sign={sign} b={b} w={window} p={p}");
-                        let mut cur = SecondFoldCursor::new(c, window, budget_ref());
-                        cur.resume(&ss[..p]).unwrap();
-                        let wire = wire_text(cur.to_wire());
-                        let (restored, verified, _) =
-                            SecondFoldCursor::from_wire(&wire, &ss[..p], budget_ref()).unwrap();
-                        assert!(verified, "{label}");
-                        assert_eq!(restored, cur, "{label}");
-                        verified_nonempty += usize::from(cur.state.consumed_len > 0);
-                        let mut next = restored;
-                        assert_eq!(next.resume(&ss).unwrap(), full, "{label} resume");
-                        if cur.state.consumed_len > 0 {
-                            let mut forged = wire.clone();
-                            forged["consumed_digest"] = serde_json::json!("0000000000000000");
-                            let (mut f, ok, _) =
-                                SecondFoldCursor::from_wire(&forged, &ss[..p], budget_ref())
-                                    .unwrap();
-                            assert!(!ok, "{label}: 篡改的线形不得采纳");
-                            assert_eq!(
-                                f.budget_granted, cur.budget_granted,
-                                "{label}: 保留累计预算"
+    let corpora = store_corpora();
+    let tasks: Vec<(i64, usize)> = [1i64, -1]
+        .into_iter()
+        .flat_map(|sign| (0..corpora.len()).map(move |ci| (sign, ci)))
+        .collect();
+    let workers = 4usize;
+    let verified_nonempty: usize = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let corpora = &corpora;
+                let tasks = &tasks;
+                s.spawn(move || {
+                    let mut local_verified = 0usize;
+                    for &(sign, ci) in tasks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, task)| (idx % workers == worker).then_some(task))
+                    {
+                        let ss = chain(&corpora[ci], sign);
+                        for b in 0..ss.len() {
+                            let seg_dir = ss[b].direction.flip();
+                            let (hi, lo) = (
+                                ss[b].start_price.max(ss[b].end_price),
+                                ss[b].start_price.min(ss[b].end_price),
                             );
-                            assert_eq!(f.resume(&ss).unwrap(), full, "{label} forged");
+                            let c = SecondCandidateId {
+                                seg_dir,
+                                b_stroke: b,
+                                candidate_extreme: if seg_dir == Direction::Up { hi } else { lo },
+                            };
+                            for window in [0u32, 5] {
+                                let full =
+                                    second_sequence(&ss, seg_dir, b, c.candidate_extreme, window);
+                                for p in (b + 1)..ss.len() {
+                                    let label =
+                                        format!("corpus{ci} sign={sign} b={b} w={window} p={p}");
+                                    let mut cur = SecondFoldCursor::new(c, window, budget_ref());
+                                    cur.resume(&ss[..p]).unwrap();
+                                    let wire = wire_text(cur.to_wire());
+                                    let (restored, verified, _) =
+                                        SecondFoldCursor::from_wire(&wire, &ss[..p], budget_ref())
+                                            .unwrap();
+                                    assert!(verified, "{label}");
+                                    assert_eq!(restored, cur, "{label}");
+                                    local_verified += usize::from(cur.state.consumed_len > 0);
+                                    let mut next = restored;
+                                    assert_eq!(next.resume(&ss).unwrap(), full, "{label} resume");
+                                    if cur.state.consumed_len > 0 {
+                                        let mut forged = wire.clone();
+                                        forged["consumed_digest"] =
+                                            serde_json::json!("0000000000000000");
+                                        let (mut f, ok, _) = SecondFoldCursor::from_wire(
+                                            &forged,
+                                            &ss[..p],
+                                            budget_ref(),
+                                        )
+                                        .unwrap();
+                                        assert!(!ok, "{label}: 篡改的线形不得采纳");
+                                        assert_eq!(
+                                            f.budget_granted, cur.budget_granted,
+                                            "{label}: 保留累计预算"
+                                        );
+                                        assert_eq!(f.resume(&ss).unwrap(), full, "{label} forged");
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-            }
-        }
-    }
+                    local_verified
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
     assert!(
         verified_nonempty > 1000,
         "核验覆盖不足：{verified_nonempty}"
@@ -904,58 +931,87 @@ fn has_bound(facts: &segment::SegmentFacts) -> bool {
 #[test]
 fn tb02w_store_rounds_match_batch_and_grant_exhausted_cursors() {
     let cfg = ThetaConfig::default().parse;
-    let (mut verified, mut grants) = (0usize, 0usize);
+    let corpora = store_corpora();
+    let tasks: Vec<(i64, usize)> = [1i64, -1]
+        .into_iter()
+        .flat_map(|sign| (0..corpora.len()).map(move |ci| (sign, ci)))
+        .collect();
+    let workers = 4usize;
+    let (verified, grants) = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let corpora = &corpora;
+                let tasks = &tasks;
+                let cfg = &cfg;
+                s.spawn(move || {
+                    let (mut local_verified, mut local_grants) = (0usize, 0usize);
+                    for &(sign, ci) in tasks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, task)| (idx % workers == worker).then_some(task))
+                    {
+                        let ss = chain(&corpora[ci], sign);
+                        let mut wires = vec![];
+                        for n in 0..=ss.len() {
+                            let (got, next, (v, granted)) = round(&ss[..n], 0, &wires);
+                            assert_eq!(
+                                got,
+                                segment::divide_segments_with_facts(&ss[..n], cfg),
+                                "corpus{ci} sign={sign} cut@{n}"
+                            );
+                            assert_eq!((v, granted), (0, 0), "预算 0 无调度相关游标");
+                            assert!(next.is_empty(), "预算 0 的检查点为空");
+                            wires = next;
+                        }
+                        // 预算 5、输入逐笔增长、每 cut 一轮（同 S）：已判定线段始终是同前缀预算 0 结果的前缀，
+                        // 无耗尽候选时逐位相同；输入走完后继续调度，至多 len/5+2 轮与预算 0 逐位相同。
+                        let mut wires = vec![];
+                        for n in 0..=ss.len() {
+                            let (got, next, (v, g)) = round(&ss[..n], 5, &wires);
+                            let base = segment::divide_segments_with_facts(&ss[..n], cfg);
+                            let label = format!("corpus{ci} sign={sign} budget5 cut@{n}");
+                            assert!(
+                                got.0.len() <= base.0.len() && got.0[..] == base.0[..got.0.len()],
+                                "{label}: 已判定线段须是预算 0 的前缀"
+                            );
+                            if !has_bound(&got.2) {
+                                assert_eq!(got, base, "{label}");
+                            }
+                            local_verified += v;
+                            local_grants += g;
+                            wires = next;
+                        }
+                        let target = segment::divide_segments_with_facts(&ss, cfg);
+                        let mut rounds = 0;
+                        loop {
+                            let (got, next, (v, g)) = round(&ss, 5, &wires);
+                            rounds += 1;
+                            local_verified += v;
+                            local_grants += g;
+                            if !has_bound(&got.2) {
+                                assert_eq!(
+                                    got, target,
+                                    "corpus{ci} sign={sign}: 续扫完毕须等于预算 0"
+                                );
+                                break;
+                            }
+                            assert!(
+                                rounds <= ss.len() / 5 + 2,
+                                "corpus{ci} sign={sign}: 续扫不收敛"
+                            );
+                            wires = next;
+                        }
+                    }
+                    (local_verified, local_grants)
+                })
+            })
+            .collect();
+        handles.into_iter().fold((0usize, 0usize), |(v, g), h| {
+            let (lv, lg) = h.join().unwrap();
+            (v + lv, g + lg)
+        })
+    });
     for sign in [1, -1] {
-        for (ci, prices) in store_corpora().iter().enumerate() {
-            let ss = chain(prices, sign);
-            let mut wires = vec![];
-            for n in 0..=ss.len() {
-                let (got, next, (v, granted)) = round(&ss[..n], 0, &wires);
-                assert_eq!(
-                    got,
-                    segment::divide_segments_with_facts(&ss[..n], &cfg),
-                    "corpus{ci} sign={sign} cut@{n}"
-                );
-                assert_eq!((v, granted), (0, 0), "预算 0 无调度相关游标");
-                assert!(next.is_empty(), "预算 0 的检查点为空");
-                wires = next;
-            }
-            // 预算 5、输入逐笔增长、每 cut 一轮（同 S）：已判定线段始终是同前缀预算 0 结果的前缀，
-            // 无耗尽候选时逐位相同；输入走完后继续调度，至多 len/5+2 轮与预算 0 逐位相同。
-            let mut wires = vec![];
-            for n in 0..=ss.len() {
-                let (got, next, (v, g)) = round(&ss[..n], 5, &wires);
-                let base = segment::divide_segments_with_facts(&ss[..n], &cfg);
-                let label = format!("corpus{ci} sign={sign} budget5 cut@{n}");
-                assert!(
-                    got.0.len() <= base.0.len() && got.0[..] == base.0[..got.0.len()],
-                    "{label}: 已判定线段须是预算 0 的前缀"
-                );
-                if !has_bound(&got.2) {
-                    assert_eq!(got, base, "{label}");
-                }
-                verified += v;
-                grants += g;
-                wires = next;
-            }
-            let target = segment::divide_segments_with_facts(&ss, &cfg);
-            let mut rounds = 0;
-            loop {
-                let (got, next, (v, g)) = round(&ss, 5, &wires);
-                rounds += 1;
-                verified += v;
-                grants += g;
-                if !has_bound(&got.2) {
-                    assert_eq!(got, target, "corpus{ci} sign={sign}: 续扫完毕须等于预算 0");
-                    break;
-                }
-                assert!(
-                    rounds <= ss.len() / 5 + 2,
-                    "corpus{ci} sign={sign}: 续扫不收敛"
-                );
-                wires = next;
-            }
-        }
         let ss = chain(&evidence_at_item_51(), sign);
         let (first, wires, _) = round(&ss, 50, &[]);
         assert!(
