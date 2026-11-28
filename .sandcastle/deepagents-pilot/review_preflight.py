@@ -9,17 +9,21 @@
 """
 import argparse
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
 import re
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -34,6 +38,8 @@ CLIPROXY_LOG_DIR = Path.home() / "Library/Application Support/CLIProxyLocal/auth
 # 每个模型可接受的上游路线。Sol 走 Codex OAuth（chatgpt.com）；Kimi 走国内 kimi（api.kimi.com）或国际 kimi-ai
 # （api.kimi.ai），CLIProxy 在两者间按同型号候选池切换（CLIProxyLocal ROUTING-KIMI-1696.md）；Opus 走 Claude OAuth。
 ROUTES = {"gpt-6.1-sol": {("codex", "chatgpt.com")},
+          "gpt-6.2-sol": {("codex:gpt-6.2-sol", "chatgpt.com")},
+          "gpt-6.2-astra": {("codex:gpt-6.2-astra", "chatgpt.com")},
           "kimi-k3.1-pro": {("kimi", "api.kimi.com"), ("kimi-ai", "api.kimi.ai")},
           "claude-opus-5-5": {("claude", "api.anthropic.com")}}
 # 报告里只回显这些已知路由，其余记作 "other"：日志字段来自上游，不能原样进报告
@@ -42,7 +48,7 @@ KNOWN_ROUTES = {*(route for routes in ROUTES.values() for route in routes),
 PROVIDER = "cliproxy-local"
 SCRUBBED_ENV = "CLIPROXY_LOCAL_KEY"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "in_progress", "queued")
+RESPONSE_STATUSES = ("completed", "incomplete", "failed", "cancelled", "canceled", "in_progress", "queued")
 CLEANUP_RESERVE = 3.0  # 总时限里留给回收与输出报告的秒数
 OUTPUT_MARGIN = 0.5  # 回收之后杀进程组、删目录、输出报告所留的秒数（机器忙时也够）
 # 上游错误只按固定词表分类，不把原文抄进报告（原文可能回显 key，且转义形态无法穷举）
@@ -52,7 +58,7 @@ ERROR_CLASSES = (("tool_choice", "tool_choice_unsupported"), ("预扣额度", "q
                  ("model_not_found", "model_not_found"), ("not supported", "unsupported"))
 
 
-TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed", "error")
+TERMINAL_EVENTS = ("response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled", "error")
 CREDENTIAL_SOURCES = ("auth.command", "experimental_bearer_token", "env_key")
 # 报告协议词表：字段名与枚举值都由本脚本写死、与 key 无关，原样输出不透露 key 的任何信息。
 # 合法 key 可以是任意可见 ASCII（如 "ok"），与它们相同或是其子串时，脱敏也不能改写它们（调用方按字段与枚举读结论）。
@@ -353,6 +359,801 @@ def round_trip(url: str, key: str, model: str, session: str, deadline: Deadline)
                 "error": {"exception": type(error).__name__, "errno": None}}
 
 
+_SSE_EVENT_SCHEMA_KEYS = frozenset({
+    "type", "response_id", "model", "error", "response", "message",
+    "item", "item_id", "output_index", "content_index", "text", "delta", "refusal", "part",
+    "arguments", "input", "code", "name", "call_id",
+})
+_SSE_RESPONSE_SCHEMA_KEYS = frozenset({"id", "model", "status", "error", "output"})
+_SSE_ITEM_SCHEMA_KEYS = frozenset({
+    "id", "type", "role", "phase", "status", "content", "response_id",
+    "call_id", "name", "server_label", "container_id", "arguments", "input", "code", "action", "queries", "result", "error",
+})
+_SSE_CONTENT_PART_SCHEMA_KEYS = frozenset({"type", "text", "refusal"})
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON key")
+        out[key] = value
+    return out
+
+
+def _check_canonical_schema_keys(obj: object, schema_keys: frozenset[str]) -> None:
+    if not isinstance(obj, dict):
+        return
+    seen_lower: set[str] = set()
+    for key in obj:
+        lower = key.lower()
+        if lower in seen_lower:
+            raise ValueError(f"case-duplicate protocol JSON key: {key}")
+        if key != lower and lower in schema_keys:
+            raise ValueError(f"non-canonical protocol key case: {key}")
+        seen_lower.add(lower)
+
+
+_SSE_EXT_FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
+_SSE_STANDARD_FIELDS = frozenset({"data", "event", "id", "retry"})
+
+
+def _is_valid_sse_extension_field(line: str) -> bool:
+    """WHATWG SSE 允许接收方忽略合法扩展元数据字段（须含冒号，如 `x-proxy-meta: ...`），
+    同时继续拒绝无冒号未知裸行、裸 JSON、非 token 行及标准字段大小写变体。"""
+    if not line or line.startswith(":") or ":" not in line:
+        return False
+    name = line.split(":", 1)[0]
+    if not _SSE_EXT_FIELD_RE.fullmatch(name):
+        return False
+    return name.lower() not in _SSE_STANDARD_FIELDS
+
+
+def _extract_explicit_response_ids(event: dict, raw_inner: object) -> tuple[list[str], bool]:
+    """提取事件中所有显式声明的响应 ID（顶层 response_id、response.id、item.response_id、
+    response.output[*].response_id）；显式声明的 output/item 类型错误，或 ID 为 null、
+    非字符串、空串或首尾空白均判非法。"""
+    found: list[str] = []
+    containers: list[tuple[dict, str]] = [(event, "response_id")]
+    if isinstance(raw_inner, dict):
+        containers.append((raw_inner, "id"))
+        if "output" in raw_inner:
+            raw_output = raw_inner["output"]
+            if not isinstance(raw_output, list):
+                return [], False
+            for out_item in raw_output:
+                if not isinstance(out_item, dict):
+                    return [], False
+                containers.append((out_item, "response_id"))
+    if event.get("type") in ("response.output_item.added", "response.output_item.done"):
+        if "item" not in event or not isinstance(event["item"], dict):
+            return [], False
+        containers.append((event["item"], "response_id"))
+    elif "item" in event:
+        raw_item = event["item"]
+        if not isinstance(raw_item, dict):
+            return [], False
+        containers.append((raw_item, "response_id"))
+    for obj, key in containers:
+        if key not in obj:
+            continue
+        val = obj[key]
+        if not isinstance(val, str) or not val or val.strip() != val:
+            return [], False
+        found.append(val)
+    return found, True
+
+
+def _validate_sse_protocol_key_casing(event: object) -> None:
+    if not isinstance(event, dict):
+        return
+    _check_canonical_schema_keys(event, _SSE_EVENT_SCHEMA_KEYS)
+    resp = event.get("response")
+    if isinstance(resp, dict):
+        _check_canonical_schema_keys(resp, _SSE_RESPONSE_SCHEMA_KEYS)
+        output = resp.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if isinstance(item, dict):
+                    _check_canonical_schema_keys(item, _SSE_ITEM_SCHEMA_KEYS)
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        for part in content:
+                            _check_canonical_schema_keys(part, _SSE_CONTENT_PART_SCHEMA_KEYS)
+    item = event.get("item")
+    if isinstance(item, dict):
+        _check_canonical_schema_keys(item, _SSE_ITEM_SCHEMA_KEYS)
+        content = item.get("content")
+        if isinstance(content, list):
+            for part in content:
+                _check_canonical_schema_keys(part, _SSE_CONTENT_PART_SCHEMA_KEYS)
+    part = event.get("part")
+    if isinstance(part, dict):
+        _check_canonical_schema_keys(part, _SSE_CONTENT_PART_SCHEMA_KEYS)
+
+
+def _reject_json_constant(token: str) -> object:
+    raise ValueError(f"non-JSON constant: {token}")
+
+
+def _contains_surrogate(value: object) -> bool:
+    if isinstance(value, str):
+        return any(0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+    if isinstance(value, list):
+        return any(_contains_surrogate(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_surrogate(k) or _contains_surrogate(v) for k, v in value.items())
+    return False
+
+
+MAX_SSE_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_SSE_EVENT_BYTES = 256 * 1024
+SSE_READ_CHUNK_BYTES = 8192
+MAX_HTTP_ERROR_BYTES = 65536
+MAX_HTTP_HEADERS = 100
+MAX_HTTP_HEADER_BYTES = 65536
+_CHUNK_SIZE_HEX_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
+_CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,20}")
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_HTTP_STATUS_LINE_RE = re.compile(rb"HTTP/1\.([01]) ([0-9]{3}) ([\t\x20-\x7e\x80-\xff]*)")
+_TRAILER_FIELD_RE = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+:[\t\x20-\x7e\x80-\xff]*")
+_TCHAR_BYTES = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+
+class _SSEReadLimitError(Exception):
+    pass
+
+
+def _is_valid_chunk_ext(raw: bytes) -> bool:
+    """按 RFC 9112 §7.1.1 线性校验首分号后的 chunk-ext 语法，无回溯风险。"""
+    n = len(raw)
+    i = 0
+    while True:
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        name_start = i
+        while i < n and raw[i] in _TCHAR_BYTES:
+            i += 1
+        if i == name_start:
+            return False
+        ws_start = i
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        if i == n:
+            return i == ws_start
+        if raw[i] == 61:  # '='
+            i += 1
+            while i < n and raw[i] in (32, 9):
+                i += 1
+            if i >= n:
+                return False
+            if raw[i] == 34:  # '"' quoted-string
+                i += 1
+                closed = False
+                while i < n:
+                    b = raw[i]
+                    if b == 34:
+                        i += 1
+                        closed = True
+                        break
+                    if b == 92:  # '\\' quoted-pair
+                        i += 1
+                        if i >= n:
+                            return False
+                        qb = raw[i]
+                        if not (qb in (9, 32) or 0x21 <= qb <= 0x7E or qb >= 0x80):
+                            return False
+                        i += 1
+                    elif b in (9, 32, 0x21) or (0x23 <= b <= 0x5B) or (0x5D <= b <= 0x7E) or b >= 0x80:
+                        i += 1
+                    else:
+                        return False
+                if not closed:
+                    return False
+            else:
+                val_start = i
+                while i < n and raw[i] in _TCHAR_BYTES:
+                    i += 1
+                if i == val_start:
+                    return False
+            val_ws_start = i
+            while i < n and raw[i] in (32, 9):
+                i += 1
+            if i == n:
+                return i == val_ws_start
+        if raw[i] == 59:  # ';'
+            i += 1
+            continue
+        return False
+
+
+def _read_exact_fp(fp, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        part = fp.read(n - len(buf))
+        if not part:
+            raise http.client.IncompleteRead(bytes(buf))
+        buf.extend(part)
+    return bytes(buf)
+
+
+class _StrictHTTPResponse:
+    """绕过 CPython email.parser / HTTPResponse 的原始字节 HTTP/1.1 响应读取器：
+    按 RFC 9112 逐行校验状态行、响应头、Content-Length / Transfer-Encoding、chunked 分帧与 trailer。"""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        fp,
+        *,
+        status: int,
+        reason: str,
+        headers: list[tuple[str, str]],
+        chunked: bool,
+        content_length: int | None,
+    ):
+        self._sock = sock
+        self._fp = fp
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self.chunked = chunked
+        self.length = content_length
+        self._closed = False
+        self._body_started = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+        return False
+
+    def isclosed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._fp.close()
+        except Exception:
+            pass
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+    def iter_body(
+        self,
+        deadline: Deadline | None,
+        *,
+        max_total_bytes: int,
+        chunk_bytes: int = SSE_READ_CHUNK_BYTES,
+    ):
+        if self._body_started:
+            raise http.client.HTTPException("response body already consumed")
+        self._body_started = True
+        total_bytes = 0
+        fp = self._fp
+        if self.chunked:
+            framing_bytes = 0
+            max_framing_bytes = max(4096, max_total_bytes)
+            while True:
+                if deadline is not None and deadline.work_left() <= 0:
+                    return
+                size_line = fp.readline(http.client._MAXLINE + 1)
+                if len(size_line) > http.client._MAXLINE:
+                    raise http.client.LineTooLong("chunk size")
+                if not size_line or not size_line.endswith(b"\r\n"):
+                    raise http.client.IncompleteRead(b"")
+                framing_bytes += len(size_line)
+                if framing_bytes > max_framing_bytes:
+                    self.close()
+                    raise _SSEReadLimitError("chunked 分帧开销超过字节上限")
+                size_head, sep, ext_raw = size_line[:-2].partition(b";")
+                size_token = size_head.rstrip(b" \t") if sep else size_head
+                if not _CHUNK_SIZE_HEX_RE.fullmatch(size_token):
+                    raise http.client.HTTPException("invalid chunk size")
+                if sep and not _is_valid_chunk_ext(ext_raw):
+                    raise http.client.HTTPException("invalid chunk extension")
+                chunk_size = int(size_token, 16)
+                if chunk_size == 0:
+                    total_trailer_bytes = 0
+                    while True:
+                        if deadline is not None and deadline.work_left() <= 0:
+                            return
+                        tline = fp.readline(http.client._MAXLINE + 1)
+                        if len(tline) > http.client._MAXLINE:
+                            raise http.client.LineTooLong("trailer line")
+                        if not tline:
+                            raise http.client.IncompleteRead(b"")
+                        total_trailer_bytes += len(tline)
+                        framing_bytes += len(tline)
+                        if total_trailer_bytes > 65536:
+                            raise http.client.LineTooLong("trailer section")
+                        if framing_bytes > max_framing_bytes:
+                            self.close()
+                            raise _SSEReadLimitError("chunked 分帧开销超过字节上限")
+                        if tline == b"\r\n":
+                            break
+                        if not tline.endswith(b"\r\n"):
+                            raise http.client.IncompleteRead(b"")
+                        if not _TRAILER_FIELD_RE.fullmatch(tline[:-2]):
+                            raise http.client.HTTPException("invalid chunk trailer")
+                        trailer_name = tline[:-2].split(b":", 1)[0].lower()
+                        if trailer_name in (b"content-length", b"transfer-encoding"):
+                            raise http.client.HTTPException("forbidden framing trailer")
+                    self.close()
+                    return
+                chunk_rem = chunk_size
+                while chunk_rem > 0:
+                    if deadline is not None and deadline.work_left() <= 0:
+                        return
+                    remaining = max_total_bytes - total_bytes
+                    read_size = min(chunk_bytes, chunk_rem, remaining + 1)
+                    data = fp.read(read_size)
+                    if not data:
+                        raise http.client.IncompleteRead(b"")
+                    chunk_rem -= len(data)
+                    total_bytes += len(data)
+                    if total_bytes > max_total_bytes:
+                        raise _SSEReadLimitError("SSE 响应超过大小上限")
+                    yield data
+                framing_bytes += 2
+                if framing_bytes > max_framing_bytes:
+                    self.close()
+                    raise _SSEReadLimitError("chunked 分帧开销超过字节上限")
+                if _read_exact_fp(fp, 2) != b"\r\n":
+                    raise http.client.HTTPException("invalid chunk terminator")
+            return
+
+        if self.length is not None:
+            while self.length > 0:
+                if deadline is not None and deadline.work_left() <= 0:
+                    return
+                remaining = max_total_bytes - total_bytes
+                read_size = min(chunk_bytes, self.length, remaining + 1)
+                data = fp.read(read_size)
+                if not data:
+                    raise http.client.IncompleteRead(b"")
+                self.length -= len(data)
+                total_bytes += len(data)
+                if total_bytes > max_total_bytes:
+                    raise _SSEReadLimitError("SSE 响应超过大小上限")
+                yield data
+            self.close()
+            return
+
+        while True:
+            if deadline is not None and deadline.work_left() <= 0:
+                return
+            remaining = max_total_bytes - total_bytes
+            read_size = min(chunk_bytes, remaining + 1)
+            data = fp.read(read_size)
+            if not data:
+                break
+            total_bytes += len(data)
+            if total_bytes > max_total_bytes:
+                raise _SSEReadLimitError("SSE 响应超过大小上限")
+            yield data
+        self.close()
+
+    def read(self, amt: int = MAX_HTTP_ERROR_BYTES) -> bytes:
+        cap = MAX_HTTP_ERROR_BYTES if amt is None or amt < 0 else amt
+        buf = bytearray()
+        try:
+            for chunk in self.iter_body(None, max_total_bytes=cap, chunk_bytes=min(SSE_READ_CHUNK_BYTES, max(1, cap))):
+                buf.extend(chunk)
+                if len(buf) >= cap:
+                    break
+        except _SSEReadLimitError:
+            pass
+        return bytes(buf[:cap])
+
+
+def _open_http(request: urllib.request.Request, timeout: float) -> _StrictHTTPResponse:
+    """直连目标代理发送 HTTP/1.1 请求（禁用环境代理与所有 3xx 重定向），
+    并在原始字节边界严格校验响应状态行、响应头字段与定界头。"""
+    parsed = urllib.parse.urlsplit(request.full_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise urllib.error.URLError("unsupported URL")
+    host = parsed.hostname
+    default_port = 443 if scheme == "https" else 80
+    try:
+        parsed_port = parsed.port
+    except ValueError as err:
+        raise urllib.error.URLError("invalid port") from err
+    port = default_port if parsed_port is None else parsed_port
+    if not (1 <= port <= 65535):
+        raise urllib.error.URLError("invalid port")
+    method = request.get_method()
+    if not _HEADER_NAME_RE.fullmatch(method):
+        raise urllib.error.URLError("invalid HTTP method")
+    target = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    if any(ch in target for ch in ("\r", "\n", " ", "\t", "\x00")):
+        raise urllib.error.URLError("invalid HTTP request target")
+    body = request.data if isinstance(request.data, (bytes, bytearray)) else b""
+    host_hdr = f"[{host}]" if ":" in host else host
+    if port != default_port:
+        host_hdr = f"{host_hdr}:{port}"
+    req_lines = [
+        f"{method} {target} HTTP/1.1",
+        f"Host: {host_hdr}",
+        "Connection: close",
+        "Accept-Encoding: identity",
+        f"Content-Length: {len(body)}",
+    ]
+    for name, val in request.header_items():
+        if name.lower() in ("host", "connection", "content-length", "accept-encoding"):
+            continue
+        if not _HEADER_NAME_RE.fullmatch(name) or any(ch in val for ch in ("\r", "\n", "\x00")):
+            raise urllib.error.URLError("invalid HTTP request header")
+        req_lines.append(f"{name}: {val}")
+    wire_head = ("\r\n".join(req_lines) + "\r\n\r\n").encode("latin-1")
+
+    raw_sock = socket.create_connection((host, port), timeout=timeout)
+    sock: socket.socket = raw_sock
+    fp = None
+    try:
+        if scheme == "https":
+            ctx = ssl.create_default_context()
+            # 清除 OpenSSL 3.x 默认可能开启的 OP_IGNORE_UNEXPECTED_EOF，并禁用 suppress_ragged_eofs：
+            # 对端若未发送 TLS close_notify 即断流，TLS 层必须抛出 SSLEOFError 而非当成正常 EOF。
+            op_ignore_eof = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+            if op_ignore_eof:
+                ctx.options &= ~op_ignore_eof
+            sock = ctx.wrap_socket(raw_sock, server_hostname=host, suppress_ragged_eofs=False)
+        sock.settimeout(timeout)
+        sock.sendall(wire_head)
+        if body:
+            sock.sendall(body)
+        fp = sock.makefile("rb")
+        total_hdr_bytes = 0
+        total_hdr_count = 0
+        info_responses = 0
+        while True:
+            status_line = fp.readline(http.client._MAXLINE + 1)
+            if len(status_line) > http.client._MAXLINE:
+                raise http.client.LineTooLong("status line")
+            if not status_line or not status_line.endswith(b"\r\n"):
+                raise http.client.BadStatusLine("malformed status line")
+            total_hdr_bytes += len(status_line)
+            if total_hdr_bytes > MAX_HTTP_HEADER_BYTES:
+                raise http.client.LineTooLong("header section")
+            m = _HTTP_STATUS_LINE_RE.fullmatch(status_line[:-2])
+            if not m:
+                raise http.client.BadStatusLine("invalid status line")
+            http_minor = m.group(1)
+            status_code = int(m.group(2))
+            reason = m.group(3).decode("latin-1")
+            if status_code == 101:
+                raise http.client.HTTPException("unsupported 101 Switching Protocols")
+
+            raw_headers: list[tuple[str, str]] = []
+            te_headers: list[str] = []
+            cl_headers: list[str] = []
+            ce_headers: list[str] = []
+            while True:
+                hline = fp.readline(http.client._MAXLINE + 1)
+                if len(hline) > http.client._MAXLINE:
+                    raise http.client.LineTooLong("header line")
+                if not hline:
+                    raise http.client.IncompleteRead(b"")
+                total_hdr_bytes += len(hline)
+                if total_hdr_bytes > MAX_HTTP_HEADER_BYTES:
+                    raise http.client.LineTooLong("header section")
+                if hline == b"\r\n":
+                    break
+                if not hline.endswith(b"\r\n"):
+                    raise http.client.HTTPException("malformed HTTP response header line ending")
+                line = hline[:-2]
+                if not _TRAILER_FIELD_RE.fullmatch(line):
+                    raise http.client.HTTPException("malformed HTTP response header")
+                total_hdr_count += 1
+                if total_hdr_count > MAX_HTTP_HEADERS:
+                    raise http.client.HTTPException("too many HTTP response headers")
+                raw_name, raw_val = line.split(b":", 1)
+                hname = raw_name.decode("ascii")
+                hval = raw_val.decode("latin-1").strip(" \t")
+                raw_headers.append((hname, hval))
+                lower_name = hname.lower()
+                if lower_name == "transfer-encoding":
+                    te_headers.append(hval)
+                elif lower_name == "content-length":
+                    cl_headers.append(hval)
+                elif lower_name == "content-encoding":
+                    ce_headers.append(hval)
+
+            if 100 <= status_code < 200:
+                if http_minor == b"0":
+                    raise http.client.HTTPException("HTTP/1.0 forbids 1xx response")
+                if te_headers or cl_headers:
+                    raise http.client.HTTPException("forbidden framing header in 1xx response")
+                info_responses += 1
+                if info_responses > 4:
+                    raise http.client.HTTPException("too many 1xx responses")
+                continue
+            break
+
+        if http_minor == b"0" and te_headers:
+            raise http.client.HTTPException("HTTP/1.0 forbids Transfer-Encoding")
+
+        if ce_headers:
+            ce_codings = [tok.strip(" \t").lower() for hdr in ce_headers for tok in hdr.split(",")]
+            if not ce_codings or any(c != "identity" for c in ce_codings):
+                raise http.client.HTTPException("unsupported Content-Encoding")
+        if status_code in (204, 205, 304):
+            chunked = False
+            content_length: int | None = 0
+        else:
+            if te_headers and cl_headers:
+                raise http.client.HTTPException("conflicting Transfer-Encoding and Content-Length")
+            chunked = False
+            content_length = None
+            if te_headers:
+                codings = [tok.strip(" \t").lower() for hdr in te_headers for tok in hdr.split(",")]
+                if codings != ["chunked"]:
+                    raise http.client.HTTPException("unsupported Transfer-Encoding")
+                chunked = True
+            elif cl_headers:
+                parsed_lengths: set[int] = set()
+                for hdr in cl_headers:
+                    for part in hdr.split(","):
+                        tok = part.strip(" \t")
+                        if not _CONTENT_LENGTH_RE.fullmatch(tok):
+                            raise http.client.HTTPException("invalid Content-Length")
+                        parsed_lengths.add(int(tok))
+                if len(parsed_lengths) != 1:
+                    raise http.client.HTTPException("conflicting Content-Length")
+                content_length = next(iter(parsed_lengths))
+            if status_code == 200 and scheme == "http" and not chunked and content_length is None:
+                raise http.client.HTTPException("plaintext HTTP 200 requires Content-Length or chunked framing")
+    except Exception:
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+        raise
+
+    resp = _StrictHTTPResponse(
+        sock,
+        fp,
+        status=status_code,
+        reason=reason,
+        headers=raw_headers,
+        chunked=chunked,
+        content_length=content_length,
+    )
+    if status_code != 200:
+        hdr_msg = http.client.HTTPMessage()
+        for hname, hval in raw_headers:
+            hdr_msg.add_header(hname, hval)
+        raise urllib.error.HTTPError(request.full_url, status_code, reason, hdr_msg, resp)
+    return resp
+
+
+def _iter_strict_http_body(
+    response,
+    deadline: Deadline | None,
+    *,
+    max_total_bytes: int,
+    chunk_bytes: int = SSE_READ_CHUNK_BYTES,
+):
+    """严格有界读取 HTTP 响应体：真实连接经 _StrictHTTPResponse 原生 RFC 9112 分帧读取，测试桩走有界 read()。"""
+    if isinstance(response, _StrictHTTPResponse):
+        yield from response.iter_body(deadline, max_total_bytes=max_total_bytes, chunk_bytes=chunk_bytes)
+        return
+    total_bytes = 0
+    while True:
+        if deadline is not None and deadline.work_left() <= 0:
+            return
+        remaining = max_total_bytes - total_bytes
+        read_size = min(chunk_bytes, remaining + 1)
+        chunk = response.read(read_size)
+        if not chunk:
+            if (getattr(response, "length", None) or 0) > 0 or (
+                getattr(response, "chunked", False) and getattr(response, "chunk_left", None) is not None
+            ):
+                raise http.client.IncompleteRead(b"")
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_total_bytes:
+            raise _SSEReadLimitError("SSE 响应超过大小上限")
+        yield chunk
+
+
+def _read_bounded_error_body(error: urllib.error.HTTPError, *, max_bytes: int = MAX_HTTP_ERROR_BYTES) -> bytes:
+    """严格有界读取 HTTPError 正文，对 chunked 错误响应同样校验块长与上限。"""
+    raw_resp = getattr(error, "fp", None)
+    if isinstance(raw_resp, _StrictHTTPResponse):
+        buf = bytearray()
+        try:
+            for chunk in raw_resp.iter_body(None, max_total_bytes=max_bytes, chunk_bytes=min(SSE_READ_CHUNK_BYTES, max_bytes)):
+                buf.extend(chunk)
+                if len(buf) >= max_bytes:
+                    break
+        except (_SSEReadLimitError, http.client.HTTPException, OSError):
+            pass
+        return bytes(buf[:max_bytes])
+    try:
+        return error.read(max_bytes)[:max_bytes]
+    except http.client.IncompleteRead as inc:
+        return inc.partial[:max_bytes]
+    except Exception:
+        return b""
+
+
+def _iter_bounded_sse_lines(
+    response,
+    deadline: Deadline,
+    *,
+    max_total_bytes: int | None = None,
+    max_line_bytes: int | None = None,
+    chunk_bytes: int = SSE_READ_CHUNK_BYTES,
+):
+    """增量按块读取 SSE 流并执行总字节数与单行上限，未超限时必须读至 EOF 以保留截断传输检测。"""
+    if max_total_bytes is None:
+        max_total_bytes = MAX_SSE_RESPONSE_BYTES
+    if max_line_bytes is None:
+        max_line_bytes = MAX_SSE_EVENT_BYTES
+    bom_checked = False
+    bom_buf = bytearray()
+    pending_cr = False
+    line_buf = bytearray()
+
+    for chunk in _iter_strict_http_body(response, deadline, max_total_bytes=max_total_bytes, chunk_bytes=chunk_bytes):
+        if not bom_checked:
+            need = 3 - len(bom_buf)
+            bom_buf.extend(chunk[:need])
+            rest = chunk[need:]
+            if len(bom_buf) < 3 and b"\xef\xbb\xbf".startswith(bom_buf):
+                continue
+            bom_checked = True
+            if bom_buf == b"\xef\xbb\xbf":
+                chunk = rest
+            else:
+                chunk = bytes(bom_buf) + rest
+            bom_buf.clear()
+            if not chunk:
+                continue
+
+        idx = 0
+        if pending_cr:
+            pending_cr = False
+            if chunk[0] == 10:
+                idx = 1
+
+        n = len(chunk)
+        start = idx
+        while idx < n:
+            b = chunk[idx]
+            if b == 13 or b == 10:
+                if idx > start:
+                    if len(line_buf) + (idx - start) > max_line_bytes:
+                        raise _SSEReadLimitError("SSE 单行超过大小上限")
+                    line_buf.extend(chunk[start:idx])
+                yield bytes(line_buf)
+                line_buf.clear()
+                if b == 13:
+                    if idx + 1 < n and chunk[idx + 1] == 10:
+                        idx += 2
+                    else:
+                        if idx + 1 == n:
+                            pending_cr = True
+                        idx += 1
+                else:
+                    idx += 1
+                start = idx
+            else:
+                idx += 1
+
+        if start < n:
+            if len(line_buf) + (n - start) > max_line_bytes:
+                raise _SSEReadLimitError("SSE 单行超过大小上限")
+            line_buf.extend(chunk[start:n])
+
+    if not bom_checked and bom_buf:
+        if len(line_buf) + len(bom_buf) > max_line_bytes:
+            raise _SSEReadLimitError("SSE 单行超过大小上限")
+        line_buf.extend(bom_buf)
+    if line_buf:
+        yield bytes(line_buf)
+
+
+def _is_valid_media_type_params(raw_params: str) -> bool:
+    """按 RFC 9110 §8.3.1 / §5.6.6 校验媒体类型参数列表（; key=val | ; key="quoted"）。"""
+    raw = raw_params.encode("latin-1", "strict")
+    i, n = 0, len(raw)
+    while i < n:
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        if i == n:
+            return True
+        if raw[i] == 59:  # 空参数 `; ;`（RFC 9110 允许忽略）
+            i += 1
+            continue
+        name_start = i
+        while i < n and raw[i] in _TCHAR_BYTES:
+            i += 1
+        if i == name_start or i >= n or raw[i] != 61:  # '='
+            return False
+        i += 1
+        if i >= n:
+            return False
+        if raw[i] == 34:  # '"'
+            i += 1
+            closed = False
+            while i < n:
+                b = raw[i]
+                if b == 34:
+                    i += 1
+                    closed = True
+                    break
+                if b == 92:  # '\\'
+                    i += 1
+                    if i >= n:
+                        return False
+                    qb = raw[i]
+                    if not (qb in (9, 32) or 0x21 <= qb <= 0x7E or qb >= 0x80):
+                        return False
+                    i += 1
+                elif b in (9, 32, 0x21) or (0x23 <= b <= 0x5B) or (0x5D <= b <= 0x7E) or b >= 0x80:
+                    i += 1
+                else:
+                    return False
+            if not closed:
+                return False
+        else:
+            val_start = i
+            while i < n and raw[i] in _TCHAR_BYTES:
+                i += 1
+            if i == val_start:
+                return False
+        while i < n and raw[i] in (32, 9):
+            i += 1
+        if i == n:
+            return True
+        if raw[i] == 59:
+            i += 1
+            continue
+        return False
+    return True
+
+
+def _is_event_stream_content_type(headers) -> bool:
+    """严格核对 HTTP 200 响应携带唯一且合法的 text/event-stream Content-Type（允许 RFC 9110 合法参数）。"""
+    if headers is None:
+        return False
+    if isinstance(headers, list):
+        ct_vals = [v for k, v in headers if isinstance(k, str) and k.lower() == "content-type" and isinstance(v, str)]
+    elif hasattr(headers, "get_all"):
+        ct_vals = [v for v in (headers.get_all("Content-Type") or []) if isinstance(v, str)]
+    elif isinstance(headers, dict):
+        ct_vals = [v for k, v in headers.items() if isinstance(k, str) and k.lower() == "content-type" and isinstance(v, str)]
+    else:
+        return False
+    if len(ct_vals) != 1:
+        return False
+    val = ct_vals[0].strip(" \t")
+    media_part, sep, params_raw = val.partition(";")
+    if media_part.rstrip(" \t").lower() != "text/event-stream":
+        return False
+    if sep:
+        try:
+            return _is_valid_media_type_params(params_raw)
+        except UnicodeEncodeError:
+            return False
+    return True
+
+
 def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Deadline) -> dict:
     """一次最小往返，只探连通：responses + tools + tool_choice=auto + json_schema 输出格式。
     不代表 kimi 的生产请求形状（正式独审对 kimi 不带 --output-schema），也不验证回合内真实工具调用。"""
@@ -373,37 +1174,174 @@ def _round_trip_http(url: str, key: str, model: str, session: str, deadline: Dea
     if timeout <= 0:
         return {"http_status": None, "terminal": None, "ok": False, "error": {"not_sent": "总时限已到"}}
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_http(request, timeout=timeout) as response:
+            is_sse_content_type = _is_event_stream_content_type(getattr(response, "headers", None))
+            if not is_sse_content_type:
+                return {"http_status": response.status, "terminal": None, "status": None, "ok": False,
+                        "error": _error_info("响应 Content-Type 非 text/event-stream")}
             terminal, detail, status = None, "流在终态事件前结束", None
-            for raw in response.read().splitlines():
-                if deadline.work_left() <= 0:
-                    detail = "总时限内无终态事件"
-                    break
-                line = raw.decode("utf-8", "replace").strip()
-                if line.startswith("data:"):
-                    event = json.loads(line[5:]) if line[5:].strip().startswith("{") else {}
-                    if event.get("type") in TERMINAL_EVENTS:
-                        if terminal is not None:
-                            detail = "终态事件后出现另一终态"
+            has_response_dict = False
+            seen_response_id: str | None = None
+            data_lines: list[str] = []
+            event_data_bytes = 0
+            event_name: str | None = None
+            try:
+                for raw in _iter_bounded_sse_lines(response, deadline):
+                    if deadline.work_left() <= 0:
+                        detail = "总时限内无终态事件"
+                        break
+                    try:
+                        line = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        detail = "SSE 包含非法 UTF-8 字节"
+                        break
+                    if line == "":
+                        ev_name = event_name
+                        event_name = None
+                        if data_lines:
+                            joined = "\n".join(data_lines).strip(" \t\r\n")
+                            data_lines = []
+                            event_data_bytes = 0
+                            if joined == "[DONE]":
+                                if ev_name is not None or terminal is None:
+                                    detail = "SSE 存在提前或带事件名的 [DONE]"
+                                    break
+                                continue
+                            if not joined:
+                                if ev_name is not None:
+                                    detail = "SSE 存在空数据事件"
+                                    break
+                                continue
+                            if terminal is not None:
+                                detail = "终态事件后出现多余数据事件"
+                                break
+                            if not joined.startswith("{"):
+                                detail = "SSE 存在非 JSON 对象数据事件"
+                                break
+                            try:
+                                event = json.loads(
+                                    joined,
+                                    object_pairs_hook=_no_duplicate_keys,
+                                    parse_constant=_reject_json_constant,
+                                )
+                                if _contains_surrogate(event):
+                                    raise ValueError("unpaired UTF-16 surrogate")
+                                _validate_sse_protocol_key_casing(event)
+                            except (ValueError, RecursionError):
+                                detail = "SSE 数据帧 JSON 解析失败"
+                                break
+                            if not isinstance(event, dict) or not isinstance(event.get("type"), str) or not event["type"].strip():
+                                detail = "SSE 数据事件缺少合法 type"
+                                break
+                            if ev_name is not None and event.get("type") != ev_name:
+                                detail = "SSE 事件名与数据 type 不一致"
+                                break
+                            raw_inner = event.get("response")
+                            if raw_inner is not None and not isinstance(raw_inner, dict):
+                                detail = "SSE 响应字段须为 JSON 对象"
+                                break
+                            inner = raw_inner if isinstance(raw_inner, dict) else {}
+                            explicit_rids, rids_ok = _extract_explicit_response_ids(event, raw_inner)
+                            if not rids_ok:
+                                detail = "SSE 响应 ID 非法"
+                                break
+                            id_mismatch = False
+                            for raw_rid in explicit_rids:
+                                if seen_response_id is None:
+                                    seen_response_id = raw_rid
+                                elif raw_rid != seen_response_id:
+                                    detail = "SSE 流内出现冲突的 response.id"
+                                    id_mismatch = True
+                                    break
+                            if id_mismatch:
+                                break
+                            if event.get("type") in TERMINAL_EVENTS:
+                                terminal = event.get("type")
+                                has_response_dict = isinstance(raw_inner, dict)
+                                # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
+                                status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
+                                    None if inner.get("status") is None else "other")
+                                detail = next(
+                                    (val for val in (inner.get("error"), event.get("error"), event.get("message"))
+                                     if val is not None),
+                                    None,
+                                )
+                                # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                            else:
+                                ev_err = next(
+                                    (val for val in (inner.get("error"), event.get("error")) if val is not None),
+                                    None,
+                                )
+                                if ev_err is not None:
+                                    detail = ev_err
+                                    break
+                                ev_type = event.get("type")
+                                if ev_type in ("response.created", "response.queued", "response.in_progress") and not isinstance(raw_inner, dict):
+                                    detail = "SSE 生命周期事件缺少合法 response 对象"
+                                    break
+                                ev_status = inner.get("status")
+                                if ev_status is not None and (
+                                    ev_status not in ("in_progress", "queued")
+                                    or (ev_type == "response.queued" and ev_status != "queued")
+                                    or (ev_type == "response.in_progress" and ev_status != "in_progress")
+                                ):
+                                    detail = "非终态事件携带非法状态"
+                                    break
+                        elif ev_name is not None:
+                            detail = "SSE 存在无数据事件头"
                             break
-                        terminal = event.get("type")
-                        inner = event.get("response") if isinstance(event.get("response"), dict) else {}
-                        # 只报已知枚举：上游任意值（可能以各种编码夹带 key）一律归一成 "other"，不进报告
-                        status = inner.get("status") if inner.get("status") in RESPONSE_STATUSES else (
-                            None if inner.get("status") is None else "other")
-                        detail = inner.get("error") or event.get("error") or event.get("message")
-                        # 终态数据不等于代理 lifecycle 已收尾；读到 EOF 才关闭连接。
+                        continue
+                    if line == "event" or line.startswith("event:"):
+                        val = "" if line == "event" else line[6:]
+                        if val.startswith(" "):
+                            val = val[1:]
+                        event_name = val
+                    elif line == "data" or line.startswith("data:"):
+                        val = "" if line == "data" else line[5:]
+                        if val.startswith(" "):
+                            val = val[1:]
+                        event_data_bytes += len(val.encode("utf-8")) + (1 if data_lines else 0)
+                        if event_data_bytes > MAX_SSE_EVENT_BYTES:
+                            detail = "SSE 单事件超过大小上限"
+                            data_lines = []
+                            event_data_bytes = 0
+                            break
+                        data_lines.append(val)
+                    elif line in ("id", "retry") or line.startswith((":", "id:", "retry:")) or _is_valid_sse_extension_field(line):
+                        continue
+                    else:
+                        detail = "SSE 存在非法非协议行"
+                        break
+            except _SSEReadLimitError as limit_err:
+                detail = str(limit_err)
+                data_lines = []
+                event_name = None
+            if data_lines:
+                trailing = "\n".join(data_lines).strip(" \t\r\n")
+                if (trailing and (trailing != "[DONE]" or terminal is None)) or event_name is not None:
+                    detail = "流尾存在未闭合 SSE 事件"
+            elif event_name is not None:
+                detail = "流尾存在未闭合 SSE 事件头"
             if deadline.work_left() <= 0:
                 detail = "总时限内流未收尾"
-            # 事件名成功还不够：响应体自报 failed/cancelled 或带 error 也算失败。
-            ok = (terminal in ("response.completed", "response.incomplete") and not detail
-                  and status not in ("failed", "cancelled"))
-            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail else ""
+            # 事件名成功还不够：须 HTTP 200、唯一合法的 text/event-stream Content-Type、存在合法 response 对象且 status 与终态事件一致，且 error/message 均须为 null/缺省。
+            ok = (response.status == 200 and is_sse_content_type and detail is None and has_response_dict and (
+                (terminal == "response.completed" and status == "completed")
+                or (terminal == "response.incomplete" and status == "incomplete")
+            ))
+            text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False) if detail is not None else ""
             return {"http_status": response.status, "terminal": terminal, "status": status, "ok": ok,
                     "error": None if ok else _error_info(text)}
     except urllib.error.HTTPError as error:
+        try:
+            err_body = _read_bounded_error_body(error, max_bytes=MAX_HTTP_ERROR_BYTES)
+        finally:
+            try:
+                error.close()
+            except Exception:
+                pass
         return {"http_status": error.code, "terminal": None, "ok": False,
-                "error": _error_info(error.read()[:65536].decode("utf-8", "replace"))}
+                "error": _error_info(err_body.decode("utf-8", "replace"))}
     except Exception as error:  # 连接、协议等任何异常都只记类型与 errno，不带异常原文
         reason = getattr(error, "reason", None)
         return {"http_status": None, "terminal": None, "ok": False,

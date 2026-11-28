@@ -89,6 +89,7 @@ class FakeProxy:
                 if hang:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", "1000")
                     self.end_headers()
                     self.wfile.flush()
                     time.sleep(4)
@@ -100,8 +101,10 @@ class FakeProxy:
                 elif code != 200:
                     payload = b'{"error":{"message":"tool_choice: type \\"tool\\" and \\"any\\" are not supported"}}'
                 else:
-                    payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{}}\n\n'
+                    payload = terminal or b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
                 self.send_response(code)
+                if code == 200:
+                    self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 if terminal_tail_delay and code == 200:
@@ -461,7 +464,7 @@ def test_non_utf8_legacy_log_is_not_route_evidence(tmp_path):
     assert preflight.route_from_log(tmp_path, session, time.time() - 5, wait=0.5) is None
 
 
-@pytest.mark.parametrize("framing", ("length", "short-length", "chunked", "short-chunked", "drip", "spent-budget", "header-drip", "error-drip"))
+@pytest.mark.parametrize("framing", ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "missing-status-sp", "close-delimited-200", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "short-length", "chunked", "chunked-trailer", "valid-chunk-ext", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space", "short-chunked", "short-trailer", "short-trailer-header", "neg-chunk", "bad-chunk-sep", "drip", "spent-budget", "header-drip", "error-drip"))
 def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
     processes = []
     popen = preflight.subprocess.Popen
@@ -481,9 +484,141 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
             pass
 
         def do_POST(self):
+            assert self.headers.get("Accept-Encoding") == "identity"
             self.rfile.read(int(self.headers["Content-Length"]))
             if framing == "spent-budget":
                 time.sleep(0.3)
+            if framing in ("obs-text-reason", "empty-reason", "missing-status-sp", "close-delimited-200", "early-hints-103", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "status-204", "status-201", "gzip-encoding", "bad-header", "bare-cr-header", "ctl-header"):
+                try:
+                    if framing == "obs-text-reason":
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK-\xe9\xff\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "empty-reason":
+                        raw_resp = (
+                            b"HTTP/1.1 200 \r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "missing-status-sp":
+                        raw_resp = (
+                            b"HTTP/1.1 200\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "close-delimited-200":
+                        # 明文 HTTP 200 无 Content-Length 且无 Transfer-Encoding 时，TCP 断流不可区分于正常 EOF，须拒绝。
+                        raw_resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + payload
+                    elif framing == "early-hints-103":
+                        raw_resp = (
+                            b"HTTP/1.1 103 Early Hints\r\n"
+                            b"Link: </hint>; rel=preload\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "early-hints-103-cl":
+                        raw_resp = (
+                            b"HTTP/1.1 103 Early Hints\r\n"
+                            b"Content-Length: 0\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "early-hints-103-te":
+                        raw_resp = (
+                            b"HTTP/1.1 103 Early Hints\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n"
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "http10-chunked":
+                        raw_resp = (
+                            b"HTTP/1.0 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n"
+                            + f"{len(payload):x}\r\n".encode()
+                            + payload
+                            + b"\r\n0\r\n\r\n"
+                        )
+                    elif framing == "http10-1xx":
+                        raw_resp = (
+                            b"HTTP/1.0 103 Early Hints\r\n\r\n"
+                            b"HTTP/1.0 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "status-101":
+                        raw_resp = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\n"
+                    elif framing == "status-204":
+                        # 204 禁止正文，即使非法附带完整 SSE 终态也必须拒绝。
+                        raw_resp = b"HTTP/1.1 204 No Content\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + payload
+                    elif framing == "status-201":
+                        raw_resp = (
+                            b"HTTP/1.1 201 Created\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "gzip-encoding":
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            b"Content-Encoding: gzip\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    elif framing == "bad-header":
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            b"MalformedHeaderWithoutColon\r\n"
+                            b"Content-Length: 999\r\n\r\n"
+                            + payload
+                        )
+                    elif framing == "bare-cr-header":
+                        # 裸 CR 可让 CPython email.parser 把后续 Content-Length 吞入正文而不设 defects；
+                        # 原始 HTTP/1.1 校验必须在读体前直接拒绝，即使正文含完整成功终态。
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            b"\rContent-Length: 999\r\n\r\n"
+                            + payload
+                        )
+                    else:
+                        raw_resp = (
+                            b"HTTP/1.1 200 OK\r\n"
+                            b"Content-Type: text/event-stream\r\n"
+                            b"Connection: close\r\n"
+                            b"X-Bad: foo\x07bar\r\n"
+                            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                            + payload
+                        )
+                    self.connection.sendall(raw_resp)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.close_connection = True
+                return
             if framing in ("header-drip", "error-drip"):
                 try:
                     self.connection.sendall(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 30\r\n")
@@ -496,16 +631,41 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                 self.close_connection = True
                 return
             self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close")
             if framing in ("length", "short-length"):
                 self.send_header("Content-Length", str(len(payload) + (100 if framing == "short-length" else 0)))
+            elif framing == "same-dup-cl":
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Content-Length", str(len(payload)))
+            elif framing == "bad-cl":
+                self.send_header("Content-Length", "not-a-number")
+            elif framing == "conflict-cl":
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Content-Length", str(len(payload) + 50))
+            elif framing == "cl-and-te":
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Transfer-Encoding", "chunked")
             else:
                 self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             self.close_connection = True
             try:
-                if framing in ("length", "short-length"):
+                if framing in ("length", "short-length", "same-dup-cl", "bad-cl", "conflict-cl"):
                     self.wfile.write(payload)
+                elif framing == "neg-chunk":
+                    # CPython 3.11 HTTPResponse._read_next_chunk_size 接受 -1，须在读块体前直接拒绝。
+                    self.wfile.write(b"-1\r\n" + payload + b"\r\n0\r\n\r\n")
+                elif framing == "bad-chunk-sep":
+                    self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"XX0\r\n\r\n")
+                elif framing == "bad-chunk-ext":
+                    self.wfile.write(f"{len(payload):x};bad ext=1\r\n".encode() + payload + b"\r\n0\r\n\r\n")
+                elif framing == "bad-chunk-ext-trailing-ws-name":
+                    self.wfile.write(f"{len(payload):x};flag \r\n".encode() + payload + b"\r\n0\r\n\r\n")
+                elif framing == "bad-chunk-ext-trailing-ws-val":
+                    self.wfile.write(f"{len(payload):x};k=v\t\r\n".encode() + payload + b"\r\n0\r\n\r\n")
+                elif framing == "valid-chunk-ext":
+                    self.wfile.write(f'{len(payload):x};ext="v\\\\1";flag\r\n'.encode() + payload + b"\r\n0\r\n\r\n")
                 else:
                     self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
                     self.wfile.flush()
@@ -515,7 +675,17 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
                             time.sleep(0.05)
                             self.wfile.write(b"1\r\n \r\n")
                             self.wfile.flush()
-                    if framing != "short-chunked":
+                    if framing == "short-trailer":
+                        self.wfile.write(b"0\r\n")
+                    elif framing == "short-trailer-header":
+                        self.wfile.write(b"0\r\nX-Trailer: 1\r\n")
+                    elif framing == "bad-trailer":
+                        self.wfile.write(b"0\r\nNotAHeaderLine\r\n\r\n")
+                    elif framing == "bad-trailer-space":
+                        self.wfile.write(b"0\r\nX-Foo : 1\r\n\r\n")
+                    elif framing == "chunked-trailer":
+                        self.wfile.write(b"0\r\nX-Trailer: 1\r\n\r\n")
+                    elif framing != "short-chunked":
                         self.wfile.write(b"0\r\n\r\n")
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -528,9 +698,15 @@ def test_roundtrip_validates_real_http_framing(framing, monkeypatch):
         result = preflight.round_trip(url, KEY, OPUS, "preflight-test", preflight.Deadline(1 if framing in ("drip", "spent-budget", "header-drip", "error-drip") else 3))
         elapsed = time.monotonic() - started
         assert processes and all(process.poll() is not None for process in processes)
-        assert result["ok"] is (framing in ("length", "chunked")), result
+        assert result["ok"] is (framing in ("length", "same-dup-cl", "obs-text-reason", "empty-reason", "early-hints-103", "chunked", "chunked-trailer", "valid-chunk-ext")), result
+        if framing == "missing-status-sp":
+            assert result["error"]["exception"] == "BadStatusLine"
         if framing.startswith("short-"):
             assert result["error"]["exception"] == "IncompleteRead"
+        if framing in ("status-204", "status-201"):
+            assert result["http_status"] == int(framing.split("-")[1])
+        if framing in ("close-delimited-200", "early-hints-103-cl", "early-hints-103-te", "http10-chunked", "http10-1xx", "status-101", "gzip-encoding", "neg-chunk", "bad-chunk-sep", "bad-header", "bare-cr-header", "ctl-header", "bad-cl", "conflict-cl", "cl-and-te", "bad-chunk-ext", "bad-chunk-ext-trailing-ws-name", "bad-chunk-ext-trailing-ws-val", "bad-trailer", "bad-trailer-space"):
+            assert result["error"]["exception"] == "HTTPException"
         if framing in ("drip", "spent-budget", "header-drip", "error-drip"):
             assert elapsed < 0.7, elapsed
     finally:
@@ -544,6 +720,7 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 
     class Response:
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
         exhausted = False
 
         def __enter__(self):
@@ -565,8 +742,9 @@ def test_roundtrip_requires_stream_cleanup_after_terminal(monkeypatch, tail):
 
     response = Response()
     deadline = preflight.Deadline(3)
-    monkeypatch.setattr(preflight.urllib.request, "urlopen", lambda *a, **kw: response)
-    response.read = lambda: b"".join(response)
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: response)
+    chunks = iter(response)
+    response.read = lambda n=-1: next(chunks, b"")
     result = preflight._round_trip_http(LOCAL, KEY, OPUS, "preflight-test", deadline)
     assert result["ok"] is (tail == "eof")
     if tail == "eof":
@@ -609,8 +787,7 @@ def test_proxy_down_blocks_without_waiting_out_the_log_window(env, capsys):
 
 
 def test_no_probe_is_sent_once_the_work_deadline_has_passed(monkeypatch):
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("不应发送"))
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **k: pytest.fail("不应发送"))
     deadline = preflight.Deadline(0.002)
     time.sleep(0.01)
     assert preflight.round_trip(LOCAL, KEY, KIMI, "s", deadline)["error"] == {"not_sent": "总时限已到"}
@@ -790,13 +967,13 @@ def test_broken_codex_config_never_crashes_the_report(env, capsys, tmp_path, con
 def test_structured_sse_error_never_reaches_the_report(monkeypatch):
     """SSE 错误体（含二次转义的 key）不抄进报告，只留分类与摘要。"""
     import io
-    import urllib.request
 
     key = 'secret"key"12345'
     line = "data: " + json.dumps({"type": "error", "error": {"message": json.dumps({"e": f"invalid Bearer {key}"})}}) + "\n\n"
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -804,7 +981,7 @@ def test_structured_sse_error_never_reaches_the_report(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResp(line.encode()))
+    monkeypatch.setattr(preflight, "_open_http", lambda req, timeout=None: FakeResp(line.encode()))
     trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(30))
     out = json.dumps(preflight.sanitize(trip, [key]), ensure_ascii=True)
     assert "secret" not in out and "12345" not in out and trip["error"]["class"] == "auth"
@@ -913,13 +1090,13 @@ def test_usage_error_and_help_print_json(capsys):
 def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkeypatch, capsys):
     """上游把 key 放进 response.status 字典的键里：status 只收字符串，报告的键也脱敏。"""
     import io
-    import urllib.request
 
     key = "isolated-fake-host-key"
     event = {"type": "response.completed", "response": {"status": {key: "diagnostic"}}}
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -927,7 +1104,7 @@ def test_upstream_status_object_keyed_by_the_key_never_reaches_the_report(monkey
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
     trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     preflight._emit(trip, [key])
@@ -968,13 +1145,13 @@ def test_container_created_by_the_daemon_after_a_failed_client_and_rm_is_reporte
 def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeypatch, status):
     """独审十六：status 只报已知枚举；双重 JSON 编码、倒序等任意形态的 key 都不进报告。"""
     import io
-    import urllib.request
 
     key = 'isolated"host"key1742'
     event = {"type": "response.completed", "response": {"status": status(key)}}
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -982,7 +1159,7 @@ def test_unknown_upstream_status_is_normalised_and_never_carries_the_key(monkeyp
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(urllib.request, "urlopen",
+    monkeypatch.setattr(preflight, "_open_http",
                         lambda req, timeout=None: FakeResp(("data: " + json.dumps(event) + "\n\n").encode()))
     trip = preflight._round_trip_http(LOCAL, key, KIMI, "s", preflight.Deadline(5))
     assert trip["status"] == "other" and "1742" not in json.dumps(preflight.sanitize(trip, [key]))
@@ -1059,12 +1236,12 @@ def test_auth_command_sees_the_checked_codex_home(env, capsys, tmp_path, monkeyp
 def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypatch):
     """独审二十一 B-2：往返只受总工作时限约束；比旧的固定 45 秒更慢但在时限内完成的往返不误报。"""
     import io
-    import urllib.request
 
     seen = {}
 
     class FakeResp(io.BytesIO):
         status = 200
+        headers = [("Content-Type", "text/event-stream")]
 
         def __enter__(self):
             return self
@@ -1076,7 +1253,7 @@ def test_slow_but_successful_round_trip_within_the_work_deadline_passes(monkeypa
         seen["timeout"] = timeout
         return FakeResp(b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(preflight, "_open_http", urlopen)
     trip = preflight._round_trip_http(LOCAL, KEY, KIMI, "s", preflight.Deadline(60))
     assert trip["ok"] and seen["timeout"] > 50
 
@@ -1436,10 +1613,13 @@ def _receipt(tmp_path, routes=None, **changes):
                "started_ns": now - 1_000_000, "finished_ns": now, "complete": True,
                "routes": routes if routes is not None else ["claude@api.anthropic.com", "claude@api.anthropic.com"]}
     payload.update(changes)
+    os.chmod(tmp_path, 0o700)
     directory = tmp_path / RECEIPT_SESSION
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
     path = directory / "receipt.json"
     path.write_text(json.dumps(payload))
+    os.chmod(path, 0o600)
     return path
 
 
@@ -1479,6 +1659,7 @@ def test_receipt_partial_rotation_and_delayed_publish(tmp_path):
     data = path.read_bytes()
     path.unlink()
     pending.write_bytes(data)
+    os.chmod(pending, 0o600)
     timer = threading.Timer(0.03, lambda: pending.rename(path))
     timer.start()
     try:
@@ -1653,3 +1834,1132 @@ def test_run_checks_reaps_http_workers_and_closes_connections(monkeypatch, phase
         server.shutdown()
         server.server_close()
         serving.join()
+
+
+def test_round_trip_rejects_unicode_nbsp_before_terminal_json():
+    """Astra P2 #5 (R46): RFC 8259 允许的 JSON 空白仅限 ASCII 空格/Tab/CR/LF，不换行空格须拒绝。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = (
+        "event: response.completed\n"
+        'data: \u00a0{"type":"response.completed","response":{"status":"completed"}}\n\n'
+    ).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000099",
+            preflight.Deadline(5),
+        )
+        assert res["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_rejects_invalid_utf8_in_sse():
+    """Astra P2 #4 (R48): 非法 UTF-8 字节须直接拒绝，不得静默替换为 U+FFFD。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_\xff","status":"completed"}}\n\n'
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000098",
+            preflight.Deadline(5),
+        )
+        assert res["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_accepts_single_leading_utf8_bom_and_rejects_second_bom():
+    """Astra P2 #4 (R49): WHATWG SSE 允许流开头至多一个 UTF-8 BOM；重复 BOM 须拒绝。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    one_bom = (
+        b"\xef\xbb\xbf"
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_bom_1","status":"completed"}}\n\n'
+    )
+    two_boms = b"\xef\xbb\xbf" + one_bom
+    current = {"body": one_bom}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res_ok = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000097",
+            preflight.Deadline(5),
+        )
+        assert res_ok["ok"] is True
+
+        current["body"] = two_boms
+        res_bad = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000096",
+            preflight.Deadline(5),
+        )
+        assert res_bad["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_rejects_empty_status_on_non_terminal_event():
+    """Astra P2 #2 (R49): response.in_progress 携带显式空 status 须在预检与正式生产者两端一致拒绝。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = (
+        b"event: response.in_progress\n"
+        b'data: {"type":"response.in_progress","response":{"id":"resp_empty_st","status":""}}\n\n'
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_empty_st","status":"completed"}}\n\n'
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000095",
+            preflight.Deadline(5),
+        )
+        assert res["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_rejects_unpaired_utf16_surrogate_and_accepts_valid_pair():
+    """Astra P1 #1 (R51): 未配对 UTF-16 代理项须被拒绝，合法代理对与真正 U+FFFD 保持接受。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    bad_payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_\\uD800","status":"completed"}}\n\n'
+    )
+    ok_payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_\\uD83D\\uDE00_\\uFFFD","status":"completed"}}\n\n'
+    )
+    current = {"body": bad_payload}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res_bad = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000094",
+            preflight.Deadline(5),
+        )
+        assert res_bad["ok"] is False
+
+        current["body"] = ok_payload
+        res_ok = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000093",
+            preflight.Deadline(5),
+        )
+        assert res_ok["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_rejects_case_alias_protocol_keys_matching_go_producer():
+    """Astra P2 #2 (R52): Python 须与 Go 正式生产者一致拒绝协议字段的大小写重复键与非规范大小写别名。"""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    # 与 Go 单测 TestReviewReceiptStrictRejectsCaseAliasDuplicateStatusKey 使用同一终态帧。
+    case_dup_payload = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_case_dup","status":"completed","Status":"failed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}\n\n'
+    )
+    non_canonical_alias = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_case_alias","Status":"completed","model":"gpt-6.2-sol"}}\n\n'
+    )
+    current = {"body": case_dup_payload}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 本地测试回环
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        res_dup = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000092",
+            preflight.Deadline(5),
+        )
+        assert res_dup["ok"] is False
+
+        current["body"] = non_canonical_alias
+        res_alias = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000091",
+            preflight.Deadline(5),
+        )
+        assert res_alias["ok"] is False
+
+        # 非协议自由格式嵌套对象（如 response.metadata 中的 Run / run）须与 Go 一致放行，
+        # 而顶层非 null message 字段在 response.completed 上须与 Go 一致拒绝。
+        current["body"] = (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_meta_case","status":"completed","model":"gpt-6.2-sol","metadata":{"Run":1,"run":2},"output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}\n\n'
+        )
+        res_meta = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000090",
+            preflight.Deadline(5),
+        )
+        assert res_meta["ok"] is True
+
+        current["body"] = (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","message":"unexpected notice","response":{"id":"resp_top_msg","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}\n\n'
+        )
+        res_msg = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000089",
+            preflight.Deadline(5),
+        )
+        assert res_msg["ok"] is False
+
+        # Astra P2 #3 (R56): WHATWG SSE 合法无冒号空字段（id / retry / data）须与 Go 一致接受，
+        # 同时未知裸行（如 foo）仍须拒绝。
+        current["body"] = (
+            b"id\n"
+            b"retry\n"
+            b"data\n\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_bare_field","status":"completed","model":"gpt-6.2-sol"}}\n\n'
+        )
+        res_bare = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000088",
+            preflight.Deadline(5),
+        )
+        assert res_bare["ok"] is True
+
+        current["body"] = (
+            b"unknown_bare_line\n"
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_bad_bare","status":"completed","model":"gpt-6.2-sol"}}\n\n'
+        )
+        res_unknown = preflight._round_trip_http(
+            f"http://127.0.0.1:{server.server_port}",  # DevSkim: ignore DS162092 本地测试回环
+            KEY,
+            "gpt-6.2-sol",
+            "preflight-00000000-0000-4000-8000-000000000087",
+            preflight.Deadline(5),
+        )
+        assert res_unknown["ok"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_round_trip_http_enforces_bounded_sse_response_and_event_limits(monkeypatch):
+    """Astra P2 #3 (R57): _round_trip_http 须增量有界读取 SSE，拒绝超总字节/单事件上限响应，同时保留分块 BOM/CRLF 边界与 EOF 读完。"""
+    import io
+
+    # 1. 超总响应字节上限：须在触顶后立刻停止读取，不得无界耗尽内存。
+    class _HugeStreamResp:
+        status = 200
+
+        def __init__(self):
+            self.headers = [("Content-Type", "text/event-stream")]
+            self.bytes_read = 0
+            self.reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            self.reads += 1
+            size = 8192 if n is None or n < 0 else min(n, 8192)
+            self.bytes_read += size
+            return b": " + b"x" * max(0, size - 3) + b"\n"
+
+    huge = _HugeStreamResp()
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: huge)
+    res_huge = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000086", preflight.Deadline(5))
+    assert res_huge["ok"] is False
+    assert huge.bytes_read <= preflight.MAX_SSE_RESPONSE_BYTES + preflight.SSE_READ_CHUNK_BYTES
+
+    # 2. 单多行 SSE 事件超过 MAX_SSE_EVENT_BYTES：即使总字节未超上限，也须拒绝。
+    chunk_line = b"data: " + b"a" * 1024 + b"\n"
+    oversized_event = chunk_line * ((preflight.MAX_SSE_EVENT_BYTES // 1024) + 2) + b"\n"
+
+    class _BytesStreamResp:
+        status = 200
+        headers = [("Content-Type", "text/event-stream")]
+
+        def __init__(self, data: bytes, max_chunk: int = 8192):
+            self._buf = io.BytesIO(data)
+            self._max_chunk = max_chunk
+            self.eof_reached = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            take = self._max_chunk if n is None or n < 0 else min(n, self._max_chunk)
+            out = self._buf.read(take)
+            if not out:
+                self.eof_reached = True
+            return out
+
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _BytesStreamResp(oversized_event))
+    res_event = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000085", preflight.Deadline(5))
+    assert res_event["ok"] is False
+
+    # 3. 跨块拆分 UTF-8 BOM 与 CRLF：未超限响应须完整读到 EOF 并成功通过。
+    valid_payload = (
+        b"\xef\xbb\xbf"
+        b"event: response.completed\r\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_chunked","status":"completed"}}\r\n\r\n'
+    )
+    chunked = _BytesStreamResp(valid_payload, max_chunk=2)
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: chunked)
+    res_ok = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000084", preflight.Deadline(5))
+    assert res_ok["ok"] is True
+    assert chunked.eof_reached is True
+
+
+def test_round_trip_rejects_response_done_and_bounds_http_error_read(monkeypatch):
+    """Astra P2 #2 & #3 (R58): response.done 须视作冲突/非完成终态拒绝；HTTPError 读取须带 65536 字节上限。"""
+    import io
+
+    class _StreamResp:
+        status = 200
+        headers = [("Content-Type", "text/event-stream")]
+
+        def __init__(self, data: bytes):
+            self._buf = io.BytesIO(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            return self._buf.read(n)
+
+    # 1. response.done 后再跟 response.completed 须判为冲突终态失败，不能被忽略。
+    conflict_done = (
+        b"event: response.done\n"
+        b'data: {"type":"response.done","response":{"id":"resp_done_first"}}\n\n'
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"resp_done_second","status":"completed"}}\n\n'
+    )
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _StreamResp(conflict_done))
+    res_conflict = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000083", preflight.Deadline(5))
+    assert res_conflict["ok"] is False
+
+    # 2. 单独 response.done 也须失败。
+    only_done = (
+        b"event: response.done\n"
+        b'data: {"type":"response.done","response":{"id":"resp_done_only","status":"completed"}}\n\n'
+    )
+    monkeypatch.setattr(preflight, "_open_http", lambda *a, **kw: _StreamResp(only_done))
+    res_only = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000082", preflight.Deadline(5))
+    assert res_only["ok"] is False
+
+    # 3. HTTPError 必须使用带长度上限的 error.read(65536)，不得无界 error.read()。
+    seen_args = []
+
+    class _BoundedErrBody:
+        def read(self, n=-1):
+            seen_args.append(n)
+            return b'{"error":{"message":"rate limit"}}'[: (n if n is not None and n >= 0 else None)]
+
+        def close(self):
+            pass
+
+    def _raise_http_err(*a, **kw):
+        raise preflight.urllib.error.HTTPError("https://proxy.invalid/v1/responses", 429, "Too Many Requests", {}, _BoundedErrBody())
+
+    monkeypatch.setattr(preflight, "_open_http", _raise_http_err)
+    res_err = preflight._round_trip_http("https://proxy.invalid", KEY, "gpt-6.2-sol", "preflight-00000000-0000-4000-8000-000000000081", preflight.Deadline(5))
+    assert res_err["ok"] is False
+    assert res_err["http_status"] == 429
+    assert seen_args == [65536]
+
+
+def test_roundtrip_rejects_redirects_without_forwarding_auth_and_bounds_chunked_error():
+    """Astra P1 #1 & #2 (R62): 禁用 301/302/303 重定向与凭据转发，chunked 错误体同样拦截负块长与超大载荷。"""
+    target_hits = []
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            target_hits.append((self.command, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self):
+            target_hits.append((self.command, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    target_srv = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)  # DevSkim: ignore DS162092 本地重定向目标回归
+    threading.Thread(target=target_srv.serve_forever, daemon=True).start()
+    target_url = f"http://127.0.0.1:{target_srv.server_port}/stolen"  # DevSkim: ignore DS162092 本地重定向目标回归
+
+    mode = {"kind": "302"}
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.close_connection = True
+            if mode["kind"] in ("301", "302", "303"):
+                self.send_response(int(mode["kind"]))
+                self.send_header("Location", target_url)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    # 畸形负块长 + 大载荷：不得跟随重定向，也不得无界读体。
+                    self.wfile.write(b"-1\r\n" + b"X" * 131072 + b"\r\n0\r\n\r\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            self.send_response(500)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                if mode["kind"] == "err-neg-chunk":
+                    self.wfile.write(b"-1\r\n" + b"E" * 131072 + b"\r\n0\r\n\r\n")
+                else:
+                    big_chunk = b"rate_limit " + b"E" * 131072
+                    self.wfile.write(f"{len(big_chunk):x}\r\n".encode() + big_chunk + b"\r\n0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    proxy_srv = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)  # DevSkim: ignore DS162092 本地错误体与重定向回归
+    threading.Thread(target=proxy_srv.serve_forever, daemon=True).start()
+    try:
+        proxy_url = f"http://127.0.0.1:{proxy_srv.server_port}"  # DevSkim: ignore DS162092 本地错误体与重定向回归
+        for code_str in ("301", "302", "303"):
+            mode["kind"] = code_str
+            res = preflight._round_trip_http(proxy_url, KEY, OPUS, f"preflight-redir-{code_str}", preflight.Deadline(3))
+            assert res["ok"] is False and res["http_status"] == int(code_str), res
+        assert target_hits == [], f"不应跟随重定向或转发 Authorization: {target_hits}"
+
+        mode["kind"] = "err-neg-chunk"
+        res_neg = preflight._round_trip_http(proxy_url, KEY, OPUS, "preflight-err-neg", preflight.Deadline(3))
+        assert res_neg["ok"] is False and res_neg["http_status"] == 500, res_neg
+        assert res_neg["error"]["length"] == 0, res_neg
+
+        mode["kind"] = "err-huge-chunk"
+        res_big = preflight._round_trip_http(proxy_url, KEY, OPUS, "preflight-err-big", preflight.Deadline(3))
+        assert res_big["ok"] is False and res_big["http_status"] == 500, res_big
+        assert res_big["error"]["length"] <= preflight.MAX_HTTP_ERROR_BYTES, res_big
+    finally:
+        proxy_srv.shutdown()
+        proxy_srv.server_close()
+        target_srv.shutdown()
+        target_srv.server_close()
+
+
+def test_open_http_rejects_explicit_zero_or_invalid_port_before_connecting(monkeypatch):
+    """Sol P1 #1 + Astra P2 #3 (R68): 显式 `:0` 或越界端口绝不得静默回退到 80/443，须在发起任何 TCP 连接前拒绝。"""
+    connect_calls = []
+
+    def fail_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        raise AssertionError(f"must not connect for invalid port: {args}")
+
+    monkeypatch.setattr(preflight.socket, "create_connection", fail_connect)
+    for bad_url in (
+        "http://127.0.0.1:0",  # DevSkim: ignore DS162092 显式零端口拒绝回归
+        "https://127.0.0.1:0",  # DevSkim: ignore DS162092 显式零端口拒绝回归
+        "http://[::1]:0",  # DevSkim: ignore DS137138,DS162092 显式零端口拒绝回归
+        "http://127.0.0.1:65536",  # DevSkim: ignore DS162092 越界端口拒绝回归
+    ):
+        res = preflight._round_trip_http(bad_url, KEY, OPUS, "preflight-bad-port", preflight.Deadline(3))
+        assert res["ok"] is False, (bad_url, res)
+        assert res["error"]["exception"] == "URLError", (bad_url, res)
+    assert connect_calls == []
+
+
+def test_open_http_disables_tls_suppress_ragged_eofs(tmp_path, monkeypatch):
+    """Sol P1 #1 + Astra P1 #1 (R67/R68): HTTPS 必须显式清除 OpenSSL OP_IGNORE_UNEXPECTED_EOF 且传入
+    suppress_ragged_eofs=False；真实 TLS 回环上无 close_notify 的断流须报 SSLEOFError，正常 close_notify 通过。"""
+    import shutil
+    import socket
+    import ssl
+
+    openssl = shutil.which("openssl")
+    assert openssl, "openssl CLI required for real TLS close_notify regression test"
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    subprocess.run(
+        [
+            openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+            "-keyout", str(key_path), "-out", str(cert_path), "-days", "1", "-nodes",
+            "-subj", "/CN=127.0.0.1",  # DevSkim: ignore DS162092 本地自签 TLS 测试证书
+            "-addext", "subjectAltName=IP:127.0.0.1",  # DevSkim: ignore DS162092 本地自签 TLS 测试证书
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    payload = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    raw_http = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n" + payload
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+
+    mode = {"ragged": True}
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))  # DevSkim: ignore DS162092 本地 TLS 断流回归
+    listener.listen(4)
+    port = listener.getsockname()[1]
+    stop_evt = threading.Event()
+
+    def serve():
+        listener.settimeout(0.2)
+        while not stop_evt.is_set():
+            try:
+                raw_conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            tls_conn = None
+            try:
+                raw_conn.settimeout(3.0)
+                tls_conn = server_ctx.wrap_socket(raw_conn, server_side=True)
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    chunk = tls_conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                cl = 0
+                for line in head.split(b"\r\n")[1:]:
+                    if line.lower().startswith(b"content-length:"):
+                        cl = int(line.split(b":", 1)[1].strip())
+                while len(rest) < cl:
+                    chunk = tls_conn.recv(cl - len(rest))
+                    if not chunk:
+                        break
+                    rest += chunk
+                tls_conn.sendall(raw_http)
+                if mode["ragged"]:
+                    # 直接断开底层 TCP，不发送 TLS close_notify。
+                    tls_conn.close()
+                else:
+                    # 正常发送 TLS close_notify 后再关闭。
+                    try:
+                        tls_conn.unwrap()
+                    except Exception:
+                        pass
+                    tls_conn.close()
+            except Exception:
+                try:
+                    (tls_conn or raw_conn).close()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    created_ctxs = []
+    real_create_default_context = ssl.create_default_context
+
+    def fake_default_context():
+        ctx = real_create_default_context(cafile=str(cert_path))
+        # 显式打开 OP_IGNORE_UNEXPECTED_EOF（模拟 OpenSSL 3.0 默认行为），
+        # 验证 _open_http 会真正清除该标志而不是依赖宿主默认值。
+        op_ignore = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+        if op_ignore:
+            ctx.options |= op_ignore
+        created_ctxs.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(preflight.ssl, "create_default_context", fake_default_context)
+    url = f"https://127.0.0.1:{port}"  # DevSkim: ignore DS162092 本地 TLS 断流回归
+    try:
+        mode["ragged"] = True
+        res_ragged = preflight._round_trip_http(url, KEY, OPUS, "preflight-tls-ragged", preflight.Deadline(5))
+        assert res_ragged["ok"] is False, res_ragged
+        assert res_ragged["error"]["exception"] == "SSLEOFError", res_ragged
+        op_ignore = getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+        assert created_ctxs and (not op_ignore or (created_ctxs[-1].options & op_ignore) == 0)
+
+        mode["ragged"] = False
+        res_clean = preflight._round_trip_http(url, KEY, OPUS, "preflight-tls-clean", preflight.Deadline(5))
+        assert res_clean["ok"] is True, res_clean
+    finally:
+        stop_evt.set()
+        listener.close()
+        thread.join(timeout=3)
+
+
+def test_chunked_framing_overhead_budget_caps_200_and_error_responses(monkeypatch):
+    """Astra P2 #4 (R71) & Sol P2 #2 / Astra P2 #5 (R72): chunked 读取器必须对 chunk-size/chunk-ext/trailer
+    累计分帧开销设上限，且 _iter_bounded_sse_lines 动态读取 MAX_SSE_RESPONSE_BYTES；使用本可成功的完整 SSE 正文
+    分别验证正常 chunked 通过、超分帧预算时在读到终态前报分帧超限，以及 500 错误体同样有界截断。"""
+    import hashlib
+
+    monkeypatch.setattr(preflight, "MAX_SSE_RESPONSE_BYTES", 2048)
+    valid_sse = b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    ext = b"a=1;" * 128  # ~512B per chunk header -> >4096B within ~10 bytes of valid_sse
+    normal_chunked = b"".join(b"1\r\n" + bytes([b]) + b"\r\n" for b in valid_sse) + b"0\r\n\r\n"
+    bloated_chunked = b"".join(b"1;" + ext[:-1] + b"\r\n" + bytes([b]) + b"\r\n" for b in valid_sse) + b"0\r\n\r\n"
+    err_flood = (b"1;" + ext[:-1] + b"\r\n \r\n") * 200 + b"0\r\n\r\n"
+    mode = {"status": 200, "body": normal_chunked}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.close_connection = True
+            self.send_response(mode["status"])
+            if mode["status"] == 200:
+                self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(mode["body"])
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 chunked 分帧预算回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 chunked 分帧预算回归
+        # 1. 基线对照组：相同 1 字节分块有效 SSE 正文使用正常块头必须通过。
+        mode.update(status=200, body=normal_chunked)
+        res_ok = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-ok-200", preflight.Deadline(3))
+        assert res_ok["ok"] is True, res_ok
+
+        # 2. 相同有效 SSE 正文加上超限 chunk-ext 分帧开销：必须在到达终态前触发分帧上限错误。
+        mode.update(status=200, body=bloated_chunked)
+        res200 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-200", preflight.Deadline(3))
+        want_sha = hashlib.sha256("chunked 分帧开销超过字节上限".encode()).hexdigest()[:12]
+        assert res200["ok"] is False and res200["terminal"] is None, res200
+        assert res200["error"]["sha256_12"] == want_sha, res200
+
+        # 3. 500 错误体同样受分帧预算（64 KiB）约束。
+        mode.update(status=500, body=err_flood)
+        res500 = preflight._round_trip_http(url, KEY, OPUS, "preflight-chunk-flood-500", preflight.Deadline(3))
+        assert res500["ok"] is False and res500["http_status"] == 500, res500
+        assert res500["error"]["length"] < 200, res500
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_rejects_lifecycle_events_missing_or_null_response():
+    """Astra P2 #2 (R73): response.created / response.queued / response.in_progress 缺失 response
+    或 response 为 null 时必须拒绝，即使后续出现合法 response.completed 也不得放行。"""
+    cases = [
+        ("response.created", '{"type":"response.created"}'),
+        ("response.created", '{"type":"response.created","response":null}'),
+        ("response.queued", '{"type":"response.queued"}'),
+        ("response.queued", '{"type":"response.queued","response":null}'),
+        ("response.in_progress", '{"type":"response.in_progress"}'),
+        ("response.in_progress", '{"type":"response.in_progress","response":null}'),
+    ]
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 生命周期事件缺少 response 回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 生命周期事件缺少 response 回归
+        completed = 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        for ev_name, payload in cases:
+            current["body"] = f"event: {ev_name}\ndata: {payload}\n\n{completed}".encode()
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-missing-resp-obj", preflight.Deadline(3))
+            assert res["ok"] is False, (ev_name, payload, res)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_ignores_sse_extension_fields_but_rejects_malformed_lines():
+    """Astra P2 #3 (R74): WHATWG SSE 扩展元数据字段（如 x-proxy-meta / x-keepalive）须被忽略放行，
+    而裸 JSON 行或标准字段大小写变体（Data: / Event:）仍须严格拒绝。"""
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 SSE 扩展字段回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 SSE 扩展字段回归
+        completed = 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        current["body"] = (
+            "x-proxy-meta: trace=123\n"
+            "x-keepalive:\n"
+            + completed
+            + "x-post-meta: done\n\n"
+        ).encode()
+        res_ok = preflight._round_trip_http(url, KEY, OPUS, "preflight-sse-ext-ok", preflight.Deadline(3))
+        assert res_ok["ok"] is True, res_ok
+
+        for bad_line in (
+            'unknown_bare_line',
+            '{"type":"error","error":{"message":"bare-json"}}',
+            'Data: {"type":"error"}',
+            'Event: response.failed',
+            'HTTP/1.1 500 Bad Gateway',
+        ):
+            current["body"] = (completed + bad_line + "\n\n").encode()
+            res_bad = preflight._round_trip_http(url, KEY, OPUS, "preflight-sse-ext-bad", preflight.Deadline(3))
+            assert res_bad["ok"] is False, (bad_line, res_bad)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_enforces_consistent_response_id_when_present():
+    """Astra P2 #3 (R75): 流内显式出现的 response.id / response_id 须前后一致，跨事件冲突须拒绝；
+    未提供 ID 的既有载荷仍保持兼容。"""
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 response.id 一致性回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 response.id 一致性回归
+        # 1. 同流不同 response.id / item.response_id / output[*].response_id 须拒绝。
+        for bad_stream in (
+            (
+                'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_b","status":"completed"}}\n\n'
+            ),
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"msg_1","response_id":"resp_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            (
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":"resp_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+            ),
+            # 显式 null 响应 ID 不得视作缺省放行。
+            'event: response.completed\ndata: {"type":"response.completed","response_id":null,"response":{"status":"completed"}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":null,"status":"completed"}}\n\n',
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"msg_1","response_id":null,"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":null,"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n',
+            # Astra P1 (R77): 显式声明的 output/item 类型错误（null、非数组、非对象元素）不得跳过放行。
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":null}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":[null]}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed","output":"bad"}}\n\n',
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":null}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            # Astra P2 (R79): output_item.added / output_item.done 完全缺失 item 对象也须拒绝。
+            (
+                'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+            (
+                'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":0}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_a","status":"completed"}}\n\n'
+            ),
+        ):
+            current["body"] = bad_stream.encode()
+            res_bad = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-bad", preflight.Deadline(3))
+            assert res_bad["ok"] is False, (bad_stream, res_bad)
+
+        # 2. 同流一致 response_id / response.id / item.response_id / output[*].response_id 须通过。
+        current["body"] = (
+            'event: response.created\ndata: {"type":"response.created","response_id":"resp_a","response":{"id":"resp_a","status":"in_progress"}}\n\n'
+            'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"msg_1","response_id":"resp_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}\n\n'
+            'event: response.completed\ndata: {"type":"response.completed","response_id":"resp_a","response":{"id":"resp_a","status":"completed","output":[{"id":"msg_1","response_id":"resp_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+        ).encode()
+        res_same = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-same", preflight.Deadline(3))
+        assert res_same["ok"] is True, res_same
+
+        # 3. 真正省略 response.id 的既有载荷保持兼容。
+        current["body"] = (
+            'event: response.created\ndata: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+        ).encode()
+        res_omitted = preflight._round_trip_http(url, KEY, OPUS, "preflight-rid-omitted", preflight.Deadline(3))
+        assert res_omitted["ok"] is True, res_omitted
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_requires_event_stream_content_type():
+    """Sol P2 #2 + Astra P2 #4 (R93): HTTP 200 响应在解析 SSE 前与最终放行前都必须核验唯一且合法的
+    Content-Type: text/event-stream（允许 RFC 9110 参数），缺少、重复或非 SSE 媒体类型一律拒绝。"""
+    payload = b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    current = {"headers": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            for k, v in current["headers"]:
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 SSE Content-Type 回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 SSE Content-Type 回归
+        # 1. 合法的 text/event-stream（含大小写与 RFC 9110 参数，包括允许忽略的空参数段）须通过。
+        for good_headers in (
+            [("Content-Type", "text/event-stream")],
+            [("Content-Type", "TEXT/EVENT-STREAM; charset=utf-8")],
+            [("Content-Type", 'text/event-stream ; charset="utf-8" ; version=1')],
+            [("Content-Type", "text/event-stream;")],
+            [("Content-Type", "text/event-stream; ; charset=utf-8;")],
+        ):
+            current["headers"] = good_headers
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-ct-ok", preflight.Deadline(3))
+            assert res["ok"] is True, (good_headers, res)
+
+        # 2. 缺失、非 SSE 媒体类型、重复头、非法参数均须拒绝且不消费为终态成功。
+        for bad_headers in (
+            [],
+            [("Content-Type", "")],
+            [("Content-Type", "text/plain")],
+            [("Content-Type", "application/json")],
+            [("Content-Type", "text/event-stream-extra")],
+            [("Content-Type", "text/event-stream"), ("Content-Type", "text/plain")],
+            [("Content-Type", "text/event-stream"), ("Content-Type", "text/event-stream")],
+            [("Content-Type", "text/event-stream; badparam")],
+            [("Content-Type", 'text/event-stream; charset="unterminated')],
+        ):
+            current["headers"] = bad_headers
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-ct-bad", preflight.Deadline(3))
+            assert res["ok"] is False and res["terminal"] is None, (bad_headers, res)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_item_schema_key_case_aliases_match_go_producer():
+    """Astra P2 #4 (R97): Python 的 _SSE_ITEM_SCHEMA_KEYS 必须包含 Go 生产端的 container_id/result/error，
+    对 Container_ID / Result / Error 等大小写变体在流式 item 与终态 output 中与 Go 保持一致拒绝。"""
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 schema parity 回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 schema parity 回归
+        for bad_item in (
+            '{"id":"ci_1","type":"code_interpreter_call","status":"completed","Container_ID":"cntr_1","code":"print(1)"}',
+            '{"id":"img_1","type":"image_generation_call","status":"completed","Result":"base64data"}',
+            '{"id":"mcp_1","type":"mcp_call","status":"completed","name":"read","server_label":"s","arguments":"{}","Error":null}',
+        ):
+            # 1. response.completed output 中的大小写变体必须拒绝。
+            current["body"] = (
+                f'event: response.completed\ndata: {{"type":"response.completed","response":{{"id":"resp_p1","status":"completed","output":[{bad_item},{{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"ok"}}]}}]}}}}\n\n'
+            ).encode()
+            res_comp = preflight._round_trip_http(url, KEY, OPUS, "preflight-alias-comp", preflight.Deadline(3))
+            assert res_comp["ok"] is False, (bad_item, res_comp)
+
+            # 2. response.output_item.done item 中的大小写变体同样必须拒绝。
+            current["body"] = (
+                f'event: response.output_item.done\ndata: {{"type":"response.output_item.done","output_index":0,"item":{bad_item}}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_p2","status":"completed","output":[]}}\n\n'
+            ).encode()
+            res_done = preflight._round_trip_http(url, KEY, OPUS, "preflight-alias-done", preflight.Deadline(3))
+            assert res_done["ok"] is False, (bad_item, res_done)
+
+        # 3. 规范小写字段（container_id / result / error）须正常通过。
+        current["body"] = (
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_p3","status":"completed","output":['
+            '{"id":"ci_1","type":"code_interpreter_call","status":"completed","container_id":"cntr_1","code":"print(1)"},'
+            '{"id":"img_1","type":"image_generation_call","status":"completed","result":"base64data"},'
+            '{"id":"mcp_1","type":"mcp_call","status":"completed","name":"read","server_label":"s","arguments":"{}","error":null},'
+            '{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+        ).encode()
+        res_ok = preflight._round_trip_http(url, KEY, OPUS, "preflight-alias-ok", preflight.Deadline(3))
+        assert res_ok["ok"] is True, res_ok
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_round_trip_rejects_forbidden_chunked_framing_trailers():
+    """Sol P2 #1 + Astra P2 #2 (R98): chunked trailer 中禁止出现 Content-Length 或 Transfer-Encoding
+    （不区分 ASCII 大小写），即便此前已收到合法 SSE 终态事件也必须失败关闭。"""
+    import socket
+
+    sse_payload = b'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    chunk = f"{len(sse_payload):x}\r\n".encode("ascii") + sse_payload + b"\r\n0\r\n"
+
+    for trailer_line, want_ok in (
+        (b"X-Trace: ok\r\n\r\n", True),
+        (b"Content-Length: 5\r\n\r\n", False),
+        (b"cOnTeNt-LeNgTh: 5\r\n\r\n", False),
+        (b"Transfer-Encoding: chunked\r\n\r\n", False),
+        (b"tRaNsFeR-eNcOdInG: chunked\r\n\r\n", False),
+    ):
+        raw_response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/event-stream\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"Connection: close\r\n\r\n"
+            + chunk
+            + trailer_line
+        )
+        srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv_sock.bind(("127.0.0.1", 0))
+        srv_sock.listen(1)
+        port = srv_sock.getsockname()[1]
+
+        def _serve(sock=srv_sock, payload=raw_response):
+            try:
+                conn, _ = sock.accept()
+                with conn:
+                    conn.settimeout(2.0)
+                    buf = b""
+                    while b"\r\n\r\n" not in buf:
+                        part = conn.recv(4096)
+                        if not part:
+                            break
+                        buf += part
+                    conn.sendall(payload)
+            finally:
+                sock.close()
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+        try:
+            url = f"http://127.0.0.1:{port}"  # DevSkim: ignore DS162092 chunked trailer 回归
+            res = preflight._round_trip_http(url, KEY, OPUS, "preflight-trailer-check", preflight.Deadline(3))
+            assert res["ok"] is want_ok, (trailer_line, res)
+        finally:
+            t.join(timeout=3)
