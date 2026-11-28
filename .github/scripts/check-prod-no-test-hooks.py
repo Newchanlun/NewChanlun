@@ -287,16 +287,216 @@ def load_gen():
     return _GEN
 
 
+_LEX_FAST = re.compile(
+    r"""(?P<ws>\s+)
+      | (?P<line_cmt>//[^\n]*)
+      | (?P<blk_cmt>/\*)
+      | (?P<attr>\#!?\[)
+      | (?P<raw>(?:b|c)?r(\#*)\")
+      | (?P<str>(?:b|c)?\")
+      | (?P<char>')
+      | (?P<ident>[A-Za-z_][A-Za-z0-9_]*)
+      | (?P<punct>.)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+_STR_BODY_FAST = re.compile(r'[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+_IDENT_FAST = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_WS_RUN = re.compile(r"\s+")
+_PATH_ATTR_RE = re.compile(r'#\[path = "')
+_ENV_READ_TOK = [("ident", "env"), ("punct", ":"), ("punct", ":")]
+_HAS_MOD_RE = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*;|\bmod\s*/\*")
+_HAS_ENV_RE = re.compile(r"\benv\b")
+_HAS_VAR_RE = re.compile(r"\bvar(?:_os)?\b")
+
+
+def _lex_fast(text: str, unescape_fn) -> list[tuple[str, object]]:
+    """与 gen-prod-banned-literals.lex 逐 token 等价的 O(N) 词法扫描（消除 text[index:] 切片）。"""
+    tokens: list[tuple[str, object]] = []
+    index, size = 0, len(text)
+    tok_match = _LEX_FAST.match
+    str_match = _STR_BODY_FAST.match
+    ident_match = _IDENT_FAST.match
+    while index < size:
+        m = tok_match(text, index)
+        kind = m.lastgroup
+        if kind == "ws" or kind == "line_cmt":
+            index = m.end()
+        elif kind == "blk_cmt":
+            depth, index = 1, m.end()
+            while depth and index < size:
+                o = text.find("/*", index)
+                c = text.find("*/", index)
+                if c < 0:
+                    index = size
+                    break
+                if 0 <= o < c:
+                    depth += 1
+                    index = o + 2
+                else:
+                    depth -= 1
+                    index = c + 2
+        elif kind == "attr":
+            start = index
+            index = m.end()
+            depth = 1
+            while depth:
+                ch = text[index]
+                if ch == '"':
+                    sm = str_match(text, index + 1)
+                    index = sm.end()
+                    continue
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                index += 1
+            tokens.append(("attr", _WS_RUN.sub(" ", text[start:index])))
+        elif kind == "raw":
+            if index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_"):
+                hashes = m.group(6)
+                start = m.end()
+                end = text.index('"' + hashes, start)
+                byte = text[index] == "b"
+                tokens.append(("str", None if byte else text[start:end]))
+                index = end + 1 + len(hashes)
+            else:
+                im = ident_match(text, index)
+                name = im.group(0)
+                tokens.append(("ident", name))
+                index = im.end()
+        elif kind == "str":
+            ch = text[index]
+            start = m.end()
+            sm = str_match(text, start)
+            end = sm.end()
+            tokens.append(("str", None if ch == "b" else unescape_fn(text[start : end - 1])))
+            index = end
+        elif kind == "char":
+            if index + 1 < size and text[index + 1] == "\\":
+                index = text.index("'", index + 3) + 1
+            elif index + 2 < size and text[index + 2] == "'":
+                index += 3
+            else:
+                index += 1
+        elif kind == "ident":
+            tokens.append(("ident", m.group(0)))
+            index = m.end()
+        else:
+            tokens.append(("punct", m.group(0)))
+            index = m.end()
+    return tokens
+
+
+def _collect_env_reads_fast(root: Path, gen) -> list[tuple[str, list, Path]]:
+    """沿 crate 模块图求全部 env::var / env::var_os 读取及其 cfg 链，与 gen.collect 等价。"""
+    reads: list[tuple[str, list, Path]] = []
+    queue = [(root / crate, [], True) for crate in gen.CRATE_ROOTS]
+    seen: set[Path] = set()
+    parse_attr = gen.parse_attr
+    child_path = gen.child_path
+    unescape_fn = gen.unescape
+    q_idx = 0
+    while q_idx < len(queue):
+        path, chain, is_dir_owner = queue[q_idx]
+        q_idx += 1
+        path = path.resolve()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        text = path.read_text(encoding="utf-8")
+        has_var = bool(_HAS_ENV_RE.search(text) and _HAS_VAR_RE.search(text))
+        has_mod = bool(_HAS_MOD_RE.search(text))
+        if not has_var and not has_mod:
+            continue
+        tokens = _lex_fast(text, unescape_fn)
+        consts: dict[str, object] = {}
+        if has_var:
+            for position, (kind, value) in enumerate(tokens):
+                if kind == "str" and position > 0 and tokens[position - 1] == ("punct", "="):
+                    head = tokens[max(0, position - 9) : position]
+                    names = [i for i, token in enumerate(head) if token == ("ident", "const")]
+                    if names and names[-1] + 1 < len(head) and head[names[-1] + 1][0] == "ident":
+                        consts[head[names[-1] + 1][1]] = value
+        file_chain = list(chain)
+        frames: list[tuple[list, int]] = []
+        scope = list(file_chain)
+        pending: list[tuple[object, int]] = []
+        explicit_path = None
+        depth = 0
+        signature = False
+        ntok = len(tokens)
+        for position, (kind, value) in enumerate(tokens):
+            if kind == "attr":
+                if value.startswith("#![cfg("):
+                    tree = parse_attr(value)
+                    file_chain.append(tree)
+                    scope = file_chain + [t for gates, _ in frames for t in gates]
+                elif value.startswith("#[cfg("):
+                    pending.append((parse_attr(value), depth))
+                elif _PATH_ATTR_RE.match(value):
+                    explicit_path = value.split('"')[1]
+            elif has_var and (kind == "str" or kind == "ident"):
+                if position >= 5:
+                    call = tokens[position - 5 : position]
+                    if (call[:3] == _ENV_READ_TOK and call[4] == ("punct", "(")
+                            and call[3] in (("ident", "var"), ("ident", "var_os"))):
+                        name = value if kind == "str" else consts.get(value, "<非字面量参数 " + value + ">")
+                        reads.append((name, scope + [tree for tree, _ in pending], path))
+                if kind == "ident" and value == "fn":
+                    signature = True
+            elif kind == "ident" and value == "fn":
+                signature = True
+            elif kind == "punct":
+                if value in "{;":
+                    signature = False
+                if value in "([":
+                    depth += 1
+                elif value in ")]":
+                    depth -= 1
+                    if pending:
+                        pending = [(tree, at) for tree, at in pending if at <= depth]
+                elif value == "," and not signature:
+                    if pending:
+                        pending = [(tree, at) for tree, at in pending if at < depth]
+                elif value == "{":
+                    gates = [tree for tree, _ in pending]
+                    frames.append((gates, depth))
+                    if gates:
+                        scope = scope + gates
+                    pending, explicit_path = [], None
+                elif value == "}":
+                    if frames:
+                        gates, depth = frames.pop()
+                        if gates:
+                            scope = file_chain + [t for g, _ in frames for t in g]
+                    else:
+                        gates, depth = [], 0
+                    following = tokens[position + 1] if position + 1 < ntok else None
+                    pending = [(tree, depth) for tree in gates] if following == ("ident", "else") else []
+                elif value == ";":
+                    if has_mod and position >= 2:
+                        previous = tokens[position - 2 : position]
+                        if previous[0] == ("ident", "mod") and previous[1][0] == "ident":
+                            target = child_path(path, previous[1][1], explicit_path, is_dir_owner)
+                            if target is not None:
+                                gates = scope + [tree for tree, _ in pending]
+                                queue.append((target, gates, target.name == "mod.rs"))
+                    pending, explicit_path = [], None
+    return reads
+
+
 def env_violations(root: Path) -> list[str]:
     """沿 crate 模块图（含 `#[cfg] mod x;` 与 fn/块作用域）求每处环境变量读取的 cfg 链。"""
     gen = load_gen()
-    reads: list = []
-    gen.collect(root, reads)
+    reads = _collect_env_reads_fast(root, gen)
+    scoped_targets = tuple((root / base).resolve() for base in gen._checker.ROOTS)
     violations = []
     for name, chain, path in reads:
-        if not gen.in_scope(root, path.resolve()) or name in PRODUCTION_ENV:
+        resolved = path.resolve()
+        if not any(resolved == target or target in resolved.parents for target in scoped_targets) or name in PRODUCTION_ENV:
             continue
-        rel = path.resolve().relative_to(root).as_posix()
+        rel = resolved.relative_to(root).as_posix()
         if gen.reachable(chain, INCREMENTAL_BUILD, False):
             violations.append(f"{rel}: 环境变量 {name} 在 s_incremental 生产构建可达（未列入 PRODUCTION_ENV）")
         elif (gen.reachable(chain, DEFAULT_BUILD, False) and name not in DEFAULT_BUILD_ONLY_ENV
