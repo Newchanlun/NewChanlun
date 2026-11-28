@@ -1133,6 +1133,13 @@ jobs:
       # #1875：具名锁 4 路并行（run-1488-delta-ci.py 每条仍是独立进程、--exact，逐条核对哈希与日志、结果按计划顺序）。
       #   托管 runner 也取 4，与同类 4 核托管机上 extras 的 RUST_TEST_THREADS=4 同口径；串行时 A/B/C 锁曾是托管路径的关键路径（run 42373511176：22.1 min）。
       CI_1488_TEST_JOBS: "4"
+      # #1875：开本仓 dev opt-level=1 + debug=0（debug-assertions 与 overflow-checks 显式保持开启，
+      #   第三方依赖由下方 [profile.dev.package."*"] opt-level=2 覆盖并缓存，0 重编），使 b2_native_warm_cold
+      #   等 103 条锁从 O0 的 ~200s 降至 ~25s。
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -1169,6 +1176,38 @@ jobs:
           echo "features=$FEATURES target=$HOME/1488-native-target"
       - name: Fetch locked dependencies (network allowed, #1488 Native)
         run: cargo fetch --locked
+      - name: Optimize third-party dependencies in test builds (#1875)
+        run: |
+          cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          mkdir -p "$(dirname "$cfg")"
+          flock "$cfg.lock" bash -c 'grep -qF "[profile.dev.package.\"*\"]" "$1" 2>/dev/null || printf "[profile.dev.package.\"*\"]\nopt-level = 2\n" >> "$1"' _ "$cfg"
+          cat "$cfg" 2>/dev/null || echo "(no $cfg yet)"
+      - name: Compute third-party dependency cache key (#1488 Native)
+        id: deps-cache-key
+        if: runner.environment != 'self-hosted'
+        run: |
+          cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          fp=$(
+            {
+              rustc -vV
+              python3 -V 2>&1
+              printf 'dev_debug=%s\n' "${CARGO_PROFILE_DEV_DEBUG:-default}"
+              cat "$cfg" 2>/dev/null || true
+            } | sha256sum | cut -c1-16
+          )
+          echo "fp=$fp" >> "$GITHUB_OUTPUT"
+      - name: Cache compiled third-party Cargo dependencies (#1488 Native)
+        if: runner.environment != 'self-hosted'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/1488-native-target/debug/deps/lib*
+            ~/1488-native-target/debug/build
+            ~/1488-native-target/debug/.fingerprint
+            !~/1488-native-target/debug/deps/libnewchan_rust*
+            !~/1488-native-target/debug/.fingerprint/newchan_rust-*
+            !~/1488-native-target/debug/.fingerprint/newchan_rust-*/**
+          key: ${{ runner.os }}-${{ runner.arch }}-1488-native-deps-v1-${{ steps.deps-cache-key.outputs.fp }}-${{ hashFiles('rust/Cargo.lock') }}
       - name: Run Native candidate fields, union and shared path locks (#1488)
         run: |
           set -euo pipefail
@@ -1229,6 +1268,8 @@ jobs:
               }
             done
           }
+          # #1875：并行预编 --lib 与 --bin s_structure_session，避免后续 --lib 串行重跑 ~54s。
+          run_logged prebuild ../.github/scripts/cargo-eacces-retry.sh cargo test --offline --locked -j 6 --features "$FEATURES" --no-run --lib --bin s_structure_session
           run_suite native-fields native_candidate_fields --bin s_structure_session
           require_passed native-fields \
             v3::object_index::tests::native_candidate_fields_component_exact_metadata_slot_and_late_null_gates \
