@@ -7,6 +7,7 @@ from conftest import git
 from test_agent import receipt_for, worker_tool
 from test_boat import adapter
 
+from pilot1742 import run as pilot_run
 from pilot1742.domain import (
     DEEPAGENTS_OUTPUT_PROTOCOL,
     LEGACY_CAVEAT,
@@ -16,6 +17,12 @@ from pilot1742.domain import (
     parse_sha,
 )
 from pilot1742.run import Halted, parse_result
+
+
+@pytest.fixture(autouse=True)
+def _fast_poll(monkeypatch):
+    real_sleep = pilot_run.time.sleep
+    monkeypatch.setattr(pilot_run.time, "sleep", lambda s: real_sleep(min(s, 0.01)))
 
 
 @pytest.mark.parametrize("confidence", ["high", "medium", "low"])
