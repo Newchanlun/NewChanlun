@@ -1189,6 +1189,14 @@ impl<'s> ReadSnapshot<'s> {
     ) -> Result<crate::content_publication::PublicationProjection<'s, 's>, String> {
         self.forward(|tx| crate::content_publication::PublicationProjection::new(tx, store))
     }
+    pub(super) fn publication_projection_snapshot(
+        &self,
+        store: &crate::v3::audit_store::HashReader<'_>,
+    ) -> Result<crate::content_publication::PublicationProjection<'s, 's>, String> {
+        self.forward(|tx| {
+            crate::content_publication::PublicationProjection::new_for_snapshot(tx, store)
+        })
+    }
     pub(super) fn resolve_indexed_templates_pending_view(
         &self,
         store: &mut (impl crate::v3::audit_store::CodecStore + ?Sized),

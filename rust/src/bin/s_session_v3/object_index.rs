@@ -615,6 +615,10 @@ impl CandidateFixedFields {
         bj::render_json(s, r)
     }
     fn text(&self, s: &mut (impl CodecStore + ?Sized), name: &str) -> Result<TextValue, String> {
+        let r = self.get(name)?;
+        if r.kind() == Kind::String {
+            return bj::read_text(s, r);
+        }
         let value = self.scalar(s, name)?;
         let view = value.view();
         let text = view
@@ -623,6 +627,10 @@ impl CandidateFixedFields {
         s.native_text(text)
     }
     fn integer(&self, s: &mut (impl CodecStore + ?Sized), name: &str) -> Result<i64, String> {
+        let r = self.get(name)?;
+        if r.kind() == Kind::Number {
+            return bj::read_i64(s, r, name);
+        }
         self.scalar(s, name)?
             .view()
             .as_i64()
@@ -858,6 +866,7 @@ fn effective_life(e: &Entry, g: i64) -> Result<LifeView<'_>, String> {
 pub(super) struct HistoryObjects<'capture> {
     entries: sc::CodecVec<Entry>,
     native: Option<NativeProjection<'capture>>,
+    loaded_withdrawn_wires: Option<Vec<Option<RefValue>>>,
     /// 库内 meta `rule_revision` 的布局（[`Layout::of_library`]）；投影与审计次序同源。
     layout: Layout,
 }
@@ -988,7 +997,52 @@ impl HistoryObjects<'_> {
         {
             return Err(err("出生根复用不属于普通只读完整索引上下文"));
         }
-        at_cut_projected_bound(s, self.layout, &self.entries, g, budget, None, true)
+        if budget.is_none() {
+            let n = self.entries.len();
+            let cache = self
+                .loaded_withdrawn_wires
+                .get_or_insert_with(|| (0..n).map(|_| None).collect());
+            at_cut_projected_bound_with_cache(
+                s,
+                self.layout,
+                &self.entries,
+                g,
+                None,
+                None,
+                true,
+                Some(cache.as_mut_slice()),
+            )
+        } else {
+            at_cut_projected_bound(s, self.layout, &self.entries, g, budget, None, true)
+        }
+    }
+
+    pub(super) fn has_native(&self) -> bool {
+        self.native.is_some()
+    }
+
+    pub(super) fn at_cut_loaded_births(
+        &mut self,
+        s: &mut super::history::HashReader<'_>,
+        g: i64,
+    ) -> Result<(Built, Built, Built), String> {
+        if !s.ordinary_bound_births_qualified() || self.native.is_some() {
+            return Err(err("出生根复用不属于普通只读完整索引上下文"));
+        }
+        let n = self.entries.len();
+        let cache = self
+            .loaded_withdrawn_wires
+            .get_or_insert_with(|| (0..n).map(|_| None).collect());
+        at_cut_projected_bound_with_cache(
+            s,
+            self.layout,
+            &self.entries,
+            g,
+            None,
+            None,
+            true,
+            Some(cache.as_mut_slice()),
+        )
     }
 
     pub(super) fn at_cut(
@@ -1258,6 +1312,27 @@ fn array(s: &mut (impl CodecStore + ?Sized), refs: &[RefValue]) -> Result<Built,
     s.write_template_view(sc::ValueView::Array(&views))
         .map_err(err)
 }
+fn array_digest_only(
+    s: &mut (impl CodecStore + ?Sized),
+    refs: &[RefValue],
+) -> Result<Built, String> {
+    if s.allocation_budget().is_none() && s.codec_work().is_none() {
+        let mut digests = Vec::with_capacity(refs.len());
+        for r in refs {
+            digests.push(r.digest().map_err(err)?);
+        }
+        let root = sc::seq_root(&digests);
+        let mut body = [0u8; 40];
+        body[..8].copy_from_slice(&(digests.len() as u64).to_be_bytes());
+        body[8..].copy_from_slice(&root);
+        return Ok(Built {
+            digest: sc::frame(sc::tag::ARRAY, &body),
+            kind: Kind::Array,
+            extent: Some(digests.len() as u64),
+        });
+    }
+    array(s, refs)
+}
 /// 完整历史索引按目标代投影。Delta 出生序保留行插入序；活动/撤回按库布局的公开主序
 /// （[`public_ordering`]）。
 pub(super) fn at_cut(
@@ -1293,8 +1368,20 @@ fn at_cut_projected_bound(
     index: &[Entry],
     g: i64,
     budget: Option<&dyn super::audit_budget::Budget>,
+    native: Option<&mut NativeProjection<'_>>,
+    bound_births: bool,
+) -> Result<(Built, Built, Built), String> {
+    at_cut_projected_bound_with_cache(s, layout, index, g, budget, native, bound_births, None)
+}
+fn at_cut_projected_bound_with_cache(
+    s: &mut (impl CodecStore + ?Sized),
+    layout: Layout,
+    index: &[Entry],
+    g: i64,
+    budget: Option<&dyn super::audit_budget::Budget>,
     mut native: Option<&mut NativeProjection<'_>>,
     bound_births: bool,
+    mut withdrawn_cache: Option<&mut [Option<RefValue>]>,
 ) -> Result<(Built, Built, Built), String> {
     let allocation = s.allocation_budget();
     let mut active = bj::new_work(allocation.as_ref());
@@ -1342,6 +1429,20 @@ fn at_cut_projected_bound(
                         && matches!(e.life.view().batch, BatchView::Existing(_))
                     {
                         s.native_ref_clone(&e.birth_wire).map_err(err)?
+                    } else if life.withdrawn_generation.is_some() {
+                        if let Some(cache) = withdrawn_cache.as_deref_mut() {
+                            if let Some(cached) = cache.get(ordinal).and_then(Option::as_ref) {
+                                s.native_ref_clone(cached).map_err(err)?
+                            } else {
+                                let w = wire_at(s, e, g)?;
+                                if let Some(slot) = cache.get_mut(ordinal) {
+                                    *slot = Some(s.native_ref_clone(&w).map_err(err)?);
+                                }
+                                w
+                            }
+                        } else {
+                            wire_at(s, e, g)?
+                        }
                     } else {
                         wire_at(s, e, g)?
                     }
@@ -1350,7 +1451,11 @@ fn at_cut_projected_bound(
             };
             refs.try_push(wire).map_err(err)?;
         }
-        array(s, &refs)
+        if bound_births {
+            array_digest_only(s, &refs)
+        } else {
+            array(s, &refs)
+        }
     };
     Ok((collect(active)?, collect(dead)?, collect(births)?))
 }
@@ -1562,6 +1667,7 @@ fn bind_originals(
     s: &mut (impl CodecStore + ?Sized),
     e: &Entry,
     leaf_bindings: &mut Option<ShapeLeafBindings<'_>>,
+    ordinary_leaves: Option<&mut std::collections::HashSet<[NodeDigest; 2]>>,
 ) -> Result<(), String> {
     let shape = e.slot.is_shape();
     let generated_ref = built_ref(s, &e.generated)?;
@@ -1686,7 +1792,13 @@ fn bind_originals(
         i.equal(s, "comparisons", &w, "comparisons")?;
         let generated_refs = i.get(s, "input_refs")?;
         let wire_refs = w.get(s, "input_refs")?;
-        bind_shape_refs_view(s, generated_refs.view(), wire_refs.view(), leaf_bindings)?;
+        bind_shape_refs_view(
+            s,
+            generated_refs.view(),
+            wire_refs.view(),
+            leaf_bindings,
+            ordinary_leaves,
+        )?;
     } else {
         i.bind_json_text(s, "payload_json", "payload")?;
         for key in ["fact_key", "payload", "input_refs"] {
@@ -1699,7 +1811,7 @@ fn bind_originals(
     {
         return Err(err("出生公开身份不符"));
     }
-    if r.immutable(s, shape)? != e.immutable {
+    if r.immutable_for_check(s, shape)? != e.immutable {
         return Err(err("不可变内容根不符"));
     }
     if wire_at(s, e, e.life.first_known_generation)? != e.birth_wire {
@@ -1716,7 +1828,7 @@ fn bind_shape_refs(
     generated: &ContentRef,
     wire: &ContentRef,
 ) -> Result<(), String> {
-    bind_shape_refs_view(s, generated.into(), wire.into(), &mut None)
+    bind_shape_refs_view(s, generated.into(), wire.into(), &mut None, None)
 }
 
 type ShapeLeafDeclaration = (NativeValue<String>, NativeValue<String>, Kind, Option<u64>);
@@ -1814,6 +1926,7 @@ fn bind_shape_refs_view(
     generated: sc::RefView<'_>,
     wire: sc::RefView<'_>,
     leaf_bindings: &mut Option<ShapeLeafBindings<'_>>,
+    mut ordinary_leaves: Option<&mut std::collections::HashSet<[NodeDigest; 2]>>,
 ) -> Result<(), String> {
     if generated.kind() != Kind::Array
         || generated.extent() != Some(3)
@@ -1865,6 +1978,15 @@ fn bind_shape_refs_view(
                 };
                 if let Some(bindings) = leaf_bindings {
                     bindings.bind(s, ar.view(), br.view())?;
+                } else if let Some(seen) = ordinary_leaves.as_deref_mut() {
+                    let key = [
+                        ar.view().digest().map_err(err)?,
+                        br.view().digest().map_err(err)?,
+                    ];
+                    if !seen.contains(&key) {
+                        bind_shape_leaf(s, ar.view(), br.view())?;
+                        seen.insert(key);
+                    }
                 } else {
                     bind_shape_leaf(s, ar.view(), br.view())?;
                 }
@@ -1886,6 +2008,8 @@ pub(super) fn load(
         latest,
         None,
         None,
+        false,
+        None,
     )
 }
 #[cfg_attr(
@@ -1904,6 +2028,8 @@ pub(super) fn load_for_audit(
         latest,
         capture,
         None,
+        false,
+        None,
     )
 }
 pub(super) fn load_for_history<'capture>(
@@ -1915,12 +2041,18 @@ pub(super) fn load_for_history<'capture>(
     let layout = snap.layout().map_err(err)?;
     let capture = s.native_projection_capture();
     let mut events = None;
+    let ordinary_leaves_allowed = capture.is_none() && s.ordinary_bound_births_qualified();
+    let mut preloaded_withdrawn =
+        (capture.is_none() && s.allocation_budget().is_none() && s.codec_work().is_none())
+            .then(Vec::<Option<RefValue>>::new);
     let entries = load_in_store(
         snap,
         &mut super::audit_store::StoreView::for_audit(s),
         latest,
         capture,
         capture.map(|_| &mut events),
+        ordinary_leaves_allowed,
+        preloaded_withdrawn.as_mut(),
     )?;
     let native = if let Some(capture) = capture {
         let mut wires = sc::CodecVec::default();
@@ -1942,6 +2074,7 @@ pub(super) fn load_for_history<'capture>(
     Ok(HistoryObjects {
         entries,
         native,
+        loaded_withdrawn_wires: preloaded_withdrawn,
         layout,
     })
 }
@@ -2021,6 +2154,8 @@ fn load_in_store(
     latest: i64,
     capture: Option<&sc::AuditCapture>,
     events: Option<&mut Option<NativeArc<HistoryEvents>>>,
+    ordinary_leaves_allowed: bool,
+    mut preloaded_withdrawn: Option<&mut Vec<Option<RefValue>>>,
 ) -> Result<sc::CodecVec<Entry>, String> {
     let mut leaf_bindings = capture.map(|capture| ShapeLeafBindings {
         capture,
@@ -2068,16 +2203,24 @@ fn load_in_store(
     s.verify_many_ref(refs.iter().map(RefValue::view), sc::Mode::Public)
         .map_err(err)?;
 
+    let mut ordinary_leaves = (ordinary_leaves_allowed
+        && capture.is_none()
+        && s.allocation_budget().is_none()
+        && s.codec_work().is_none())
+    .then(std::collections::HashSet::<[NodeDigest; 2]>::new);
     for e in &out {
         #[cfg(test)]
         super::state::trace_event(
             "object_index_bind_originals",
             Some(e.life.first_known_generation),
         );
-        bind_originals(s, e, &mut leaf_bindings)?;
+        bind_originals(s, e, &mut leaf_bindings, ordinary_leaves.as_mut())?;
         #[cfg(test)]
         super::state::trace_event("object_index_wire_at", Some(e.life.first_known_generation));
-        wire_at(s, e, latest)?;
+        let wire = wire_at(s, e, latest)?;
+        if let Some(cache) = preloaded_withdrawn.as_deref_mut() {
+            cache.push(e.life.withdrawn_generation.map(|_| wire));
+        }
         validate_withdrawal_target(e, &out, &by_id)?;
     }
     #[cfg(test)]
@@ -2166,7 +2309,7 @@ pub(super) fn update_from_owner(
         store
             .verify_many_ref(refs.iter().map(RefValue::view), sc::Mode::Public)
             .map_err(err)?;
-        bind_originals(&mut store, &e, &mut leaf_bindings)?;
+        bind_originals(&mut store, &e, &mut leaf_bindings, None)?;
         wire_at(&mut store, &e, latest)?;
         let ordinal = match events.by_id.get(e.id.as_str()) {
             Some(i) => {
@@ -2279,6 +2422,7 @@ pub(super) fn restore_for_owner<'a>(
     Ok(HistoryObjects {
         entries,
         native,
+        loaded_withdrawn_wires: None,
         layout,
     })
 }
@@ -3123,7 +3267,7 @@ pub(super) fn verify_generated_members_swept_with_records<'a>(
         {
             return Err(err("生成对象字段/当代元数据不符"));
         }
-        if fields.immutable(s, e.slot.is_shape())? != e.immutable {
+        if fields.immutable_for_check(s, e.slot.is_shape())? != e.immutable {
             return Err(err("生成集同身份内容与独立原件不同"));
         }
         if e.life.first_known_generation == g && object != built_ref(s, &e.generated)? {
@@ -3832,7 +3976,7 @@ mod tests {
             16384,
             4 * 1024 * 1024,
             |store| {
-                let actual = load_in_store(&tx, store, 3, None, None).unwrap();
+                let actual = load_in_store(&tx, store, 3, None, None, false, None).unwrap();
                 assert!(actual.allocation_budget().unwrap().same_ledger(&budget));
                 assert_eq!(actual.len(), expected.len());
                 for (a, b) in actual.iter().zip(expected.iter()) {
@@ -6722,10 +6866,7 @@ impl<'a> OwnerFields<'a> {
     }
     fn integer(&self, s: &mut (impl CodecRead + ?Sized), k: &str) -> Result<i64, String> {
         let r = self.get(s, k)?;
-        bj::render_json(s, r.view())?
-            .view()
-            .as_i64()
-            .ok_or_else(|| err(format!("{k}不是i64")))
+        bj::read_i64(s, r.view(), k)
     }
     fn equal(
         &self,
@@ -6771,6 +6912,58 @@ impl<'a> OwnerFields<'a> {
         s.write_value_view(sc::ValueView::Object(&fields[..names.len()]))
             .map_err(err)
     }
+    fn immutable_for_check(
+        &self,
+        s: &mut (impl CodecStore + ?Sized),
+        shape: bool,
+    ) -> Result<Built, String> {
+        if s.allocation_budget().is_none() && s.codec_work().is_none() {
+            fn key_digest(name: &str) -> NodeDigest {
+                let b = name.as_bytes();
+                let root = sc::bytes_root(b);
+                let mut body = [0u8; 40];
+                body[..8].copy_from_slice(&(b.len() as u64).to_be_bytes());
+                body[8..].copy_from_slice(&root);
+                sc::frame(sc::tag::STRING, &body)
+            }
+            fn sorted_keys(names: &'static [&'static str]) -> Vec<(&'static str, NodeDigest)> {
+                let mut v: Vec<&'static str> = names.to_vec();
+                v.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                v.into_iter().map(|n| (n, key_digest(n))).collect()
+            }
+            static SHAPE_KEYS: std::sync::OnceLock<Vec<(&'static str, NodeDigest)>> =
+                std::sync::OnceLock::new();
+            static TYPED_KEYS: std::sync::OnceLock<Vec<(&'static str, NodeDigest)>> =
+                std::sync::OnceLock::new();
+            let keys = if shape {
+                SHAPE_KEYS.get_or_init(|| sorted_keys(SHAPE_IMMUTABLE))
+            } else {
+                TYPED_KEYS.get_or_init(|| sorted_keys(TYPED_IMMUTABLE))
+            };
+            let mut field_digests = [[0u8; 32]; 12];
+            for (i, &(name, k_digest)) in keys.iter().enumerate() {
+                let child = self.get(s, name)?;
+                if child.kind() == Kind::Null {
+                    return Err(err("不可变字段不得为空"));
+                }
+                let mut fbody = [0u8; 64];
+                fbody[..32].copy_from_slice(&k_digest);
+                fbody[32..].copy_from_slice(&child.digest().map_err(err)?);
+                field_digests[i] = sc::frame(sc::tag::OBJECT_FIELD, &fbody);
+            }
+            let n = keys.len();
+            let fields_root = sc::seq_root(&field_digests[..n]);
+            let mut obj_body = [0u8; 40];
+            obj_body[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            obj_body[8..].copy_from_slice(&fields_root);
+            return Ok(Built {
+                digest: sc::frame(sc::tag::OBJECT, &obj_body),
+                kind: Kind::Object,
+                extent: Some(n as u64),
+            });
+        }
+        self.immutable(s, shape)
+    }
     fn bind_json_text(
         &self,
         s: &mut (impl CodecRead + ?Sized),
@@ -6812,10 +7005,7 @@ fn integer_ref(
     k: &str,
 ) -> Result<i64, String> {
     let v = field_ref(s, r, k)?;
-    bj::render_json(s, v.view())?
-        .view()
-        .as_i64()
-        .ok_or_else(|| err(format!("{k}不是i64")))
+    bj::read_i64(s, v.view(), k)
 }
 
 #[cfg(feature = "s_incremental")]

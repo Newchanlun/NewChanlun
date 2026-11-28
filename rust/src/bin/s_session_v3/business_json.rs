@@ -343,6 +343,7 @@ pub(crate) fn bytes_extend(bytes: &mut sc::CodecVec<u8>, value: &[u8]) -> Result
 }
 pub(crate) struct Effective<'a> {
     values: sc::CodecVec<JsonView<'a>>,
+    ordinals: sc::CodecVec<usize>,
     budget: Option<&'a OwnedBudget>,
 }
 impl<'a> Effective<'a> {
@@ -357,8 +358,15 @@ impl<'a> Effective<'a> {
     pub fn len(&self) -> usize {
         self.values.len()
     }
+    #[cfg(test)]
     pub fn iter(&self) -> impl Iterator<Item = JsonView<'a>> + '_ {
         self.values.iter().copied()
+    }
+    pub fn iter_with_ordinals(&self) -> impl Iterator<Item = (usize, JsonView<'a>)> + '_ {
+        self.ordinals
+            .iter()
+            .copied()
+            .zip(self.values.iter().copied())
     }
     #[allow(dead_code, reason = "#1608：类型配套访问器，当前无调用方；保留不删")]
     pub fn view(&self) -> JsonView<'_> {
@@ -398,28 +406,31 @@ pub(crate) fn effective<'a>(
         a.0.cmp(b.0)
             .then_with(|| effective_precedence(a.1, a.2, b.1, b.2))
     });
-    let mut ordered = new_work::<(i64, JsonView<'a>)>(all.budget());
+    let mut ordered = new_work::<(i64, usize, JsonView<'a>)>(all.budget());
     let mut last = None;
-    for (identity, _, _, v) in candidates {
+    for (identity, _, ordinal, v) in candidates {
         check_read_deadline(deadline)?;
         if last == Some(identity) {
             continue;
         }
         last = Some(identity);
         ordered
-            .try_push((coord(v)?, v))
+            .try_push((coord(v)?, ordinal, v))
             .map_err(|e| e.to_string())?;
     }
-    ordered.sort_unstable_by_key(|(c, _)| *c);
+    ordered.sort_unstable_by_key(|(c, _, _)| *c);
     if ordered.windows(2).any(|v| v[0].0 == v[1].0) {
         return Err("StorageUnavailable：有效源坐标碰撞，拒绝覆盖业务身份".into());
     }
     let mut values = new_work(all.budget());
-    for (_, v) in ordered {
+    let mut ordinals = new_work(all.budget());
+    for (_, ordinal, v) in ordered {
         values.try_push(v).map_err(|e| e.to_string())?;
+        ordinals.try_push(ordinal).map_err(|e| e.to_string())?;
     }
     Ok(Effective {
         values,
+        ordinals,
         budget: all.budget(),
     })
 }
@@ -2291,10 +2302,74 @@ pub(crate) fn render_json(
     s.render_ref(r, &mut out).map_err(|e| e.to_string())?;
     s.parse_rendered_plain(&out).map(JsonOwner::Plain)
 }
+struct StackJsonBuf {
+    buf: [u8; 256],
+    len: usize,
+}
+impl StackJsonBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0; 256],
+            len: 0,
+        }
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+impl std::io::Write for StackJsonBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self.len.saturating_add(bytes.len());
+        if next > self.buf.len() {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+        }
+        self.buf[self.len..next].copy_from_slice(bytes);
+        self.len = next;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+pub(crate) fn read_i64(
+    s: &mut (impl super::audit_store::CodecRead + ?Sized),
+    r: sc::RefView<'_>,
+    field: &str,
+) -> Result<i64, String> {
+    if s.allocation_budget().is_none() && s.codec_work().is_none() && r.kind() == sc::Kind::Number {
+        let mut out = StackJsonBuf::new();
+        if s.render_ref(r, &mut out).is_ok() {
+            if let Some(n) = std::str::from_utf8(out.as_slice())
+                .ok()
+                .and_then(|t| t.parse::<i64>().ok())
+            {
+                return Ok(n);
+            }
+        }
+    }
+    render_json(s, r)?
+        .view()
+        .as_i64()
+        .ok_or_else(|| format!("StorageUnavailable：{field}不是i64"))
+}
 pub(crate) fn read_text(
     s: &mut (impl super::audit_store::CodecRead + ?Sized),
     r: sc::RefView<'_>,
 ) -> Result<TextValue, String> {
+    if s.allocation_budget().is_none() && s.codec_work().is_none() && r.kind() == sc::Kind::String {
+        let mut out = StackJsonBuf::new();
+        if s.render_ref(r, &mut out).is_ok() {
+            let raw = out.as_slice();
+            if raw.len() >= 2 && raw[0] == b'"' && raw[raw.len() - 1] == b'"' {
+                let inner = &raw[1..raw.len() - 1];
+                if !inner.contains(&b'\\') {
+                    if let Ok(text) = std::str::from_utf8(inner) {
+                        return s.native_text(text);
+                    }
+                }
+            }
+        }
+    }
     let value = render_json(s, r)?;
     let text = value
         .view()
