@@ -82,8 +82,8 @@ DEEPAGENTS_OUTPUT_PROTOCOL = "deepagents-self-report-v1"
 # agent 的 publish_candidate 工具描述、v2 系统提示、执行器写的 draft PR 正文和票面交付评论共用这一句，避免各写各的。
 # 仓内其它文件的合入口径由 tests/test_merge_gate_wording.py 锁住。
 MERGE_GATE = ("main 的合入不设人工批准：派票 run（含执行器交付）只开 draft PR，本身不合入；验收后由主控或代理标为 ready for review，"
-              "executor serve 内的 review_sweep 才发起正式审查，并在必需检查 deepagents/review（审查 App）与 ci-ok "
-              "都在精确 head 上通过后带 sha 合入；涉及实盘下单/资金或密钥/凭证的改动仍须人确认。")
+              "executor serve 内的 review_sweep 才发起正式审查。精确 head 的 deepagents/review（审查 App）、ci-ok、DevSkim 按 "
+              "「.sandcastle/docs/graph-engineering.md」的「main 的合入」分阶段规程核验、合入；涉及实盘下单/资金或密钥/凭证的改动仍须人确认。")
 LEGACY_CAVEAT = "旧工蜂协议未单独采集 confidence 与 caveats；low 是适配器保守标记，不是模型自报。"
 Confidence = Literal["high", "medium", "low"]
 

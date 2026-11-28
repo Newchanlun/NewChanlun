@@ -1,7 +1,7 @@
 """#1984：本 PR 改过的每个文件都不得再写「合入 main 要等人」。
 
 口径以 #1742 裁定为准（https://github.com/Newchanlun/NewChanlun/issues/1742#issuecomment-6719202631）：
-合入 main 不设人工批准步骤，由分支保护的必需检查 deepagents/review 与 ci-ok 把关；
+合入 main 不设人工批准步骤；deepagents/review、ci-ok、DevSkim 按 graph-engineering.md 的分阶段规程核验；
 人确认只剩实盘下单/资金与密钥/凭证两类。代码里的单一来源是 pilot1742/domain.py 的 MERGE_GATE。
 
 FILES 是 #1984 相对 main 仍改动、仍存在的文本文件。#1915 已重写的文件（graph-engineering.md、EXECUTOR.md、
@@ -65,12 +65,17 @@ def test_detector_catches_known_human_merge_sentences(line):
 
 @pytest.mark.parametrize("line", [
     "拒绝 `sandcastle`、`agent:*`、`wayfinder:grilling`、所有人闸标签、有负责人",
-    "合入 main 不设人工批准步骤，由必需检查 `deepagents/review` 与 `ci-ok` 把关；涉及实盘下单/资金或密钥/凭证的改动仍须人确认。",
+    "合入 main 不设人工批准步骤，按分阶段规程核验 `deepagents/review`、`ci-ok`、`DevSkim`；涉及实盘下单/资金或密钥/凭证的改动仍须人确认。",
 ])
 def test_detector_ignores_unrelated_human_gates(line):
     assert not human_merge_lines(line)
 
 
-def test_merge_gate_constant_names_both_required_checks():
+def test_merge_gate_constant_points_to_phased_three_gate_rule():
     from pilot1742.domain import MERGE_GATE
-    assert "deepagents/review" in MERGE_GATE and "ci-ok" in MERGE_GATE and not human_merge_lines(MERGE_GATE)
+
+    for check in ("deepagents/review", "ci-ok", "DevSkim"):
+        assert check in MERGE_GATE
+    assert "「.sandcastle/docs/graph-engineering.md」的「main 的合入」分阶段规程" in MERGE_GATE
+    assert "涉及实盘下单/资金或密钥/凭证的改动仍须人确认" in MERGE_GATE
+    assert not human_merge_lines(MERGE_GATE)
