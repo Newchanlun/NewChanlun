@@ -3,9 +3,12 @@
 use rusqlite::{ffi, types::Type, Connection, Error, Result};
 use std::{ffi::CStr, marker::PhantomData, ptr::NonNull};
 
+#[cold]
+#[inline(never)]
 fn sql_error(code: i32) -> Error {
     Error::SqliteFailure(ffi::Error::new(code), None)
 }
+#[inline]
 fn check(code: i32) -> Result<()> {
     if code == ffi::SQLITE_OK {
         Ok(())
@@ -17,7 +20,9 @@ fn check(code: i32) -> Result<()> {
 /// 唯一拥有 statement 的只读连接借用。不会从连接枚举或猜测别人的 statement。
 pub struct CheckedStatement<'conn> {
     _connection: &'conn Connection,
+    db: *mut ffi::sqlite3,
     statement: NonNull<ffi::sqlite3_stmt>,
+    column_count: usize,
     finished: bool,
     readonly: bool,
 }
@@ -62,9 +67,13 @@ impl<'conn> CheckedStatement<'conn> {
             return Err(sql_error(code));
         }
         let statement = NonNull::new(statement).ok_or_else(|| sql_error(ffi::SQLITE_MISUSE))?;
+        let db = unsafe { connection.handle() };
+        let column_count = unsafe { ffi::sqlite3_column_count(statement.as_ptr()) as usize };
         let out = Self {
             _connection: connection,
+            db,
             statement,
+            column_count,
             finished: false,
             readonly,
         };
@@ -97,8 +106,9 @@ impl<'conn> CheckedStatement<'conn> {
         Ok(out)
     }
     /// 元数据借用也只属于本 statement；空结果仍保留完整列名。
+    #[inline]
     pub fn column_count(&self) -> usize {
-        unsafe { ffi::sqlite3_column_count(self.statement.as_ptr()) as usize }
+        self.column_count
     }
     pub fn column_name(&mut self, column: usize) -> Result<&str> {
         if column >= self.column_count() {
@@ -180,6 +190,8 @@ impl<'conn> CheckedStatement<'conn> {
         match code {
             ffi::SQLITE_ROW => Ok(Some(CheckedRow {
                 statement: self.statement,
+                db: self.db,
+                column_count: self.column_count,
                 _borrow: PhantomData,
             })),
             ffi::SQLITE_DONE => {
@@ -213,7 +225,7 @@ impl<'conn> CheckedStatement<'conn> {
                 sql_error(code)
             });
         }
-        let changed = unsafe { ffi::sqlite3_changes(self._connection.handle()) } as usize;
+        let changed = unsafe { ffi::sqlite3_changes(self.db) } as usize;
         check(unsafe { ffi::sqlite3_reset(self.statement.as_ptr()) })?;
         self.finished = true;
         Ok(changed)
@@ -241,19 +253,22 @@ impl Drop for CheckedStatement<'_> {
 /// 只由成功 SQLITE_ROW 构造；不开放 raw handle 或外来成功 token。
 pub struct CheckedRow<'stmt> {
     statement: NonNull<ffi::sqlite3_stmt>,
+    db: *mut ffi::sqlite3,
+    column_count: usize,
     _borrow: PhantomData<&'stmt mut ffi::sqlite3_stmt>,
 }
 impl CheckedRow<'_> {
+    #[inline]
     pub fn column_count(&self) -> usize {
-        unsafe { ffi::sqlite3_column_count(self.statement.as_ptr()) as usize }
+        self.column_count
     }
+    #[inline]
     fn kind(&self, column: usize) -> Result<Type> {
-        if column >= self.column_count() {
+        if column >= self.column_count {
             return Err(Error::InvalidColumnIndex(column));
         }
-        let db = unsafe { ffi::sqlite3_db_handle(self.statement.as_ptr()) };
         let kind = unsafe { ffi::sqlite3_column_type(self.statement.as_ptr(), column as i32) };
-        let code = unsafe { ffi::sqlite3_errcode(db) };
+        let code = unsafe { ffi::sqlite3_errcode(self.db) };
         if code & 255 == ffi::SQLITE_NOMEM {
             return Err(sql_error(code));
         }
@@ -266,6 +281,7 @@ impl CheckedRow<'_> {
             _ => return Err(sql_error(ffi::SQLITE_MISUSE)),
         })
     }
+    #[inline]
     fn require(&self, column: usize, expected: Type) -> Result<()> {
         let actual = self.kind(column)?;
         if actual == expected {
@@ -279,21 +295,31 @@ impl CheckedRow<'_> {
     pub fn column_type(&self, column: usize) -> Result<Type> {
         self.kind(column)
     }
+    #[inline]
+    fn text_bytes_unchecked_kind(&mut self, column: usize) -> Result<&[u8]> {
+        unsafe { checked_column_text_with_db(self.statement.as_ptr(), self.db, column as i32) }?
+            .ok_or_else(|| sql_error(ffi::SQLITE_MISUSE))
+    }
     /// 严格 TEXT 的 checked 借用字节；UTF-8 语义判据留给调用者。
     pub fn text_bytes(&mut self, column: usize) -> Result<&[u8]> {
         self.require(column, Type::Text)?;
-        unsafe { checked_column_text(self.statement.as_ptr(), column as i32) }?
-            .ok_or_else(|| sql_error(ffi::SQLITE_MISUSE))
+        self.text_bytes_unchecked_kind(column)
     }
     pub fn text(&mut self, column: usize) -> Result<&str> {
         let bytes = self.text_bytes(column)?;
         std::str::from_utf8(bytes).map_err(|cause| Error::Utf8Error(column, cause))
     }
     pub fn optional_text(&mut self, column: usize) -> Result<Option<&str>> {
-        if self.kind(column)? == Type::Null {
-            return Ok(None);
+        match self.kind(column)? {
+            Type::Null => Ok(None),
+            Type::Text => {
+                let bytes = self.text_bytes_unchecked_kind(column)?;
+                std::str::from_utf8(bytes)
+                    .map(Some)
+                    .map_err(|cause| Error::Utf8Error(column, cause))
+            }
+            actual => Err(Error::InvalidColumnType(column, String::new(), actual)),
         }
-        self.text(column).map(Some)
     }
     pub fn integer(&mut self, column: usize) -> Result<i64> {
         self.require(column, Type::Integer)?;
@@ -303,23 +329,25 @@ impl CheckedRow<'_> {
     pub fn real(&mut self, column: usize) -> Result<f64> {
         self.require(column, Type::Real)?;
         let value = unsafe { ffi::sqlite3_column_double(self.statement.as_ptr(), column as i32) };
-        let db = unsafe { ffi::sqlite3_db_handle(self.statement.as_ptr()) };
-        let code = unsafe { ffi::sqlite3_errcode(db) };
+        let code = unsafe { ffi::sqlite3_errcode(self.db) };
         if code & 255 == ffi::SQLITE_NOMEM {
             return Err(sql_error(code));
         }
         Ok(value)
     }
     pub fn optional_integer(&mut self, column: usize) -> Result<Option<i64>> {
-        if self.kind(column)? == Type::Null {
-            return Ok(None);
+        match self.kind(column)? {
+            Type::Null => Ok(None),
+            Type::Integer => Ok(Some(unsafe {
+                ffi::sqlite3_column_int64(self.statement.as_ptr(), column as i32)
+            })),
+            actual => Err(Error::InvalidColumnType(column, String::new(), actual)),
         }
-        self.integer(column).map(Some)
     }
-    pub fn blob(&mut self, column: usize) -> Result<&[u8]> {
-        self.require(column, Type::Blob)?;
+    #[inline]
+    fn blob_unchecked_kind(&mut self, column: usize) -> Result<&[u8]> {
         let raw = self.statement.as_ptr();
-        let db = unsafe { ffi::sqlite3_db_handle(raw) };
+        let db = self.db;
         let pointer = unsafe { ffi::sqlite3_column_blob(raw, column as i32) };
         let code = unsafe { ffi::sqlite3_errcode(db) };
         if code & 255 == ffi::SQLITE_NOMEM {
@@ -338,23 +366,25 @@ impl CheckedRow<'_> {
         }
         Ok(unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), len as usize) })
     }
+    pub fn blob(&mut self, column: usize) -> Result<&[u8]> {
+        self.require(column, Type::Blob)?;
+        self.blob_unchecked_kind(column)
+    }
     pub fn optional_blob(&mut self, column: usize) -> Result<Option<&[u8]>> {
-        if self.kind(column)? == Type::Null {
-            return Ok(None);
+        match self.kind(column)? {
+            Type::Null => Ok(None),
+            Type::Blob => self.blob_unchecked_kind(column).map(Some),
+            actual => Err(Error::InvalidColumnType(column, String::new(), actual)),
         }
-        self.blob(column).map(Some)
     }
 }
 
-/// 唯一 checked TEXT primitive；转换后立即检查 NOMEM，先于 bytes/NULL解释。
-/// # Safety
-/// `stmt` 是已 step 到 SQLITE_ROW 的活 statement，column 在范围内；调用者把返回
-/// 借用限制在该 row 生命周期内，借用活着时不得转换该列或 step/reset/finalize。
-pub unsafe fn checked_column_text<'a>(
+#[inline]
+unsafe fn checked_column_text_with_db<'a>(
     stmt: *mut ffi::sqlite3_stmt,
+    db: *mut ffi::sqlite3,
     column: i32,
 ) -> Result<Option<&'a [u8]>> {
-    let db = unsafe { ffi::sqlite3_db_handle(stmt) };
     let pointer = unsafe { ffi::sqlite3_column_text(stmt, column) };
     let code = unsafe { ffi::sqlite3_errcode(db) };
     if code & 255 == ffi::SQLITE_NOMEM {
@@ -374,6 +404,18 @@ pub unsafe fn checked_column_text<'a>(
     Ok(Some(unsafe {
         std::slice::from_raw_parts(pointer, len as usize)
     }))
+}
+
+/// 唯一 checked TEXT primitive；转换后立即检查 NOMEM，先于 bytes/NULL解释。
+/// # Safety
+/// `stmt` 是已 step 到 SQLITE_ROW 的活 statement，column 在范围内；调用者把返回
+/// 借用限制在该 row 生命周期内，借用活着时不得转换该列或 step/reset/finalize。
+pub unsafe fn checked_column_text<'a>(
+    stmt: *mut ffi::sqlite3_stmt,
+    column: i32,
+) -> Result<Option<&'a [u8]>> {
+    let db = unsafe { ffi::sqlite3_db_handle(stmt) };
+    unsafe { checked_column_text_with_db(stmt, db, column) }
 }
 
 #[cfg(test)]
