@@ -7175,10 +7175,10 @@ index e69de29..7d0d345 100644
 +	return &copyResult, nil
 +}
 diff --git a/sdk/cliproxy/auth/preflight_execution_test.go b/sdk/cliproxy/auth/preflight_execution_test.go
-index e69de29..ca2f6e3 100644
+index e69de29..38e8ffc 100644
 --- a/sdk/cliproxy/auth/preflight_execution_test.go
 +++ b/sdk/cliproxy/auth/preflight_execution_test.go
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,355 @@
 +//go:build !preflight_test_roots
 +
 +package auth
@@ -7509,40 +7509,90 @@ index e69de29..ca2f6e3 100644
 +	if gotURL, gotErr := wrapped.resolveProxy(req); gotErr != nil || gotURL != nil {
 +		t.Fatalf("ModeInherit proxy(nil) = (%v, %v), want (nil, nil)", gotURL, gotErr)
 +	}
++
++	// Astra P2 #3 (PR #2280 R94): proxyDialAddr MUST apply default port 80 for http:// proxies
++	// (and 1080 for socks5) while preserving IPv6 bracket formatting via net.JoinHostPort.
++	for _, tc := range []struct {
++		raw        string
++		defPort    string
++		want       string
++	}{
++		{"http://proxy.example", "80", "proxy.example:80"},
++		{"http://proxy.example:8080", "80", "proxy.example:8080"},
++		{"http://[::1]", "80", "[::1]:80"},
++		{"http://[::1]:3128", "80", "[::1]:3128"},
++		{"socks5://socks.example", "1080", "socks.example:1080"},
++		{"socks5h://[::1]", "1080", "[::1]:1080"},
++	} {
++		u, uerr := url.Parse(tc.raw)
++		if uerr != nil {
++			t.Fatal(uerr)
++		}
++		got, errAddr := proxyDialAddr(u, tc.defPort)
++		if errAddr != nil || got != tc.want {
++			t.Fatalf("proxyDialAddr(%q, %q) = (%q, %v), want (%q, nil)", tc.raw, tc.defPort, got, errAddr, tc.want)
++		}
++	}
 +}
 diff --git a/sdk/cliproxy/auth/preflight_roots_prod.go b/sdk/cliproxy/auth/preflight_roots_prod.go
 new file mode 100644
-index 0000000..26bea8d
+index 0000000..123bf01
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_prod.go
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,14 @@
 +//go:build !preflight_test_roots
 +
 +package auth
 +
-+// Production builds never trust externally injected transports on preflight or formal-review paths.
++import "crypto/x509"
++
++// Production builds never trust externally injected transports or custom root CAs on preflight/review paths.
 +func isAllowedTestTransport(any) bool {
 +	return false
 +}
++
++func controlledTransportRootCAs() *x509.CertPool {
++	return nil
++}
 diff --git a/sdk/cliproxy/auth/preflight_roots_test_hook.go b/sdk/cliproxy/auth/preflight_roots_test_hook.go
 new file mode 100644
-index 0000000..6de513e
+index 0000000..59f4fa7
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_roots_test_hook.go
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,79 @@
 +//go:build preflight_test_roots
 +
 +package auth
 +
 +import (
++	"crypto/x509"
 +	"net/http"
 +	"sync"
++	"sync/atomic"
 +)
 +
 +var (
 +	preflightTestTransportsMu sync.RWMutex
 +	preflightTestTransports   = make(map[*http.Transport]int)
++	controlledTestRootCAs     atomic.Pointer[x509.CertPool]
 +)
++
++func controlledTransportRootCAs() *x509.CertPool {
++	return controlledTestRootCAs.Load()
++}
++
++// RegisterControlledTestRootCAsForTest installs a temporary CA pool exclusively in
++// `-tags preflight_test_roots` builds so offline tests can exercise real ControlledTransportForProxy
++// HTTP/1.1 TLS round-trips against local httptest servers. Production builds omit this file.
++func RegisterControlledTestRootCAsForTest(pool *x509.CertPool) func() {
++	prev := controlledTestRootCAs.Swap(pool)
++	var once sync.Once
++	return func() {
++		once.Do(func() {
++			controlledTestRootCAs.Store(prev)
++		})
++	}
++}
 +
 +// RegisterPreflightTestTransportForTest registers an offline test *http.Transport
 +// exclusively in test builds compiled with `-tags preflight_test_roots`.
@@ -8193,10 +8243,10 @@ index 0000000..e3a233e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..ab774b3
+index 0000000..431ed5c
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,449 @@
 +package auth
 +
 +import (
@@ -8222,13 +8272,14 @@ index 0000000..ab774b3
 +)
 +
 +type resolvedProxyCtxKey struct{}
++type handshakeTLSCtxKey struct{}
 +
 +// controlledPreflightTransport seals a proxy-owned *http.Transport behind an unexported
 +// http.RoundTripper wrapper so callers outside package auth can never type-assert *http.Transport,
 +// mutate TLSClientConfig, set DialTLS/DialTLSContext, or call RegisterProtocol("https", ...).
 +// All HTTP/1.x connections use DisableKeepAlives and wrap raw reads in NewStrictHTTP1Framing*Conn
 +// so conflicting upstream Transfer-Encoding + Content-Length headers fail closed before net/http
-+// can strip Content-Length.
++// can strip Content-Length, while preserving verified TLS connection state onto resp.TLS.
 +type controlledPreflightTransport struct {
 +	tr           *http.Transport
 +	resolveProxy func(*http.Request) (*url.URL, error)
@@ -8238,16 +8289,31 @@ index 0000000..ab774b3
 +
 +func (c *controlledPreflightTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 +	c.lastUsedNS.Store(time.Now().UnixNano())
++	ctx := req.Context()
 +	if c.resolveProxy != nil {
 +		proxyURL, err := c.resolveProxy(req)
 +		if err != nil {
 +			return nil, err
 +		}
 +		if proxyURL != nil {
-+			req = req.Clone(context.WithValue(req.Context(), resolvedProxyCtxKey{}, proxyURL))
++			ctx = context.WithValue(ctx, resolvedProxyCtxKey{}, proxyURL)
 +		}
 +	}
-+	return c.tr.RoundTrip(req)
++	var handshakeTLS atomic.Pointer[tls.ConnectionState]
++	if req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") {
++		ctx = context.WithValue(ctx, handshakeTLSCtxKey{}, &handshakeTLS)
++	}
++	if ctx != req.Context() {
++		req = req.Clone(ctx)
++	}
++	resp, err := c.tr.RoundTrip(req)
++	if err == nil && resp != nil && resp.TLS == nil && req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") {
++		if cs := handshakeTLS.Load(); cs != nil {
++			copyCS := *cs
++			resp.TLS = &copyCS
++		}
++	}
++	return resp, err
 +}
 +
 +var (
@@ -8279,14 +8345,36 @@ index 0000000..ab774b3
 +	return b.r.Read(p)
 +}
 +
++func proxyDialAddr(proxyURL *url.URL, defaultPort string) (string, error) {
++	if proxyURL == nil {
++		return "", preflightreceipt.ErrUnavailable
++	}
++	host := proxyURL.Hostname()
++	if host == "" {
++		return "", preflightreceipt.ErrUnavailable
++	}
++	port := proxyURL.Port()
++	if port == "" {
++		port = defaultPort
++	}
++	if port == "" {
++		return "", preflightreceipt.ErrUnavailable
++	}
++	return net.JoinHostPort(host, port), nil
++}
++
 +func dialSOCKS5Context(ctx context.Context, proxyURL *url.URL, network, addr string, baseDialer *net.Dialer) (net.Conn, error) {
++	socksAddr, errAddr := proxyDialAddr(proxyURL, "1080")
++	if errAddr != nil {
++		return nil, errAddr
++	}
 +	var proxyAuth *proxy.Auth
 +	if proxyURL.User != nil {
 +		username := proxyURL.User.Username()
 +		password, _ := proxyURL.User.Password()
 +		proxyAuth = &proxy.Auth{User: username, Password: password}
 +	}
-+	dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, baseDialer)
++	dialer, errSOCKS5 := proxy.SOCKS5("tcp", socksAddr, proxyAuth, baseDialer)
 +	if errSOCKS5 != nil {
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
@@ -8300,10 +8388,14 @@ index 0000000..ab774b3
 +}
 +
 +func dialHTTPConnectTunnel(ctx context.Context, proxyURL *url.URL, targetAddr string, baseDialer *net.Dialer) (net.Conn, error) {
-+	if proxyURL == nil || proxyURL.Host == "" || targetAddr == "" || strings.ContainsAny(targetAddr, "\r\n \t") {
++	if proxyURL == nil || targetAddr == "" || strings.ContainsAny(targetAddr, "\r\n \t") {
 +		return nil, preflightreceipt.ErrUnavailable
 +	}
-+	conn, err := baseDialer.DialContext(ctx, "tcp", proxyURL.Host)
++	proxyAddr, errAddr := proxyDialAddr(proxyURL, "80")
++	if errAddr != nil {
++		return nil, errAddr
++	}
++	conn, err := baseDialer.DialContext(ctx, "tcp", proxyAddr)
 +	if err != nil {
 +		return nil, err
 +	}
@@ -8430,6 +8522,7 @@ index 0000000..ab774b3
 +		}
 +		tlsConn := tls.Client(rawConn, &tls.Config{
 +			ServerName: host,
++			RootCAs:    controlledTransportRootCAs(),
 +			MinVersion: tls.VersionTLS12,
 +			NextProtos: []string{"h2", "http/1.1"},
 +		})
@@ -8439,7 +8532,12 @@ index 0000000..ab774b3
 +			_ = tlsConn.Close()
 +			return nil, err
 +		}
-+		if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
++		cs := tlsConn.ConnectionState()
++		if slot, _ := ctx.Value(handshakeTLSCtxKey{}).(*atomic.Pointer[tls.ConnectionState]); slot != nil {
++			copyCS := cs
++			slot.Store(&copyCS)
++		}
++		if cs.NegotiatedProtocol == "h2" {
 +			return tlsConn, nil
 +		}
 +		return preflightreceipt.NewStrictHTTP1FramingTLSConn(tlsConn), nil
@@ -8508,8 +8606,12 @@ index 0000000..ab774b3
 +				password, _ := setting.URL.User.Password()
 +				proxyAuth = &proxy.Auth{User: username, Password: password}
 +			}
++			socksAddr, errAddr := proxyDialAddr(setting.URL, "1080")
++			if errAddr != nil {
++				return nil, errAddr
++			}
 +			forwardDialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-+			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, forwardDialer)
++			dialer, errSOCKS5 := proxy.SOCKS5("tcp", socksAddr, proxyAuth, forwardDialer)
 +			if errSOCKS5 != nil {
 +				return nil, preflightreceipt.ErrUnavailable
 +			}
@@ -8593,6 +8695,223 @@ index 0000000..ab774b3
 +// exclusively in `-tags preflight_test_roots` builds. Production builds always return false.
 +func IsTestPreflightTransport(rt any) bool {
 +	return isAllowedTestTransport(rt)
++}
+diff --git a/sdk/cliproxy/auth/preflight_transport_tls_test.go b/sdk/cliproxy/auth/preflight_transport_tls_test.go
+new file mode 100644
+index 0000000..d892db8
+--- /dev/null
++++ b/sdk/cliproxy/auth/preflight_transport_tls_test.go
+@@ -0,0 +1,211 @@
++//go:build preflight_test_roots
++
++package auth
++
++import (
++	"bufio"
++	"context"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"io"
++	"math/big"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/preflightreceipt"
++)
++
++func generateTestTLSCert(t *testing.T, dnsName string) (tls.Certificate, *x509.Certificate) {
++	t.Helper()
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:          big.NewInt(1),
++		Subject:               pkix.Name{CommonName: dnsName},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(time.Hour),
++		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
++		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
++		BasicConstraintsValid: true,
++		IsCA:                  true,
++		DNSNames:              []string{dnsName},
++		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	leaf, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, leaf
++}
++
++func TestPreflightReceiptControlledTransportHTTP1TLSSuccessAndWireFramingRejection(t *testing.T) {
++	// Sol P1 #1 + Astra P1 #1 + Astra P1 #2 (PR #2280 R94):
++	// 1. A real HTTP/1.1 HTTPS round-trip through production ControlledTransportForProxy MUST
++	//    preserve verified resp.TLS onto *http.Response (never nil), passing the strict allowlisted
++	//    hostname TLS verification in preflightreceipt (observed != "other") and publishing a valid receipt.
++	// 2. Over both direct TLS and an HTTP CONNECT proxy tunnel, raw HTTP/1.1 responses with
++	//    conflicting Transfer-Encoding+Content-Length, bare-LF headers, or truncated headers at EOF
++	//    MUST fail closed before a single header byte is delivered to net/http.
++	cert, leaf := generateTestTLSCert(t, "api.anthropic.com")
++	h1Srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "text/event-stream")
++		w.WriteHeader(http.StatusOK)
++		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
++	}))
++	// Force HTTP/1.1 (no h2 ALPN) so DialTLSContext returns NewStrictHTTP1FramingTLSConn.
++	h1Srv.TLS = &tls.Config{
++		Certificates: []tls.Certificate{cert},
++		NextProtos:   []string{"http/1.1"},
++	}
++	h1Srv.StartTLS()
++	defer h1Srv.Close()
++
++	pool := x509.NewCertPool()
++	pool.AddCert(leaf)
++	restoreCA := RegisterControlledTestRootCAsForTest(pool)
++	defer restoreCA()
++
++	// 1a. Direct production ControlledTransportForProxy("direct") over HTTP/1.1 TLS.
++	directRT, err := ControlledTransportForProxy("direct")
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(direct): %v", err)
++	}
++	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, h1Srv.URL+"/v1/messages", strings.NewReader(`{}`))
++	resp, err := directRT.RoundTrip(req)
++	if err != nil {
++		t.Fatalf("direct HTTP/1.1 TLS RoundTrip failed: %v", err)
++	}
++	body, _ := io.ReadAll(resp.Body)
++	_ = resp.Body.Close()
++	if resp.StatusCode != http.StatusOK || resp.ProtoMajor != 1 || resp.ProtoMinor != 1 {
++		t.Fatalf("unexpected direct HTTP/1.1 response: status=%d proto=%d.%d body=%q", resp.StatusCode, resp.ProtoMajor, resp.ProtoMinor, string(body))
++	}
++	if resp.TLS == nil || !resp.TLS.HandshakeComplete || len(resp.TLS.VerifiedChains) == 0 {
++		t.Fatalf("direct HTTP/1.1 TLS response missing verified resp.TLS: %+v", resp.TLS)
++	}
++
++	// 1b. HTTP CONNECT proxy tunnel forwarding api.anthropic.com:443 -> local HTTP/1.1 TLS server:
++	//     exercises allowlisted non-"other" route ("claude@api.anthropic.com") through receipt TLS check!
++	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listen connect proxy: %v", err)
++	}
++	defer proxyLn.Close()
++	go func() {
++		for {
++			clientConn, aerr := proxyLn.Accept()
++			if aerr != nil {
++				return
++			}
++			go func(cc net.Conn) {
++				defer cc.Close()
++				br := bufio.NewReader(cc)
++				creq, rerr := http.ReadRequest(br)
++				if rerr != nil || creq.Method != http.MethodConnect {
++					return
++				}
++				target := creq.Host
++				if strings.EqualFold(target, "api.anthropic.com:443") {
++					target = h1Srv.Listener.Addr().String()
++				}
++				upConn, derr := net.Dial("tcp", target)
++				if derr != nil {
++					_, _ = io.WriteString(cc, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
++					return
++				}
++				defer upConn.Close()
++				_, _ = io.WriteString(cc, "HTTP/1.1 200 Connection Established\r\n\r\n")
++				go func() {
++					_, _ = io.Copy(upConn, br)
++				}()
++				_, _ = io.Copy(cc, upConn)
++			}(clientConn)
++		}
++	}()
++	connectRT, err := ControlledTransportForProxy("http://" + proxyLn.Addr().String())
++	if err != nil {
++		t.Fatalf("ControlledTransportForProxy(http connect proxy): %v", err)
++	}
++	root := filepath.Join(t.TempDir(), "r94-h1-tls-receipt")
++	sess := "preflight-e9050505-2222-4333-8444-555555550001"
++	ctx, col, err := preflightreceipt.Begin(context.Background(), root, sess)
++	if err != nil {
++		t.Fatalf("Begin: %v", err)
++	}
++	ctx, execLease, err := col.Start(ctx, "claude", "claude-opus-5-5")
++	if err != nil {
++		t.Fatalf("Start: %v", err)
++	}
++	decorated := httptransport.Decorate(ctx, &http.Client{Transport: connectRT})
++	reqConn, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(`{}`))
++	respConn, err := decorated.Do(reqConn)
++	if err != nil {
++		t.Fatalf("decorated HTTP CONNECT -> HTTP/1.1 TLS Do failed: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, respConn.Body)
++	_ = respConn.Body.Close()
++	if respConn.StatusCode != http.StatusOK || respConn.ProtoMajor != 1 || respConn.TLS == nil || !respConn.TLS.HandshakeComplete || len(respConn.TLS.VerifiedChains) == 0 {
++		t.Fatalf("HTTP CONNECT -> HTTP/1.1 TLS response invalid: status=%d proto=%d.%d tls=%+v", respConn.StatusCode, respConn.ProtoMajor, respConn.ProtoMinor, respConn.TLS)
++	}
++	execLease.End()
++	col.Complete(true)
++	col.HandlerDone(true)
++	rawReceipt, errRead := os.ReadFile(filepath.Join(root, sess, "receipt.json"))
++	if errRead != nil || !strings.Contains(string(rawReceipt), `"complete":true`) || !strings.Contains(string(rawReceipt), `"claude@api.anthropic.com"`) {
++		t.Fatalf("expected published allowlisted claude@api.anthropic.com receipt from HTTP/1.1 TLS transport: err=%v raw=%q", errRead, string(rawReceipt))
++	}
++
++	// 2. Raw TLS HTTP/1.1 servers returning (a) TE+CL conflict, (b) bare LF headers, or (c) truncated headers MUST fail closed.
++	for _, tc := range []struct {
++		name string
++		raw  string
++	}{
++		{"tls_te_and_cl", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n"},
++		{"tls_bare_lf", "HTTP/1.1 200 OK\nContent-Length: 5\n\nhello"},
++		{"tls_truncated_headers_eof", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"},
++	} {
++		rawTLSConfig := &tls.Config{
++			Certificates: []tls.Certificate{cert},
++			NextProtos:   []string{"http/1.1"},
++		}
++		rawLn, lerr := tls.Listen("tcp", "127.0.0.1:0", rawTLSConfig)
++		if lerr != nil {
++			t.Fatalf("%s listen: %v", tc.name, lerr)
++		}
++		go func(payload string, ln net.Listener) {
++			defer ln.Close()
++			conn, aerr := ln.Accept()
++			if aerr != nil {
++				return
++			}
++			defer conn.Close()
++			buf := make([]byte, 2048)
++			_, _ = conn.Read(buf)
++			_, _ = io.WriteString(conn, payload)
++		}(tc.raw, rawLn)
++		badReq, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+rawLn.Addr().String()+"/v1/responses", nil)
++		if badResp, badErr := directRT.RoundTrip(badReq); badErr == nil {
++			if badResp != nil && badResp.Body != nil {
++				_ = badResp.Body.Close()
++			}
++			t.Fatalf("case %s: ControlledTransportForProxy unexpectedly accepted invalid TLS HTTP/1.1 response", tc.name)
++		}
++	}
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
 index ddbd342..bc1efb8 100644
@@ -8708,10 +9027,10 @@ index 0000000..89341b4
 +}
 diff --git a/sdk/preflightreceipt/http1_framing.go b/sdk/preflightreceipt/http1_framing.go
 new file mode 100644
-index 0000000..2a8c675
+index 0000000..c736127
 --- /dev/null
 +++ b/sdk/preflightreceipt/http1_framing.go
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,341 @@
 +package preflightreceipt
 +
 +import (
@@ -8758,7 +9077,7 @@ index 0000000..2a8c675
 +	if len(lines) == 0 || len(lines)-1 > maxRawHTTP1HeaderCount {
 +		return 0, false
 +	}
-+	// Parse status line: HTTP/1.0 SP 3DIGIT SP reason | HTTP/1.1 SP 3DIGIT SP reason
++	// Parse status line: HTTP/1.0 SP 3DIGIT [SP reason] | HTTP/1.1 SP 3DIGIT [SP reason]
 +	statusLine := lines[0]
 +	if bytes.IndexByte(statusLine, '\r') >= 0 || bytes.IndexByte(statusLine, '\n') >= 0 {
 +		return 0, false
@@ -8875,15 +9194,21 @@ index 0000000..2a8c675
 +	return code, true
 +}
 +
-+// strictHTTP1FramingConn wraps a single-response (DisableKeepAlives) HTTP/1.x connection and
-+// inspects raw response header bytes BEFORE net/http parses them so conflicting framing headers
-+// (such as simultaneous Transfer-Encoding: chunked and Content-Length) fail closed with ErrUnavailable.
++// strictHTTP1FramingConn wraps a single-response (DisableKeepAlives) HTTP/1.x connection.
++// It buffers and strictly validates every complete response header block (rejecting bare LF,
++// bare CR, truncated/unclosed headers at EOF, conflicting Transfer-Encoding + Content-Length,
++// conflicting Content-Length, non-chunked TE, or invalid 1xx) BEFORE delivering any byte of
++// that block to net/http. Once the final non-1xx header block is validated, body reads stream
++// straight through without extra buffering.
 +type strictHTTP1FramingConn struct {
 +	net.Conn
-+	buf       []byte
-+	infoCount int
-+	done      bool
-+	failed    error
++	rawBuf     []byte
++	scanPos    int
++	ready      []byte
++	pendingErr error
++	infoCount  int
++	done       bool
++	failed     error
 +}
 +
 +type strictHTTP1FramingTLSConn struct {
@@ -8895,7 +9220,7 @@ index 0000000..2a8c675
 +	return c.tlsConn.ConnectionState()
 +}
 +
-+// NewStrictHTTP1FramingConn wraps a non-keep-alive HTTP/1.x net.Conn with raw response header framing verification.
++// NewStrictHTTP1FramingConn wraps a non-keep-alive HTTP/1.x net.Conn with buffered raw header framing verification.
 +func NewStrictHTTP1FramingConn(conn net.Conn) net.Conn {
 +	if conn == nil {
 +		return nil
@@ -8914,50 +9239,138 @@ index 0000000..2a8c675
 +	}
 +}
 +
-+func (c *strictHTTP1FramingConn) feedHeaderBytes(data []byte) error {
-+	for i := 0; i < len(data) && !c.done; i++ {
-+		if len(c.buf) >= maxRawHTTP1HeaderBytes+4 {
-+			return ErrUnavailable
++func (c *strictHTTP1FramingConn) failClosed() error {
++	c.failed = ErrUnavailable
++	c.rawBuf = nil
++	c.ready = nil
++	_ = c.Conn.Close()
++	return ErrUnavailable
++}
++
++// processBufferedHeaders scans c.rawBuf for complete CRLF-delimited header blocks, moving ONLY
++// validated header blocks into c.ready. Any bare LF, leading empty line, oversized header section,
++// or invalid framing header fails closed immediately before any byte of that block is delivered.
++func (c *strictHTTP1FramingConn) processBufferedHeaders() error {
++	for !c.done {
++		if len(c.rawBuf) >= 2 && c.rawBuf[0] == '\r' && c.rawBuf[1] == '\n' {
++			return c.failClosed()
 +		}
-+		c.buf = append(c.buf, data[i])
-+		n := len(c.buf)
-+		if n >= 4 && c.buf[n-4] == '\r' && c.buf[n-3] == '\n' && c.buf[n-2] == '\r' && c.buf[n-1] == '\n' {
-+			block := c.buf[:n-4]
-+			code, ok := validateRawHTTP1HeaderBlock(block)
-+			if !ok {
-+				return ErrUnavailable
++		foundBlock := false
++		for c.scanPos < len(c.rawBuf) {
++			j := c.scanPos
++			if j >= maxRawHTTP1HeaderBytes+4 {
++				return c.failClosed()
 +			}
-+			c.buf = c.buf[:0]
-+			if code >= 100 && code < 200 {
-+				c.infoCount++
-+				if c.infoCount > maxRawHTTP1InfoCount {
-+					return ErrUnavailable
++			b := c.rawBuf[j]
++			if b == '\n' {
++				if j == 0 || c.rawBuf[j-1] != '\r' {
++					// Reject bare LF in HTTP/1.x header lines before net/http can accept it.
++					return c.failClosed()
 +				}
-+				continue
++				if j >= 3 && c.rawBuf[j-3] == '\r' && c.rawBuf[j-2] == '\n' {
++					block := c.rawBuf[:j-3]
++					code, ok := validateRawHTTP1HeaderBlock(block)
++					if !ok {
++						return c.failClosed()
++					}
++					c.ready = append(c.ready, c.rawBuf[:j+1]...)
++					rem := c.rawBuf[j+1:]
++					if code >= 100 && code < 200 {
++						c.infoCount++
++						if c.infoCount > maxRawHTTP1InfoCount {
++							return c.failClosed()
++						}
++						c.rawBuf = append(c.rawBuf[:0], rem...)
++						c.scanPos = 0
++						foundBlock = true
++						break
++					}
++					// Final non-1xx response header block passed strict validation:
++					// append any already-read body bytes and switch to zero-buffer passthrough.
++					if len(rem) > 0 {
++						c.ready = append(c.ready, rem...)
++					}
++					c.rawBuf = nil
++					c.scanPos = 0
++					c.done = true
++					return nil
++				}
 +			}
-+			c.buf = nil
-+			c.done = true
++			c.scanPos++
++		}
++		if !foundBlock {
++			if len(c.rawBuf) > maxRawHTTP1HeaderBytes+4 {
++				return c.failClosed()
++			}
++			return nil
 +		}
 +	}
 +	return nil
 +}
 +
 +func (c *strictHTTP1FramingConn) Read(p []byte) (int, error) {
-+	if c.done {
-+		return c.Conn.Read(p)
-+	}
 +	if c.failed != nil {
 +		return 0, c.failed
 +	}
-+	n, err := c.Conn.Read(p)
-+	if n > 0 {
-+		if ferr := c.feedHeaderBytes(p[:n]); ferr != nil {
-+			c.failed = ferr
-+			_ = c.Conn.Close()
-+			return 0, ferr
++	if len(c.ready) > 0 {
++		n := copy(p, c.ready)
++		c.ready = c.ready[n:]
++		if len(c.ready) == 0 {
++			c.ready = nil
++		}
++		return n, nil
++	}
++	if c.pendingErr != nil {
++		err := c.pendingErr
++		c.pendingErr = nil
++		return 0, err
++	}
++	if c.done {
++		return c.Conn.Read(p)
++	}
++	var tmp [4096]byte
++	for !c.done {
++		n, err := c.Conn.Read(tmp[:])
++		if n > 0 {
++			c.rawBuf = append(c.rawBuf, tmp[:n]...)
++			if ferr := c.processBufferedHeaders(); ferr != nil {
++				return 0, ferr
++			}
++			// If a complete 1xx interim header block was validated with no unread bytes queued
++			// behind it, flush it immediately so Expect: 100-continue does not deadlock while
++			// still requiring the subsequent final response header block to validate before delivery.
++			if !c.done && len(c.ready) > 0 && len(c.rawBuf) == 0 && err == nil {
++				copied := copy(p, c.ready)
++				c.ready = c.ready[copied:]
++				if len(c.ready) == 0 {
++					c.ready = nil
++				}
++				return copied, nil
++			}
++		}
++		if err != nil {
++			if !c.done {
++				// EOF or read error before the final response header block closed and validated.
++				return 0, c.failClosed()
++			}
++			c.pendingErr = err
++			break
 +		}
 +	}
-+	return n, err
++	if len(c.ready) > 0 {
++		copied := copy(p, c.ready)
++		c.ready = c.ready[copied:]
++		if len(c.ready) == 0 {
++			c.ready = nil
++		}
++		return copied, nil
++	}
++	if c.pendingErr != nil {
++		err := c.pendingErr
++		c.pendingErr = nil
++		return 0, err
++	}
++	return 0, c.failClosed()
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
 index e69de29..9645827 100644
@@ -23867,10 +24280,10 @@ index e69de29..9645827 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..e589c5e 100644
+index e69de29..696dbd5 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,18535 @@
+@@ -0,0 +1,18540 @@
 +package preflightreceipt
 +
 +import (
@@ -42318,6 +42731,11 @@ index e69de29..e589c5e 100644
 +	}{
 +		{"te_and_cl_conflict", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n"},
 +		{"100_then_te_and_cl", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"},
++		{"bare_lf_te_and_cl", "HTTP/1.1 200 OK\nTransfer-Encoding: chunked\nContent-Length: 5\n\n5\r\nhello\r\n0\r\n\r\n"},
++		{"bare_lf_cl_only", "HTTP/1.1 200 OK\nContent-Length: 5\n\nhello"},
++		{"100_then_bare_lf_200", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\nContent-Length: 2\n\nok"},
++		{"truncated_headers_eof", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"},
++		{"leading_empty_crlf", "\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
 +		{"conflicting_cl", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello"},
 +		{"non_chunked_te", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"},
 +		{"1xx_with_cl", "HTTP/1.1 103 Early Hints\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
