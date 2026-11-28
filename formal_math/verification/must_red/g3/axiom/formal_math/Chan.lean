@@ -1,0 +1,3 @@
+module
+
+axiom bad : False

@@ -21,13 +21,21 @@ import Mathlib.Topology.MetricSpace.PiNat
 -/
 
 #check @NonemptyInterval
+#check @NonemptyInterval.toProd
+#check @NonemptyInterval.toDualProd
+#check @NonemptyInterval.dual
+#check @Interval
 #check @OrderDual
 #check @List.IsPrefix
+#check @List.IsChain
+#check @Nat.iterate
 #check @PiNat.cylinder
 #check @PiNat.firstDiff
 #check @Filter.atTop
 #check @Filter.EventuallyConst
 #check @Finset.sum
+#check @Finset.sup'
+#check @Finset.inf'
 #check @IsStrictOrderedRing
 #check @LocallyFiniteOrder
 #check @WellFounded

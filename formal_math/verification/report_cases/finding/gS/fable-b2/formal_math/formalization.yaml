@@ -1,0 +1,7 @@
+{
+  "nodes": {
+    "vac": {"about": [], "mode": "对任意实现成立"},
+    "mirror": {"about": [], "mode": "对任意实现成立"},
+    "redundant": {"about": [], "mode": "对任意实现成立"}
+  }
+}

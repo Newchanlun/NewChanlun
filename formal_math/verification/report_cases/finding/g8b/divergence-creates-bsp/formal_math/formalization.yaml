@@ -1,0 +1,11 @@
+{
+  "nodes": {
+    "divergence_creates_bsp": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "necessary": [
+        "_hdiv"
+      ]
+    }
+  }
+}

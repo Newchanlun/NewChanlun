@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "claim": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "main_theorem": true,
+      "necessary": [
+        1,
+        2
+      ],
+      "convenience": {
+        "2": "重复登记"
+      }
+    }
+  }
+}

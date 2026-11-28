@@ -1,0 +1,9 @@
+{
+  "nodes": {
+    "claim": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "needs_necessity": true
+    }
+  }
+}

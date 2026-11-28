@@ -1,0 +1,11 @@
+name = "fm_auditor"
+version = "0.1.0"
+defaultTargets = ["fm_audit"]
+
+[[lean_lib]]
+name = "Auditor"
+
+[[lean_exe]]
+name = "fm_audit"
+root = "Main"
+supportInterpreter = true

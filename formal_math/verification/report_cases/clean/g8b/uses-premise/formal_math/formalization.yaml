@@ -1,0 +1,11 @@
+{
+  "nodes": {
+    "claim": {
+      "about": [],
+      "mode": "对任意实现成立",
+      "necessary": [
+        "h"
+      ]
+    }
+  }
+}
