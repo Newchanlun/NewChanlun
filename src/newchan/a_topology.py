@@ -52,19 +52,179 @@ import pandas as pd
 # TDA 桥接层——接口隔离，将来换库只改这里
 # ---------------------------------------------------------------------------
 
+def _hk_perfect_matching(adj: list[list[int]], n_left: int, n_right: int) -> bool:
+    """判定二分图 (0..n_left-1) -> (0..n_right-1) 是否存在覆盖全部左侧顶点的匹配。"""
+    if n_left == 0:
+        return True
+    if n_left > n_right:
+        return False
+    match_r = [-1] * n_right
+    unmatched: list[int] = []
+    for u in range(n_left):
+        nbrs = adj[u]
+        if not nbrs:
+            return False
+        for v in nbrs:
+            if match_r[v] == -1:
+                match_r[v] = u
+                break
+        else:
+            unmatched.append(u)
+    if not unmatched:
+        return True
+    from collections import deque
+
+    match_l = [-1] * n_left
+    for v, u in enumerate(match_r):
+        if u != -1:
+            match_l[u] = v
+    while unmatched:
+        dist = [-1] * n_left
+        queue = deque(unmatched)
+        for u in unmatched:
+            dist[u] = 0
+        found = False
+        while queue:
+            u = queue.popleft()
+            next_d = dist[u] + 1
+            for v in adj[u]:
+                u2 = match_r[v]
+                if u2 == -1:
+                    found = True
+                elif dist[u2] == -1:
+                    dist[u2] = next_d
+                    queue.append(u2)
+        if not found:
+            return False
+        it = [0] * n_left
+
+        def _dfs(u: int) -> bool:
+            nbrs = adj[u]
+            limit = len(nbrs)
+            while it[u] < limit:
+                v = nbrs[it[u]]
+                it[u] += 1
+                u2 = match_r[v]
+                if u2 == -1 or (dist[u2] == dist[u] + 1 and _dfs(u2)):
+                    match_l[u] = v
+                    match_r[v] = u
+                    return True
+            dist[u] = -1
+            return False
+
+        still: list[int] = []
+        for u in unmatched:
+            if not _dfs(u):
+                still.append(u)
+        if len(still) == len(unmatched):
+            return False
+        unmatched = still
+    return True
+
+
 def _bottleneck_distance(
     dgm_a: np.ndarray, dgm_b: np.ndarray,
 ) -> float:
-    """计算两个持续图（persistence diagram）之间的 bottleneck 距离。
+    """计算两个持续图（persistence diagram）之间的精确 L∞ bottleneck 距离。
 
-    使用 persim 库。输入为 shape (n, 2) 的 numpy 数组，每行 (birth, death)。
-    空图用 shape (0, 2) 表示。
+    自实装精确二分搜索 + Hopcroft-Karp（数学定义与 persim.bottleneck 逐位一致，
+    避免冷导入 persim/matplotlib/sklearn 与字符串邻接表开销）。
+    输入为 shape (n, >=2) 的 numpy 数组，前两列为 (birth, death)；空图用 shape (0, 2) 表示。
     """
-    from persim import bottleneck
+    import warnings
 
-    if dgm_a.shape[0] == 0 and dgm_b.shape[0] == 0:
+    s = np.asarray(dgm_a, dtype=np.float64)
+    m = min(s.shape[0], s.size)
+    if s.size > 0:
+        fin = np.isfinite(s[:, 1])
+        if not np.all(fin):
+            warnings.warn(
+                "dgm1 has points with non-finite death times;ignoring those points",
+                stacklevel=2,
+            )
+            s = s[fin]
+            m = s.shape[0]
+    t = np.asarray(dgm_b, dtype=np.float64)
+    n = min(t.shape[0], t.size)
+    if t.size > 0:
+        fin = np.isfinite(t[:, 1])
+        if not np.all(fin):
+            warnings.warn(
+                "dgm2 has points with non-finite death times;ignoring those points",
+                stacklevel=2,
+            )
+            t = t[fin]
+            n = t.shape[0]
+
+    if m == 0 and n == 0:
         return 0.0
-    return float(bottleneck(dgm_a, dgm_b))
+    if m == 0:
+        s = np.zeros((1, 2), dtype=np.float64)
+        m = 1
+    if n == 0:
+        t = np.zeros((1, 2), dtype=np.float64)
+        n = 1
+
+    diag_s = 0.5 * (s[:, 1] - s[:, 0])
+    diag_t = 0.5 * (t[:, 1] - t[:, 0])
+    non_neg = bool(np.all(diag_s >= 0.0) and np.all(diag_t >= 0.0))
+
+    if non_neg and m == n and np.array_equal(s[:, :2], t[:, :2]):
+        return 0.0
+
+    dul = np.maximum(
+        np.abs(s[:, 0:1] - t[None, :, 0]),
+        np.abs(s[:, 1:2] - t[None, :, 1]),
+    )
+
+    if non_neg:
+        cands = np.unique(np.concatenate((dul.ravel(), diag_s, diag_t, np.array([0.0]))))
+        min_s = np.minimum(diag_s, dul.min(axis=1))
+        min_t = np.minimum(diag_t, dul.min(axis=0))
+        lb = float(max(min_s.max(), min_t.max()))
+        ub = float(max(diag_s.max(), diag_t.max()))
+        lo = int(np.searchsorted(cands, lb, side="left"))
+        hi = min(len(cands) - 1, int(np.searchsorted(cands, ub, side="left")))
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            d = float(cands[mid])
+            s_req = np.flatnonzero(diag_s > d)
+            ok = True
+            if s_req.size > 0:
+                adj_s = [np.flatnonzero(dul[i] <= d).tolist() for i in s_req]
+                ok = _hk_perfect_matching(adj_s, int(s_req.size), n)
+            if ok:
+                t_req = np.flatnonzero(diag_t > d)
+                if t_req.size > 0:
+                    adj_t = [np.flatnonzero(dul[:, j] <= d).tolist() for j in t_req]
+                    ok = _hk_perfect_matching(adj_t, int(t_req.size), m)
+            if ok:
+                hi = mid
+            else:
+                lo = mid + 1
+        return float(cands[lo])
+
+    # 退化情形（存在 death < birth 的负持续点）：走完整 (m+n)x(m+n) 精确矩阵以与 persim 逐位一致
+    size = m + n
+    mat = np.zeros((size, size), dtype=np.float64)
+    mat[:m, :n] = dul
+    ur = np.full((m, m), np.inf, dtype=np.float64)
+    np.fill_diagonal(ur, diag_s)
+    mat[:m, n:] = ur
+    ll = np.full((n, n), np.inf, dtype=np.float64)
+    np.fill_diagonal(ll, diag_t)
+    mat[m:, :n] = ll
+    cands = np.unique(mat)
+    lo, hi = 0, len(cands) - 1
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        d = float(cands[mid])
+        adj = [np.flatnonzero(mat[i] <= d).tolist() for i in range(size)]
+        if _hk_perfect_matching(adj, size, size):
+            hi = mid
+        else:
+            lo = mid + 1
+    return float(cands[lo])
 
 
 def centers_to_barcode(centers) -> tuple[tuple[float, float], ...]:
