@@ -432,7 +432,7 @@ def b2_reply019NoBoundaryOnlyOverlapLiteral : Prop :=
     b2_connectedAltTriple a b c →
     b2_tripleStrictOverlap a.toRange b.toRange c.toRange
 
-/-- B-2 局部三笔不破前低价格条件（仅刻画向上-向下-向上相连三笔中回落笔不跌破前向上笔低点的纯价格条件，不冠以“同线段”名义，与带完整分界见证的 `b2_lesson67SameUpSegAdjacentPair` 区分）。
+/-- B-2 局部三笔不破前低加强价格条件（仅刻画向上-向下-向上相连三笔中回落笔不跌破前向上笔低点 `s1.lo ≤ x1.lo` 的充分价格条件；在此加强前提下相邻向上笔必有重合区间，显式区分于仅要求完好未破坏向上线段的 `b2_lesson67SameUpSegAdjacentPair`）。
 引文：[065:48]「线段有一个最基本的前提，就是线段的前三笔，必须有重叠的部分，这个前提在前面可能没有特别强调，这里必须特别强调一次。线段至少有三笔，但并不是连续的三笔就一定构成线段，这三笔必须有重叠的部分。」 -/
 def b2_upTripleNoBreakPriorLow (s1 x1 s2 : DirectedSeg) : Prop :=
   b2_connectedAltTriple s1 x1 s2 ∧
@@ -451,10 +451,10 @@ instance instDecidableB2UpTripleNoBreakPriorLow (s1 x1 s2 : DirectedSeg) :
     s2.dir = .up ∧
     s1.lo ≤ x1.lo))
 
-/-- B-2 正文 `067:16` 真实同线段相邻向上笔前提（布尔版，与 B-9 共用 `b9_validStrokeSegBool` 与 `segPairConfirmsDestructionBool` 真实分界见证）：
+/-- B-2 正文 `067:16` 真实完好同线段相邻向上笔前提（布尔版，与 B-9 共用 `b9_validStrokeSegBool` 与 `segPairConfirmsDestructionBool` 真实分界见证，忠实遵循 `067:28` + `071:30,32`）：
 在以向上笔起始的合法交替衔接完整笔序列 `allStrokes` 上，前缀 `seg := allStrokes.take segLen` 构成合法且内部未被提前破坏的向上线段，
-且在整条 `allStrokes` 中 `segLen` 之前的任何奇数位置 `j`（`3 ≤ j < segLen`）均未被 `allStrokes.drop j` 破坏（杜绝把跨过真实分界的笔如 `0→15→10→16→12→14→11` 中的 `10→16→12→14` 误判为同一上段），
-同时 `2 * k + 2 < segLen` 定位该同上段内第 `k` 对相邻向上笔 `(S_k, X_k, S_{k+1})`（不人为附加后一向上笔须创新高，合法容纳 `0→10→4→8`）。
+且在整条 `allStrokes` 中 `segLen` 之前的任何奇数位置 `j`（`3 ≤ j < segLen`）均未被 `allStrokes.drop j` 破坏，
+同时 `2 * k + 2 < segLen` 定位该同上段内第 `k` 对相邻向上笔 `(S_k, X_k, S_{k+1})`（不人为附加后一向上笔须创新高，也不为原典兜底而扭曲 `071:32`）。
 引文：[067:16]「以向上笔开始的线段，可以用笔的序列表示：S1X1S2X2S3X3…SnXn。容易证明，任何Si与Si+1之间，一定有重合区间。而考察序列X1X2…Xn，该序列中， Xi与Xi+1之间并不一定有重合区间，因此，这序列更能代表线段的性质。」 -/
 def b2_lesson67SameUpSegAdjacentPairBool
     (allStrokes : List PenStroke) (segLen k : Nat) : Bool :=
@@ -465,8 +465,8 @@ def b2_lesson67SameUpSegAdjacentPairBool
   segNoDestructionBeforeLimitBool .up allStrokes segLen 3 allStrokes.length &&
   decide (2 * k + 2 < segLen)
 
-/-- B-2 正文 `067:16` 真实同线段相邻向上笔前提（`Prop` 版）。
-所刻画确切命题：`067:16` 的 `Si` 与 `Si+1` 属于同一条以向上笔开始且在给定完整笔序列中尚未被特征序列破坏分界截断的真实线段，显式与答疑 `019:1058` 的无约束三段分离。
+/-- B-2 正文 `067:16` 真实完好同线段相邻向上笔前提（`Prop` 版）。
+所刻画确切命题：`067:16` 的 `Si` 与 `Si+1` 属于同一条以向上笔开始且按 `067:28` + `071:30,32` 在完整笔序列中未被破坏截断的真实线段，显式与答疑 `019:1058` 的无约束三段及加强价格条件 `b2_upTripleNoBreakPriorLow` 分层。
 引文：[067:16]「以向上笔开始的线段，可以用笔的序列表示：S1X1S2X2S3X3…SnXn。容易证明，任何Si与Si+1之间，一定有重合区间。而考察序列X1X2…Xn，该序列中， Xi与Xi+1之间并不一定有重合区间，因此，这序列更能代表线段的性质。」 -/
 def b2_lesson67SameUpSegAdjacentPair
     (allStrokes : List PenStroke) (segLen k : Nat) : Prop :=
@@ -477,6 +477,18 @@ instance instDecidableB2Lesson67SameUpSegAdjacentPair
     (allStrokes : List PenStroke) (segLen k : Nat) :
     Decidable (b2_lesson67SameUpSegAdjacentPair allStrokes segLen k) :=
   inferInstanceAs (Decidable (b2_lesson67SameUpSegAdjacentPairBool allStrokes segLen k = true))
+
+/-- B-2 正文 `067:16` 字面断言：在 `067:28` + `071:30,32` 真实完好向上线段前提 `b2_lesson67SameUpSegAdjacentPair` 下，任意相邻向上笔 `S_k` 与 `S_{k+1}` 必有公共重合区间。
+所刻画确切命题：在完整线段破坏规则（含 `071:32` 笔破坏未成段而先破起点延续原段情形）下，该断言本身存在反例（如 `0→10→4→12→1→3→2→15` 或 `0→10→4→8→1→3→2→9` 接 `9→2→8→1` 中 `S2` 与 `S3` 严格不相交）；仅当额外附加回落笔不破前向上笔低点条件 `b2_upTripleNoBreakPriorLow` 时，相邻向上笔重合才可推出。
+引文：[067:16]「以向上笔开始的线段，可以用笔的序列表示：S1X1S2X2S3X3…SnXn。容易证明，任何Si与Si+1之间，一定有重合区间。而考察序列X1X2…Xn，该序列中， Xi与Xi+1之间并不一定有重合区间，因此，这序列更能代表线段的性质。」
+引文：[071:32]「这种情况还有更复杂一点的情况，就是第三笔完全在第一笔的范围内，这样，这三笔就分不出是向上还是向下，这样也就定义不了什么特征序列，为什么？因为特征序列是和走势相反的，而走势连方向都没有，那怎么知道哪个元素属于特征序列？这种情况，无非两种最后的结果：1、最终还是先破了第一笔的结束位置，这时候，新的线段显然成立，旧线段还是被破坏了；2、最终，先破第一笔的开始位置，这样，旧线段只被一笔破坏，接着就延续原来的方向，那么，显然旧线段依然延续，新线段没有出现。」 -/
+def b2_lesson67SameUpSegAlwaysOverlapsLiteral : Prop :=
+  ∀ (allStrokes : List PenStroke) (segLen k : Nat),
+    b2_lesson67SameUpSegAdjacentPair allStrokes segLen k →
+    match nthStrokeOpt allStrokes (2 * k), nthStrokeOpt allStrokes (2 * k + 2) with
+    | some s1, some s2 =>
+      intMax (penStrokeLo s1) (penStrokeLo s2) ≤ intMin (penStrokeHi s1) (penStrokeHi s2)
+    | _, _ => False
 
 /-! ### B-3：`020:60` 含等号可相触的字面第三类买卖点（同列表连续下标 `(i, i + 1)` 绑定首次回试，依 `020:60`/`078:42` 不附加回试极值越界门） -/
 
@@ -745,24 +757,29 @@ def b8_approxEqEquivalenceTransitivityRequirement (tol : Int) : Prop :=
 
 /-- 符合 `065:44,46`、`067:28,38`、`071:30,32,40,42` 与 `078:22,42,50` 真实相邻线段破坏结构的笔序列载体前提（支持 `067:38` 第二种情况借助后续确认笔尾 `confirmTail` 确认 `st1/st2` 分界，但不把 `confirmTail` 算入 `st2`）：
 1. `st1` 与 `st2` 各自构成内部未被提前破坏的合法线段且方向相反；
-2. 若 `confirmTail` 非空，须满足 `st2 ++ confirmTail` 连续交替合法且 `st2` 在 `st2/confirmTail` 处确实被第三段破坏结束（杜绝中途乱切 `st2`）；
-3. `segPairConfirmsDestructionBool d1 st1 (st2 ++ confirmTail) = true`（第一种情况传 `confirmTail = []` 即可确认，第二种情况带缺口分界允许读取确认底/顶分型所需的 `confirmTail`）。
+2. 沿完整观察序列 `obs1 := st1 ++ st2 ++ confirmTail` 与 `obs2 := st2 ++ confirmTail` 分别排除 `st1` 与 `st2` 存在任何更早的内部破坏分界（杜绝同一条完整笔链将第二段切在两个不同终点）；
+3. 若 `confirmTail` 非空，须满足 `obs2` 连续交替合法且 `st2` 在 `st2/confirmTail` 处确实被第三段破坏结束（杜绝中途乱切 `st2`）；
+4. `segPairConfirmsDestructionBool d1 st1 obs2 = true`（第一种情况传 `confirmTail = []` 即可确认，第二种情况带缺口分界允许读取确认底/顶分型所需的 `confirmTail`）。
 引文：[067:38]「特征序列的顶分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最高点开始的向下一笔开始的序列的特征序列出现底分型，那么该线段在该顶分型的高点处结束，该高点是该线段的终点；特征序列的底分型中，第一和第二元素间存在特征序列的缺口，如果从该分型最低点开始的向上一笔开始的序列的特征序列出现顶分型，那么该线段在该底分型的低点处结束，该低点是该线段的终点；」
 引文：[078:22]「由于图形不断延续，因此，除非是新股上市后最开始的一段，否则任何一段都是破坏前一段的，如果你的划分，不能保证前面每一段都是被后一段破坏，那么这划分肯定不对。线段的破坏是可以逆时间传递的，也就是说被后线段破坏的线段，一定破坏前线段，如果违反这个原则，那线段的划分一定有问题。」
 引文：[二级旁证] [078:50]「注意，这个例子中有一个最关键的前提，就是线段B已经确认线段破坏了他前面的线段，如果线段B对前面线段的破坏都没确认，那就先确认，这里的分析都不适用了。」 -/
 def b9_adjacentDestroyedSegPairBool
     (d1 : SegDir) (st1 st2 confirmTail : List PenStroke) : Bool :=
   let d2 := flipSegDir d1
+  let obs2 := st2 ++ confirmTail
+  let obs1 := st1 ++ obs2
   let tailOk :=
     match confirmTail with
     | [] => true
     | _ :: _ =>
-      b9_strokesChainValidBool d2 (st2 ++ confirmTail) &&
+      b9_strokesChainValidBool d2 obs2 &&
       segPairConfirmsDestructionBool d2 st2 confirmTail
   b9_validStrokeSegBool d1 st1 &&
   b9_validStrokeSegBool d2 st2 &&
+  segNoDestructionBeforeLimitBool d1 obs1 st1.length 3 obs1.length &&
+  segNoDestructionBeforeLimitBool d2 obs2 st2.length 3 obs2.length &&
   tailOk &&
-  segPairConfirmsDestructionBool d1 st1 (st2 ++ confirmTail)
+  segPairConfirmsDestructionBool d1 st1 obs2
 
 /-- `b9_adjacentDestroyedSegPairBool` 的命题版本。
 引文：[078:22]「由于图形不断延续，因此，除非是新股上市后最开始的一段，否则任何一段都是破坏前一段的，如果你的划分，不能保证前面每一段都是被后一段破坏，那么这划分肯定不对。线段的破坏是可以逆时间传递的，也就是说被后线段破坏的线段，一定破坏前线段，如果违反这个原则，那线段的划分一定有问题。」 -/
@@ -936,13 +953,14 @@ structure B38SequentialCentersTrace where
 def b38_fullSegChain (tr : B38SequentialCentersTrace) : List DirectedSeg :=
   [tr.c1Seg1, tr.c1Seg2, tr.c1Seg3] ++ tr.bridgeSegs ++ [tr.c2Seg1, tr.c2Seg2, tr.c2Seg3]
 
-/-- B-38 公共基础链合法性（布尔版）：`c1`、`c2` 同级别、时间先后不交（`c1.endT ≤ c2.startT`，允许六段直连共享转折端点时刻）、各自按 `020:48` 取三段公共核心且按 `020:52` 同向 `Z` 段取外缘重算生成，且整条 `b38_fullSegChain tr` 连续交替首尾衔接（彻底杜绝任何价格瞬移）。
+/-- B-38 公共基础链合法性（布尔版）：`c1`、`c2` 同级别、仅在 `bridgeSegs = []`（六段直连共享转折端点时刻）允许 `c1.endT ≤ c2.startT`，非空 `bridgeSegs` 一律严格要求 `c1.endT < c2.startT`（杜绝非空连接段占用零时间）、各自按 `020:48` 取三段公共核心且按 `020:52` 同向 `Z` 段取外缘重算生成，且整条 `b38_fullSegChain tr` 连续交替首尾衔接（彻底杜绝任何价格瞬移）。
 引文：[020:52]「为方便起见，以后都把这些与中枢方向一致的次级别走势类型称为Z走势段，按中枢中的时间顺序，分别记为Zn等，而相应的高、低点分别记为gn、dn,定义四个指标：GG=max(gn),G=min(gn),D=max(dn),DD=min(dn)，n遍历中枢中所有Zn。」 -/
 def b38_baseChainValidBool (tr : B38SequentialCentersTrace) : Bool :=
   decide (b38_centerMatchesThreeSegs tr.c1 tr.c1Seg1 tr.c1Seg2 tr.c1Seg3) &&
   decide (b38_centerMatchesThreeSegs tr.c2 tr.c2Seg1 tr.c2Seg2 tr.c2Seg3) &&
   decide (tr.c1.level = tr.c2.level) &&
-  decide (tr.c1.endT ≤ tr.c2.startT) &&
+  (if tr.bridgeSegs.isEmpty then decide (tr.c1.endT ≤ tr.c2.startT)
+   else decide (tr.c1.endT < tr.c2.startT)) &&
   b3_validSegChainBool (b38_fullSegChain tr)
 
 /-- B-38 前提一（同课 `020:58` + `020:60` 字面含等号破坏连续链，布尔版）：
