@@ -202,6 +202,7 @@ pub(crate) use effects::{
 };
 #[path = "construction_state.rs"]
 mod construction_state;
+mod raw_sql_floor;
 #[cfg_attr(
     not(test),
     allow(unused_imports, reason = "#1488 再合 #1608：仅测试使用")
@@ -412,7 +413,7 @@ impl AuditConnection {
     // 生产调用只接受路径，经固定无扩展/无自定义函数的 private-cache 开门过程创建。
     // 从此没有 register_function/ATTACH/TEMP/schema/配置写能力外借。
     pub(super) fn open(db: &Path) -> Result<Self, String> {
-        Self::new(open_db(db)?)
+        Self::new(raw_sql_floor::installed(open_db(db)?)?)
     }
 
     /// #1845：只借用 S 已持锁的连接，不向 CLI 暴露裸连接。
@@ -984,7 +985,7 @@ impl AuditConnection {
         connection: Connection,
         output: &mut Option<Self>,
     ) -> Result<(), String> {
-        *output = Some(Self::new(connection)?);
+        *output = Some(Self::new(raw_sql_floor::installed(connection)?)?);
         Ok(())
     }
 
