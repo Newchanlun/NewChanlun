@@ -1120,6 +1120,7 @@ impl StrategyFamily {
     }
 }
 
+pub mod voice_open_funding;
 #[cfg(test)]
 mod tests {
     use super::*;
