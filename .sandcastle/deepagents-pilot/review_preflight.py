@@ -367,7 +367,7 @@ _SSE_EVENT_SCHEMA_KEYS = frozenset({
 _SSE_RESPONSE_SCHEMA_KEYS = frozenset({"id", "model", "status", "error", "output"})
 _SSE_ITEM_SCHEMA_KEYS = frozenset({
     "id", "type", "role", "phase", "status", "content", "response_id",
-    "call_id", "name", "server_label", "arguments", "input", "code", "action", "queries",
+    "call_id", "name", "server_label", "container_id", "arguments", "input", "code", "action", "queries", "result", "error",
 })
 _SSE_CONTENT_PART_SCHEMA_KEYS = frozenset({"type", "text", "refusal"})
 

@@ -1,8 +1,8 @@
 diff --git a/internal/api/middleware/preflight_receipt.go b/internal/api/middleware/preflight_receipt.go
-index e69de29..4b2b580 100644
+index e69de29..20e0f9f 100644
 --- a/internal/api/middleware/preflight_receipt.go
 +++ b/internal/api/middleware/preflight_receipt.go
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,400 @@
 +package middleware
 +
 +import (
@@ -330,12 +330,10 @@ index e69de29..4b2b580 100644
 +			var cancel context.CancelFunc
 +			ctx, cancel = context.WithDeadline(ctx, deadline)
 +			defer cancel()
-+			defer func() {
-+				if !time.Now().After(deadline) {
-+					_ = rc.SetReadDeadline(time.Time{})
-+					_ = rc.SetWriteDeadline(time.Time{})
-+				}
-+			}()
++			// Close the HTTP/1.1 connection after the final response flush and keep the
++			// write deadline armed past handler return so Go's final flush / chunked
++			// termination remains bounded by collector.Deadline().
++			c.Header("Connection", "close")
 +		}
 +		c.Request = c.Request.WithContext(ctx)
 +		finished := false
@@ -370,12 +368,10 @@ index e69de29..4b2b580 100644
 +		rc := http.NewResponseController(c.Writer)
 +		// Leave a short grace window past sealDeadline so sealCtx expires with DeadlineExceeded
 +		// and the handler can flush 503 + Connection: close before socket deadlines trip.
++		// Keep write deadline armed through Go's final HTTP/1.1 flush and close the connection.
 +		_ = rc.SetReadDeadline(sealDeadline.Add(5 * time.Second))
 +		_ = rc.SetWriteDeadline(sealDeadline.Add(5 * time.Second))
-+		defer func() {
-+			_ = rc.SetReadDeadline(time.Time{})
-+			_ = rc.SetWriteDeadline(time.Time{})
-+		}()
++		c.Header("Connection", "close")
 +		launch, launchPresent, launchAmbiguous := singleHeaderValue(c.Request.Header, preflightreceipt.ReviewHeader)
 +		session, sessionPresent, sessionAmbiguous := singleHeaderValue(c.Request.Header, "Session-Id")
 +		if !launchPresent || launchAmbiguous || launch == "" || !sessionPresent || sessionAmbiguous || session == "" {
@@ -409,10 +405,10 @@ index e69de29..4b2b580 100644
 +}
 diff --git a/internal/api/middleware/preflight_receipt_test.go b/internal/api/middleware/preflight_receipt_test.go
 new file mode 100644
-index 0000000..605b9a4
+index 0000000..c1bc9a9
 --- /dev/null
 +++ b/internal/api/middleware/preflight_receipt_test.go
-@@ -0,0 +1,1314 @@
+@@ -0,0 +1,1353 @@
 +package middleware
 +
 +import (
@@ -772,7 +768,7 @@ index 0000000..605b9a4
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: middlewareFakeRT(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: http.StatusOK,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader("")),
 +				TLS:        tlsState,
 +			}, nil
@@ -1121,7 +1117,7 @@ index 0000000..605b9a4
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: middlewareFakeRT(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: http.StatusOK,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader("")),
 +				TLS:        tlsState,
 +			}, nil
@@ -1451,7 +1447,7 @@ index 0000000..605b9a4
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: sealTestRoundTripper(func(r *http.Request) (*http.Response, error) {
 +		return &http.Response{
 +			StatusCode: 200,
-+			Header:     make(http.Header),
++			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body:       io.NopCloser(strings.NewReader("")),
 +			TLS:        &tls.ConnectionState{HandshakeComplete: true, ServerName: "chatgpt.com", VerifiedChains: [][]*x509.Certificate{{leaf}}},
 +		}, nil
@@ -1547,7 +1543,7 @@ index 0000000..605b9a4
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: middlewareFakeRT(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: http.StatusOK,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader("")),
 +				TLS:        tlsState,
 +			}, nil
@@ -1726,6 +1722,45 @@ index 0000000..605b9a4
 +	case <-time.After(2 * time.Second):
 +		t.Fatalf("stalled legacy Body.Read was NOT interrupted by connection read deadline")
 +	}
++
++	// 3. Sol P2 #1 (PR #2280 R97): Neither legacy preflight middleware nor SealReviewReceiptHandler
++	//    may clear SetWriteDeadline(time.Time{}) before returning (Go flushes HTTP/1.1 responses
++	//    after handler return), and both MUST emit Connection: close.
++	spyRecLegacy := &writeDeadlineSpyRecorder{ResponseRecorder: httptest.NewRecorder()}
++	reqLegacySpy := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
++	reqLegacySpy.Header.Set("Session-Id", "preflight-e9610001-2222-4333-8444-555555550003")
++	engine.ServeHTTP(spyRecLegacy, reqLegacySpy)
++	if spyRecLegacy.Code != http.StatusOK || !strings.EqualFold(spyRecLegacy.Header().Get("Connection"), "close") {
++		t.Fatalf("legacy spy response = code:%d conn:%q, want (200, close)", spyRecLegacy.Code, spyRecLegacy.Header().Get("Connection"))
++	}
++	if len(spyRecLegacy.writeDeadlines) == 0 || spyRecLegacy.writeDeadlines[len(spyRecLegacy.writeDeadlines)-1].IsZero() {
++		t.Fatalf("legacy preflight middleware cleared write deadline before return: %v", spyRecLegacy.writeDeadlines)
++	}
++
++	sealEngine := gin.New()
++	sealEngine.POST("/v1/review-receipts/seal", SealReviewReceiptHandler())
++	spyRecSeal := &writeDeadlineSpyRecorder{ResponseRecorder: httptest.NewRecorder()}
++	reqSealSpy := httptest.NewRequest(http.MethodPost, "/v1/review-receipts/seal", nil)
++	reqSealSpy.Header.Set(preflightreceipt.ReviewHeader, "review-e9610001-2222-4333-8444-555555550004")
++	reqSealSpy.Header.Set("Session-Id", "019d0000-0000-7000-8000-000000009701")
++	sealEngine.ServeHTTP(spyRecSeal, reqSealSpy)
++	if !strings.EqualFold(spyRecSeal.Header().Get("Connection"), "close") {
++		t.Fatalf("seal handler missing Connection: close: conn=%q", spyRecSeal.Header().Get("Connection"))
++	}
++	if len(spyRecSeal.writeDeadlines) == 0 || spyRecSeal.writeDeadlines[len(spyRecSeal.writeDeadlines)-1].IsZero() {
++		t.Fatalf("seal handler cleared write deadline before return: %v", spyRecSeal.writeDeadlines)
++	}
++}
++
++type writeDeadlineSpyRecorder struct {
++	*httptest.ResponseRecorder
++	writeDeadlines []time.Time
++}
++
++func (r *writeDeadlineSpyRecorder) SetReadDeadline(time.Time) error { return nil }
++func (r *writeDeadlineSpyRecorder) SetWriteDeadline(t time.Time) error {
++	r.writeDeadlines = append(r.writeDeadlines, t)
++	return nil
 +}
 diff --git a/internal/api/middleware/seal_hook_disabled.go b/internal/api/middleware/seal_hook_disabled.go
 new file mode 100644
@@ -7771,7 +7806,7 @@ index 0000000..59f4fa7
 +}
 diff --git a/sdk/cliproxy/auth/preflight_stream_test.go b/sdk/cliproxy/auth/preflight_stream_test.go
 new file mode 100644
-index 0000000..e3a233e
+index 0000000..6420b64
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_stream_test.go
 @@ -0,0 +1,596 @@
@@ -7840,7 +7875,7 @@ index 0000000..e3a233e
 +func (rt streamTestRT) RoundTrip(req *http.Request) (*http.Response, error) {
 +	return &http.Response{
 +		StatusCode: http.StatusServiceUnavailable,
-+		Header:     make(http.Header),
++		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +		Body:       io.NopCloser(strings.NewReader("")),
 +		TLS:        rt.tlsState,
 +	}, nil
@@ -8074,7 +8109,7 @@ index 0000000..e3a233e
 +func (rt status200StreamTestRT) RoundTrip(req *http.Request) (*http.Response, error) {
 +	return &http.Response{
 +		StatusCode: http.StatusOK,
-+		Header:     make(http.Header),
++		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +		Body:       io.NopCloser(strings.NewReader(rt.body)),
 +		TLS:        rt.tlsState,
 +	}, nil
@@ -8373,10 +8408,10 @@ index 0000000..e3a233e
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport.go b/sdk/cliproxy/auth/preflight_transport.go
 new file mode 100644
-index 0000000..15c7085
+index 0000000..4f7eb35
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport.go
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,493 @@
 +package auth
 +
 +import (
@@ -8661,6 +8696,7 @@ index 0000000..15c7085
 +		}
 +		return preflightreceipt.NewStrictHTTP1FramingConn(conn), nil
 +	}
++	h2Enabled := !h2Disabled
 +	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
 +		host, _, err := net.SplitHostPort(addr)
 +		if err != nil || host == "" {
@@ -8670,9 +8706,9 @@ index 0000000..15c7085
 +		if err != nil {
 +			return nil, err
 +		}
-+		nextProtos := []string{"h2", "http/1.1"}
-+		if h2Disabled {
-+			nextProtos = []string{"http/1.1"}
++		nextProtos := []string{"http/1.1"}
++		if h2Enabled {
++			nextProtos = []string{"h2", "http/1.1"}
 +		}
 +		tlsConn := tls.Client(rawConn, &tls.Config{
 +			ServerName: host,
@@ -8691,12 +8727,17 @@ index 0000000..15c7085
 +			copyCS := cs
 +			slot.Store(&copyCS)
 +		}
-+		if !h2Disabled && cs.NegotiatedProtocol == "h2" {
++		if h2Enabled && cs.NegotiatedProtocol == "h2" {
 +			return tlsConn, nil
 +		}
 +		return preflightreceipt.NewStrictHTTP1FramingTLSConn(tlsConn), nil
 +	}
-+	return &http.Transport{
++	protocols := new(http.Protocols)
++	protocols.SetHTTP1(true)
++	if h2Enabled {
++		protocols.SetHTTP2(true)
++	}
++	tr := &http.Transport{
 +		Proxy: func(req *http.Request) (*url.URL, error) {
 +			// HTTPS requests are handled via DialTLSContext (including HTTP CONNECT) so raw
 +			// HTTP/1.1 upstream headers inside TLS always pass NewStrictHTTP1FramingTLSConn.
@@ -8709,7 +8750,8 @@ index 0000000..15c7085
 +		},
 +		DialContext:           dialPlainHTTP,
 +		DialTLSContext:        dialTLS,
-+		ForceAttemptHTTP2:     !h2Disabled,
++		Protocols:             protocols,
++		ForceAttemptHTTP2:     h2Enabled,
 +		DisableKeepAlives:     true,
 +		DisableCompression:    true,
 +		MaxIdleConns:          100,
@@ -8717,6 +8759,14 @@ index 0000000..15c7085
 +		TLSHandshakeTimeout:   10 * time.Second,
 +		ExpectContinueTimeout: 1 * time.Second,
 +	}
++	if !h2Enabled {
++		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
++	}
++	// Eagerly latch net/http's nextProtoOnce at transport construction time (nil URL returns
++	// immediately after nextProtoOnce.Do without dialing) so HTTP/2 handler registration is
++	// permanently frozen with dialTLS's ALPN choice even if GODEBUG changes before first use.
++	_, _ = tr.RoundTrip(&http.Request{})
++	return tr
 +}
 +
 +// ControlledTransportForProxy returns a sealed proxy-owned http.RoundTripper bound strictly to
@@ -8857,10 +8907,10 @@ index 0000000..15c7085
 +}
 diff --git a/sdk/cliproxy/auth/preflight_transport_tls_test.go b/sdk/cliproxy/auth/preflight_transport_tls_test.go
 new file mode 100644
-index 0000000..8995368
+index 0000000..e97198b
 --- /dev/null
 +++ b/sdk/cliproxy/auth/preflight_transport_tls_test.go
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,323 @@
 +//go:build preflight_test_roots
 +
 +package auth
@@ -9142,6 +9192,47 @@ index 0000000..8995368
 +	if h2Resp.ProtoMajor != 2 || h2Resp.TLS == nil || h2Resp.TLS.NegotiatedProtocol != "h2" {
 +		t.Fatalf("h2-capable transport response = proto:%d.%d tls=%+v, want h2", h2Resp.ProtoMajor, h2Resp.ProtoMinor, h2Resp.TLS)
 +	}
++
++	// 4. Sol P2 #2 (PR #2280 R97): Cold-start order test — construct a BRAND-NEW h2-enabled
++	//    transport with GODEBUG="", then flip GODEBUG="http2client=0" BEFORE its very first
++	//    RoundTrip (and vice versa). Both Protocols/TLSNextProto and ALPN MUST stay consistent.
++	controlledTransportMu.Lock()
++	controlledTransportByProxy = make(map[[32]byte]*controlledPreflightTransport)
++	controlledTransportMu.Unlock()
++
++	t.Setenv("GODEBUG", "")
++	coldH2RT, err := ControlledTransportForProxy("direct")
++	if err != nil {
++		t.Fatalf("cold ControlledTransportForProxy(direct, h2): %v", err)
++	}
++	t.Setenv("GODEBUG", "http2client=0")
++	coldH2Req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, h2Srv.URL+"/v1/responses", nil)
++	coldH2Resp, errColdH2 := coldH2RT.RoundTrip(coldH2Req)
++	if errColdH2 != nil {
++		t.Fatalf("cold h2 transport failed after GODEBUG flipped to http2client=0 before first RoundTrip: %v", errColdH2)
++	}
++	_, _ = io.Copy(io.Discard, coldH2Resp.Body)
++	_ = coldH2Resp.Body.Close()
++	if coldH2Resp.ProtoMajor != 2 || coldH2Resp.TLS == nil || coldH2Resp.TLS.NegotiatedProtocol != "h2" {
++		t.Fatalf("cold h2 transport = proto:%d.%d tls=%+v, want h2", coldH2Resp.ProtoMajor, coldH2Resp.ProtoMinor, coldH2Resp.TLS)
++	}
++
++	t.Setenv("GODEBUG", "http2client=0")
++	coldH1RT, err := ControlledTransportForProxy("direct")
++	if err != nil {
++		t.Fatalf("cold ControlledTransportForProxy(direct, h1): %v", err)
++	}
++	t.Setenv("GODEBUG", "")
++	coldH1Req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, h2Srv.URL+"/v1/responses", nil)
++	coldH1Resp, errColdH1 := coldH1RT.RoundTrip(coldH1Req)
++	if errColdH1 != nil {
++		t.Fatalf("cold h1 transport failed after GODEBUG flipped to empty before first RoundTrip: %v", errColdH1)
++	}
++	_, _ = io.Copy(io.Discard, coldH1Resp.Body)
++	_ = coldH1Resp.Body.Close()
++	if coldH1Resp.ProtoMajor != 1 || coldH1Resp.TLS == nil || coldH1Resp.TLS.NegotiatedProtocol != "http/1.1" {
++		t.Fatalf("cold h1 transport = proto:%d.%d tls=%+v, want http/1.1", coldH1Resp.ProtoMajor, coldH1Resp.ProtoMinor, coldH1Resp.TLS)
++	}
 +}
 diff --git a/sdk/cliproxy/rtprovider.go b/sdk/cliproxy/rtprovider.go
 index ddbd342..bc1efb8 100644
@@ -9257,10 +9348,10 @@ index 0000000..89341b4
 +}
 diff --git a/sdk/preflightreceipt/http1_framing.go b/sdk/preflightreceipt/http1_framing.go
 new file mode 100644
-index 0000000..bd66061
+index 0000000..3831c0f
 --- /dev/null
 +++ b/sdk/preflightreceipt/http1_framing.go
-@@ -0,0 +1,349 @@
+@@ -0,0 +1,705 @@
 +package preflightreceipt
 +
 +import (
@@ -9275,6 +9366,9 @@ index 0000000..bd66061
 +	maxRawHTTP1HeaderBytes = 64 * 1024
 +	maxRawHTTP1HeaderCount = 512
 +	maxRawHTTP1InfoCount   = 4
++	maxRawChunkLineBytes   = 8 * 1024
++	maxRawTrailerBytes     = 64 * 1024
++	maxRawTrailerCount     = 512
 +)
 +
 +func isRFC9110TokenChar(b byte) bool {
@@ -9299,18 +9393,200 @@ index 0000000..bd66061
 +	return true
 +}
 +
-+func validateRawHTTP1HeaderBlock(block []byte) (statusCode int, ok bool) {
++func isValidRFC9110QuotedString(s string, i int) (int, bool) {
++	if i >= len(s) || s[i] != '"' {
++		return i, false
++	}
++	i++
++	for i < len(s) {
++		b := s[i]
++		if b == '"' {
++			return i + 1, true
++		}
++		if b == '\\' {
++			i++
++			if i >= len(s) {
++				return i, false
++			}
++			qb := s[i]
++			if !(qb == '\t' || qb == ' ' || (qb >= 0x21 && qb <= 0x7E) || qb >= 0x80) {
++				return i, false
++			}
++			i++
++			continue
++		}
++		if b == '\t' || b == ' ' || b == 0x21 || (b >= 0x23 && b <= 0x5B) || (b >= 0x5D && b <= 0x7E) || b >= 0x80 {
++			i++
++			continue
++		}
++		return i, false
++	}
++	return i, false
++}
++
++// isValidEventStreamContentType validates RFC 9110 Content-Type for formal SSE responses:
++// exactly one Content-Type header whose media type is text/event-stream and whose optional
++// parameters strictly conform to RFC 9110 token=(token|quoted-string).
++func isValidEventStreamContentType(vals []string) bool {
++	if len(vals) != 1 {
++		return false
++	}
++	raw := vals[0]
++	mediaType := raw
++	params := ""
++	hasSemi := false
++	if semi := strings.IndexByte(raw, ';'); semi >= 0 {
++		mediaType = raw[:semi]
++		params = raw[semi+1:]
++		hasSemi = true
++	}
++	if !strings.EqualFold(strings.Trim(mediaType, " \t"), "text/event-stream") {
++		return false
++	}
++	if !hasSemi {
++		return true
++	}
++	i := 0
++	n := len(params)
++	for {
++		for i < n && (params[i] == ' ' || params[i] == '\t') {
++			i++
++		}
++		nameStart := i
++		for i < n && isRFC9110TokenChar(params[i]) {
++			i++
++		}
++		if i == nameStart || i >= n || params[i] != '=' {
++			return false
++		}
++		i++ // '='
++		if i >= n {
++			return false
++		}
++		if params[i] == '"' {
++			nextIdx, ok := isValidRFC9110QuotedString(params, i)
++			if !ok {
++				return false
++			}
++			i = nextIdx
++		} else {
++			valStart := i
++			for i < n && isRFC9110TokenChar(params[i]) {
++				i++
++			}
++			if i == valStart {
++				return false
++			}
++		}
++		for i < n && (params[i] == ' ' || params[i] == '\t') {
++			i++
++		}
++		if i == n {
++			return true
++		}
++		if params[i] != ';' {
++			return false
++		}
++		i++
++	}
++}
++
++// isValidChunkExt validates RFC 9112 §7.1.1 chunk-ext after the first ';' in linear time.
++func isValidChunkExt(raw []byte) bool {
++	n := len(raw)
++	i := 0
++	for {
++		for i < n && (raw[i] == ' ' || raw[i] == '\t') {
++			i++
++		}
++		nameStart := i
++		for i < n && isRFC9110TokenChar(raw[i]) {
++			i++
++		}
++		if i == nameStart {
++			return false
++		}
++		wsStart := i
++		for i < n && (raw[i] == ' ' || raw[i] == '\t') {
++			i++
++		}
++		if i == n {
++			return i == wsStart
++		}
++		if raw[i] == '=' {
++			i++
++			for i < n && (raw[i] == ' ' || raw[i] == '\t') {
++				i++
++			}
++			if i >= n {
++				return false
++			}
++			if raw[i] == '"' {
++				i++
++				closed := false
++				for i < n {
++					b := raw[i]
++					if b == '"' {
++						i++
++						closed = true
++						break
++					}
++					if b == '\\' {
++						i++
++						if i >= n {
++							return false
++						}
++						qb := raw[i]
++						if !(qb == '\t' || qb == ' ' || (qb >= 0x21 && qb <= 0x7E) || qb >= 0x80) {
++							return false
++						}
++						i++
++					} else if b == '\t' || b == ' ' || b == 0x21 || (b >= 0x23 && b <= 0x5B) || (b >= 0x5D && b <= 0x7E) || b >= 0x80 {
++						i++
++					} else {
++						return false
++					}
++				}
++				if !closed {
++					return false
++				}
++			} else {
++				valStart := i
++				for i < n && isRFC9110TokenChar(raw[i]) {
++					i++
++				}
++				if i == valStart {
++					return false
++				}
++			}
++			valWSStart := i
++			for i < n && (raw[i] == ' ' || raw[i] == '\t') {
++				i++
++			}
++			if i == n {
++				return i == valWSStart
++			}
++		}
++		if raw[i] == ';' {
++			i++
++			continue
++		}
++		return false
++	}
++}
++
++func validateRawHTTP1HeaderBlock(block []byte) (statusCode int, chunked bool, ok bool) {
 +	if len(block) == 0 || len(block) > maxRawHTTP1HeaderBytes {
-+		return 0, false
++		return 0, false, false
 +	}
 +	lines := bytes.Split(block, []byte("\r\n"))
 +	if len(lines) == 0 || len(lines)-1 > maxRawHTTP1HeaderCount {
-+		return 0, false
++		return 0, false, false
 +	}
-+	// Parse status line: HTTP/1.0 SP 3DIGIT [SP reason] | HTTP/1.1 SP 3DIGIT [SP reason]
++	// Parse status line: HTTP/1.0 SP 3DIGIT SP [reason] | HTTP/1.1 SP 3DIGIT SP [reason]
 +	statusLine := lines[0]
 +	if bytes.IndexByte(statusLine, '\r') >= 0 || bytes.IndexByte(statusLine, '\n') >= 0 {
-+		return 0, false
++		return 0, false, false
 +	}
 +	var isHTTP10 bool
 +	switch {
@@ -9319,17 +9595,17 @@ index 0000000..bd66061
 +	case bytes.HasPrefix(statusLine, []byte("HTTP/1.0 ")):
 +		isHTTP10 = true
 +	default:
-+		return 0, false
++		return 0, false, false
 +	}
 +	rest := statusLine[len("HTTP/1.1 "):]
 +	if len(rest) < 4 || rest[3] != ' ' {
-+		return 0, false
++		return 0, false, false
 +	}
 +	if rest[0] < '1' || rest[0] > '5' || rest[1] < '0' || rest[1] > '9' || rest[2] < '0' || rest[2] > '9' {
-+		return 0, false
++		return 0, false, false
 +	}
 +	if len(rest) > 4 && !isValidHTTP1HeaderValueBytes(rest[4:]) {
-+		return 0, false
++		return 0, false, false
 +	}
 +	code := int(rest[0]-'0')*100 + int(rest[1]-'0')*10 + int(rest[2]-'0')
 +
@@ -9337,21 +9613,21 @@ index 0000000..bd66061
 +	var clVals []string
 +	for _, line := range lines[1:] {
 +		if len(line) == 0 || bytes.IndexByte(line, '\r') >= 0 || bytes.IndexByte(line, '\n') >= 0 {
-+			return 0, false
++			return 0, false, false
 +		}
 +		colon := bytes.IndexByte(line, ':')
 +		if colon <= 0 {
-+			return 0, false
++			return 0, false, false
 +		}
 +		nameBytes := line[:colon]
 +		for _, b := range nameBytes {
 +			if !isRFC9110TokenChar(b) {
-+				return 0, false
++				return 0, false, false
 +			}
 +		}
 +		valBytes := line[colon+1:]
 +		if !isValidHTTP1HeaderValueBytes(valBytes) {
-+			return 0, false
++			return 0, false, false
 +		}
 +		lowerName := strings.ToLower(string(nameBytes))
 +		val := strings.Trim(string(valBytes), " \t")
@@ -9365,32 +9641,34 @@ index 0000000..bd66061
 +
 +	if code >= 100 && code < 200 {
 +		if isHTTP10 || code == 101 || len(teVals) > 0 || len(clVals) > 0 {
-+			return 0, false
++			return 0, false, false
 +		}
-+		return code, true
++		return code, false, true
 +	}
 +	if isHTTP10 && len(teVals) > 0 {
-+		return 0, false
++		return 0, false, false
 +	}
 +	// RFC 9112 §6.3: reject any response carrying BOTH Transfer-Encoding and Content-Length
 +	// BEFORE net/http can strip Content-Length and hide the framing conflict.
 +	if len(teVals) > 0 && len(clVals) > 0 {
-+		return 0, false
++		return 0, false, false
 +	}
++	isChunked := false
 +	if len(teVals) > 0 {
 +		var codings []string
 +		for _, raw := range teVals {
 +			for _, tok := range strings.Split(raw, ",") {
 +				c := strings.ToLower(strings.Trim(tok, " \t"))
 +				if c == "" {
-+					return 0, false
++					return 0, false, false
 +				}
 +				codings = append(codings, c)
 +			}
 +		}
 +		if len(codings) != 1 || codings[0] != "chunked" {
-+			return 0, false
++			return 0, false, false
 +		}
++		isChunked = true
 +	}
 +	if len(clVals) > 0 {
 +		var parsed int64 = -1
@@ -9399,43 +9677,59 @@ index 0000000..bd66061
 +			for _, part := range parts {
 +				tok := strings.Trim(part, " \t")
 +				if len(tok) == 0 {
-+					return 0, false
++					return 0, false, false
 +				}
 +				for i := 0; i < len(tok); i++ {
 +					if tok[i] < '0' || tok[i] > '9' {
-+						return 0, false
++						return 0, false, false
 +					}
 +				}
 +				v, err := strconv.ParseInt(tok, 10, 64)
 +				if err != nil || v < 0 {
-+					return 0, false
++					return 0, false, false
 +				}
 +				if parsed < 0 {
 +					parsed = v
 +				} else if parsed != v {
-+					return 0, false
++					return 0, false, false
 +				}
 +			}
 +		}
 +	}
-+	return code, true
++	return code, isChunked, true
 +}
++
++type chunkBodyState uint8
++
++const (
++	chunkStateSizeLine chunkBodyState = iota
++	chunkStateData
++	chunkStateDataCRLF
++	chunkStateTrailers
++	chunkStateDone
++)
 +
 +// strictHTTP1FramingConn wraps a single-response (DisableKeepAlives) HTTP/1.x connection.
 +// It buffers and strictly validates every complete response header block (rejecting bare LF,
 +// bare CR, truncated/unclosed headers at EOF, conflicting Transfer-Encoding + Content-Length,
 +// conflicting Content-Length, non-chunked TE, or invalid 1xx) BEFORE delivering any byte of
-+// that block to net/http. Once the final non-1xx header block is validated, body reads stream
-+// straight through without extra buffering.
++// that block to net/http. For Transfer-Encoding: chunked bodies, it also validates every chunk
++// size line, RFC 9112 §7.1.1 chunk-ext, chunk CRLF terminator, and trailer section incrementally
++// before forwarding bytes to net/http; non-chunked bodies stream straight through without extra buffering.
 +type strictHTTP1FramingConn struct {
 +	net.Conn
-+	rawBuf     []byte
-+	scanPos    int
-+	ready      []byte
-+	pendingErr error
-+	infoCount  int
-+	done       bool
-+	failed     error
++	rawBuf       []byte
++	scanPos      int
++	ready        []byte
++	pendingErr   error
++	infoCount    int
++	done         bool
++	chunked      bool
++	chunkState   chunkBodyState
++	chunkRem     uint64
++	trailerBytes int
++	trailerCount int
++	failed       error
 +}
 +
 +type strictHTTP1FramingTLSConn struct {
@@ -9504,7 +9798,7 @@ index 0000000..bd66061
 +				}
 +				if j >= 3 && c.rawBuf[j-3] == '\r' && c.rawBuf[j-2] == '\n' {
 +					block := c.rawBuf[:j-3]
-+					code, ok := validateRawHTTP1HeaderBlock(block)
++					code, isChunked, ok := validateRawHTTP1HeaderBlock(block)
 +					if !ok {
 +						return c.failClosed()
 +					}
@@ -9520,14 +9814,19 @@ index 0000000..bd66061
 +						foundBlock = true
 +						break
 +					}
-+					// Final non-1xx response header block passed strict validation:
-+					// append any already-read body bytes and switch to zero-buffer passthrough.
++					// Final non-1xx response header block passed strict validation.
++					c.done = true
++					c.scanPos = 0
++					if isChunked && code != 204 && code != 304 {
++						c.chunked = true
++						c.chunkState = chunkStateSizeLine
++						c.rawBuf = append(c.rawBuf[:0], rem...)
++						return c.processChunkedBody()
++					}
 +					if len(rem) > 0 {
 +						c.ready = append(c.ready, rem...)
 +					}
 +					c.rawBuf = nil
-+					c.scanPos = 0
-+					c.done = true
 +					return nil
 +				}
 +			}
@@ -9538,6 +9837,147 @@ index 0000000..bd66061
 +				return c.failClosed()
 +			}
 +			return nil
++		}
++	}
++	return nil
++}
++
++func parseChunkSizeLine(line []byte) (uint64, bool) {
++	if len(line) == 0 || bytes.IndexByte(line, '\r') >= 0 || bytes.IndexByte(line, '\n') >= 0 {
++		return 0, false
++	}
++	sizeHead := line
++	hasSemi := false
++	var extRaw []byte
++	if semi := bytes.IndexByte(line, ';'); semi >= 0 {
++		sizeHead = bytes.TrimRight(line[:semi], " \t")
++		extRaw = line[semi+1:]
++		hasSemi = true
++	}
++	if len(sizeHead) == 0 || len(sizeHead) > 16 {
++		return 0, false
++	}
++	for _, b := range sizeHead {
++		if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')) {
++			return 0, false
++		}
++	}
++	if hasSemi && !isValidChunkExt(extRaw) {
++		return 0, false
++	}
++	n, err := strconv.ParseUint(string(sizeHead), 16, 64)
++	if err != nil {
++		return 0, false
++	}
++	return n, true
++}
++
++func validateChunkTrailerLine(line []byte) bool {
++	if len(line) == 0 || bytes.IndexByte(line, '\r') >= 0 || bytes.IndexByte(line, '\n') >= 0 {
++		return false
++	}
++	colon := bytes.IndexByte(line, ':')
++	if colon <= 0 {
++		return false
++	}
++	nameBytes := line[:colon]
++	for _, b := range nameBytes {
++		if !isRFC9110TokenChar(b) {
++			return false
++		}
++	}
++	if !isValidHTTP1HeaderValueBytes(line[colon+1:]) {
++		return false
++	}
++	lower := strings.ToLower(string(nameBytes))
++	if lower == "transfer-encoding" || lower == "content-length" {
++		return false
++	}
++	return true
++}
++
++func (c *strictHTTP1FramingConn) processChunkedBody() error {
++	for len(c.rawBuf) > 0 {
++		switch c.chunkState {
++		case chunkStateSizeLine:
++			lf := bytes.IndexByte(c.rawBuf, '\n')
++			if lf < 0 {
++				if len(c.rawBuf) > maxRawChunkLineBytes {
++					return c.failClosed()
++				}
++				return nil
++			}
++			if lf == 0 || c.rawBuf[lf-1] != '\r' || lf+1 > maxRawChunkLineBytes {
++				return c.failClosed()
++			}
++			size, ok := parseChunkSizeLine(c.rawBuf[:lf-1])
++			if !ok {
++				return c.failClosed()
++			}
++			c.ready = append(c.ready, c.rawBuf[:lf+1]...)
++			c.rawBuf = append(c.rawBuf[:0], c.rawBuf[lf+1:]...)
++			if size == 0 {
++				c.chunkState = chunkStateTrailers
++			} else {
++				c.chunkRem = size
++				c.chunkState = chunkStateData
++			}
++		case chunkStateData:
++			take := uint64(len(c.rawBuf))
++			if take > c.chunkRem {
++				take = c.chunkRem
++			}
++			n := int(take)
++			c.ready = append(c.ready, c.rawBuf[:n]...)
++			c.rawBuf = append(c.rawBuf[:0], c.rawBuf[n:]...)
++			c.chunkRem -= take
++			if c.chunkRem == 0 {
++				c.chunkState = chunkStateDataCRLF
++			}
++		case chunkStateDataCRLF:
++			if len(c.rawBuf) < 2 {
++				if c.rawBuf[0] != '\r' {
++					return c.failClosed()
++				}
++				return nil
++			}
++			if c.rawBuf[0] != '\r' || c.rawBuf[1] != '\n' {
++				return c.failClosed()
++			}
++			c.ready = append(c.ready, '\r', '\n')
++			c.rawBuf = append(c.rawBuf[:0], c.rawBuf[2:]...)
++			c.chunkState = chunkStateSizeLine
++		case chunkStateTrailers:
++			lf := bytes.IndexByte(c.rawBuf, '\n')
++			if lf < 0 {
++				if c.trailerBytes+len(c.rawBuf) > maxRawTrailerBytes || len(c.rawBuf) > maxRawChunkLineBytes {
++					return c.failClosed()
++				}
++				return nil
++			}
++			if lf == 0 || c.rawBuf[lf-1] != '\r' || lf+1 > maxRawChunkLineBytes {
++				return c.failClosed()
++			}
++			c.trailerBytes += lf + 1
++			if c.trailerBytes > maxRawTrailerBytes {
++				return c.failClosed()
++			}
++			line := c.rawBuf[:lf-1]
++			if len(line) == 0 {
++				c.ready = append(c.ready, '\r', '\n')
++				c.rawBuf = append(c.rawBuf[:0], c.rawBuf[lf+1:]...)
++				c.chunkState = chunkStateDone
++				continue
++			}
++			c.trailerCount++
++			if c.trailerCount > maxRawTrailerCount || !validateChunkTrailerLine(line) {
++				return c.failClosed()
++			}
++			c.ready = append(c.ready, c.rawBuf[:lf+1]...)
++			c.rawBuf = append(c.rawBuf[:0], c.rawBuf[lf+1:]...)
++		case chunkStateDone:
++			// Trailing bytes after the final 0-chunk trailer CRLF are disallowed on a single-response conn.
++			return c.failClosed()
 +		}
 +	}
 +	return nil
@@ -9560,27 +10000,46 @@ index 0000000..bd66061
 +		c.pendingErr = nil
 +		return 0, err
 +	}
-+	if c.done {
++	if c.done && !c.chunked {
 +		return c.Conn.Read(p)
 +	}
 +	var tmp [4096]byte
-+	for !c.done {
++	for {
 +		n, err := c.Conn.Read(tmp[:])
 +		if n > 0 {
 +			c.rawBuf = append(c.rawBuf, tmp[:n]...)
-+			if ferr := c.processBufferedHeaders(); ferr != nil {
-+				return 0, ferr
-+			}
-+			// If a complete 1xx interim header block was validated with no unread bytes queued
-+			// behind it, flush it immediately so Expect: 100-continue does not deadlock while
-+			// still requiring the subsequent final response header block to validate before delivery.
-+			if !c.done && len(c.ready) > 0 && len(c.rawBuf) == 0 && err == nil {
-+				copied := copy(p, c.ready)
-+				c.ready = c.ready[copied:]
-+				if len(c.ready) == 0 {
-+					c.ready = nil
++			if !c.done {
++				if ferr := c.processBufferedHeaders(); ferr != nil {
++					return 0, ferr
 +				}
-+				return copied, nil
++			} else if c.chunked {
++				if ferr := c.processChunkedBody(); ferr != nil {
++					return 0, ferr
++				}
++			}
++			if len(c.ready) > 0 {
++				if !c.done && len(c.rawBuf) > 0 && err == nil {
++					// Still buffering headers after a 1xx block with more unread bytes queued.
++				} else {
++					if err != nil {
++						if !c.done {
++							if len(c.rawBuf) == 0 && c.infoCount == 0 {
++								return 0, c.failTransport()
++							}
++							return 0, c.failClosed()
++						}
++						if c.chunked && c.chunkState != chunkStateDone {
++							return 0, c.failClosed()
++						}
++						c.pendingErr = err
++					}
++					copied := copy(p, c.ready)
++					c.ready = c.ready[copied:]
++					if len(c.ready) == 0 {
++						c.ready = nil
++					}
++					return copied, nil
++				}
 +			}
 +		}
 +		if err != nil {
@@ -9591,30 +10050,18 @@ index 0000000..bd66061
 +				// EOF or read error after partial headers / 1xx before a valid final header block closed.
 +				return 0, c.failClosed()
 +			}
-+			c.pendingErr = err
-+			break
++			if c.chunked && c.chunkState != chunkStateDone {
++				return 0, c.failClosed()
++			}
++			return 0, err
 +		}
 +	}
-+	if len(c.ready) > 0 {
-+		copied := copy(p, c.ready)
-+		c.ready = c.ready[copied:]
-+		if len(c.ready) == 0 {
-+			c.ready = nil
-+		}
-+		return copied, nil
-+	}
-+	if c.pendingErr != nil {
-+		err := c.pendingErr
-+		c.pendingErr = nil
-+		return 0, err
-+	}
-+	return 0, c.failClosed()
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..ec4ecef 100644
+index e69de29..697ba21 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,15197 @@
+@@ -0,0 +1,15220 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -11192,6 +11639,7 @@ index e69de29..ec4ecef 100644
 +	hasValidAction  bool
 +	hasValidQueries bool
 +	hasValidResult  bool
++	hasError        bool
 +}
 +
 +type toolPayloadField struct {
@@ -11651,6 +12099,7 @@ index e69de29..ec4ecef 100644
 +	HasValidAction   bool                        `json:"-"`
 +	HasValidQueries  bool                        `json:"-"`
 +	HasValidResult   bool                        `json:"-"`
++	HasError         bool                        `json:"-"`
 +	CanonicalItemSHA string                      `json:"-"`
 +	Content          []responseOutputContentPart `json:"content"`
 +}
@@ -11659,7 +12108,10 @@ index e69de29..ec4ecef 100644
 +	return status == "" || status == "completed"
 +}
 +
-+func isValidCompletedToolItem(itemType, callID, name, serverLabel, containerID string, argsIsStr, inputIsStr, codeIsStr, hasValidAction, hasValidQueries, hasValidResult bool) bool {
++func isValidCompletedToolItem(itemType, callID, name, serverLabel, containerID string, argsIsStr, inputIsStr, codeIsStr, hasValidAction, hasValidQueries, hasValidResult, hasError bool) bool {
++	if hasError {
++		return false
++	}
 +	switch itemType {
 +	// Supported tool call item types (each strictly validated):
 +	case "function_call":
@@ -11985,7 +12437,7 @@ index e69de29..ec4ecef 100644
 +				return false
 +			}
 +		} else if !isCompletedNonMessageItemStatus(item.Status) ||
-+			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ContainerID, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
++			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ContainerID, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult, item.HasError) {
 +			return false
 +		}
 +	}
@@ -12240,7 +12692,7 @@ index e69de29..ec4ecef 100644
 +	}
 +	sseItemSchemaKeys = map[string]struct{}{
 +		"id": {}, "type": {}, "role": {}, "phase": {}, "status": {}, "content": {}, "response_id": {},
-+		"call_id": {}, "name": {}, "server_label": {}, "container_id": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {}, "result": {},
++		"call_id": {}, "name": {}, "server_label": {}, "container_id": {}, "arguments": {}, "input": {}, "code": {}, "action": {}, "queries": {}, "result": {}, "error": {},
 +	}
 +	sseContentPartSchemaKeys = map[string]struct{}{
 +		"type": {}, "text": {}, "refusal": {},
@@ -12711,6 +13163,7 @@ index e69de29..ec4ecef 100644
 +	if resStr, hasRes, okRes := exactOptionalStringPresent(fields, "result"); okRes && hasRes && strings.TrimSpace(resStr) != "" {
 +		hasValidResult = true
 +	}
++	hasItemError := hasResponseError(fields["error"])
 +	return toolItemMeta{
 +		callID:          callID,
 +		name:            name,
@@ -12719,6 +13172,7 @@ index e69de29..ec4ecef 100644
 +		hasValidAction:  hasValidAction,
 +		hasValidQueries: hasValidQueries,
 +		hasValidResult:  hasValidResult,
++		hasError:        hasItemError,
 +	}, args, input, code, true
 +}
 +
@@ -12833,6 +13287,7 @@ index e69de29..ec4ecef 100644
 +			HasValidAction:   meta.hasValidAction,
 +			HasValidQueries:  meta.hasValidQueries,
 +			HasValidResult:   meta.hasValidResult,
++			HasError:         meta.hasError,
 +			CanonicalItemSHA: canonItemSHA,
 +		}
 +		if typ == "message" {
@@ -15180,7 +15635,8 @@ index e69de29..ec4ecef 100644
 +					c.taintStreamAnomaly()
 +					return
 +				}
-+			} else if item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ContainerID, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult) {
++			} else if (item.HasError && !isIrreversibleFailureItemStatus(item.Status)) ||
++				(item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ContainerID, item.ArgsIsStr, item.InputIsStr, item.CodeIsStr, item.HasValidAction, item.HasValidQueries, item.HasValidResult, item.HasError)) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -15651,6 +16107,11 @@ index e69de29..ec4ecef 100644
 +			return
 +		}
 +		if addedKind == itemKindNonMessage || addedKind == itemKindUnknown {
++			if addedMeta.hasError && !isIrreversibleFailureItemStatus(itemStatus) {
++				c.mu.Unlock()
++				c.taintStreamAnomaly()
++				return
++			}
 +			if !t.recordToolMeta(canonKey, addedMeta) ||
 +				!t.recordToolPayloadInitial(canonKey, "arguments", addedArgs) ||
 +				!t.recordToolPayloadInitial(canonKey, "input", addedInput) ||
@@ -15755,7 +16216,7 @@ index e69de29..ec4ecef 100644
 +				return
 +			}
 +		} else if !isCompletedNonMessageItemStatus(itemStatus) ||
-+			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneMeta.containerID, doneArgs.isStr, doneInput.isStr, doneCode.isStr, doneMeta.hasValidAction, doneMeta.hasValidQueries, doneMeta.hasValidResult) {
++			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneMeta.containerID, doneArgs.isStr, doneInput.isStr, doneCode.isStr, doneMeta.hasValidAction, doneMeta.hasValidQueries, doneMeta.hasValidResult, doneMeta.hasError) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
@@ -23749,6 +24210,15 @@ index e69de29..ec4ecef 100644
 +		finish()
 +		return nil, ErrUnavailable
 +	}
++	if strict && resp.StatusCode == http.StatusOK && !isValidEventStreamContentType(resp.Header.Values("Content-Type")) {
++		// Formal Codex review streams must arrive as a single valid RFC 9110 text/event-stream response.
++		if resp.Body != nil {
++			_ = resp.Body.Close()
++		}
++		c.Taint()
++		finish()
++		return nil, ErrUnavailable
++	}
 +	isOK := resp.StatusCode == http.StatusOK
 +	c.mu.Lock()
 +	c.receipt.Routes[slot] = observed
@@ -24813,10 +25283,10 @@ index e69de29..ec4ecef 100644
 +	_ = syncPinnedDir(subRoot, job.directory)
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..194ef4f 100644
+index e69de29..de2d2fb 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,19013 @@
+@@ -0,0 +1,19251 @@
 +package preflightreceipt
 +
 +import (
@@ -24925,7 +25395,7 @@ index e69de29..194ef4f 100644
 +		if failure {
 +			return nil, errors.New("private auth_id secret URL/path")
 +		}
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(text))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(text))}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, "POST", "https://"+host+"/private/path", nil)
 +	resp, err := client.Do(req)
@@ -25162,7 +25632,7 @@ index e69de29..194ef4f 100644
 +		if req.URL.Hostname() == "api.anthropic.com" {
 +			return &http.Response{StatusCode: 307, Header: http.Header{"Location": []string{"https://unknown.invalid/private"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +		}
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.anthropic.com/private", nil)
 +	resp, err := client.Do(req)
@@ -25207,7 +25677,7 @@ index e69de29..194ef4f 100644
 +			client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +				b, _ := io.ReadAll(req.Body)
 +				seenBody = string(b)
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +			})})
 +			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com"+tc.path, strings.NewReader(tc.body))
 +			if tc.encoding != "" {
@@ -25280,7 +25750,7 @@ index e69de29..194ef4f 100644
 +			var seenBody []byte
 +			client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +				seenBody, _ = io.ReadAll(req.Body)
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +			})})
 +			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(tc.raw))
 +			req.Header.Set("Content-Encoding", tc.encoding)
@@ -25339,7 +25809,7 @@ index e69de29..194ef4f 100644
 +		}
 +		client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +			upstreamCalls++
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com"+path, bytes.NewReader(raw))
 +		if useZstd {
@@ -25405,7 +25875,7 @@ index e69de29..194ef4f 100644
 +	}
 +	clientC := httptransport.Decorate(ctxC, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		upstreamCalls++
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	reqC, _ := http.NewRequestWithContext(ctxC, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses/compact", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	if _, err := clientC.Do(reqC); !errors.Is(err, ErrUnavailable) {
@@ -25432,7 +25902,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clientP := httptransport.Decorate(ctxP, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	reqP, _ := http.NewRequestWithContext(ctxP, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	respP, err := clientP.Do(reqP)
@@ -25516,7 +25986,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clientM := httptransport.Decorate(ctxM, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	reqM, _ := http.NewRequestWithContext(ctxM, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-astra"}`))
 +	respM, err := clientM.Do(reqM)
@@ -25545,7 +26015,7 @@ index e69de29..194ef4f 100644
 +	before := upstreamCalls
 +	client2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		upstreamCalls++
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	if _, err := client2.Do(req2); !errors.Is(err, ErrUnavailable) {
@@ -25594,7 +26064,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	client1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	resp1, err := client1.Do(req1)
@@ -25765,7 +26235,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	client0 := httptransport.Decorate(ctx0, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req0, _ := http.NewRequestWithContext(ctx0, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	resp0, err := client0.Do(req0)
@@ -25836,7 +26306,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	resp, err := client.Do(req)
@@ -25903,7 +26373,7 @@ index e69de29..194ef4f 100644
 +	client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		return &http.Response{
 +			StatusCode: 200,
-+			Header:     make(http.Header),
++			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body:       io.NopCloser(strings.NewReader("")),
 +			TLS:        verifiedTLSState("example.com"),
 +		}, nil
@@ -26047,7 +26517,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		client := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +		resp, err := client.Do(req)
@@ -26174,7 +26644,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	rq2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	rp2, err := cl2.Do(rq2)
@@ -26204,7 +26674,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clT1 := httptransport.Decorate(ctxT1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	rqT1, _ := http.NewRequestWithContext(ctxT1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	rpT1, err := clT1.Do(rqT1)
@@ -26239,7 +26709,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +		resp, err := cl.Do(req)
@@ -26445,7 +26915,7 @@ index e69de29..194ef4f 100644
 +	}
 +	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		return &http.Response{
-+			StatusCode: 200, Header: make(http.Header),
++			StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body: &partialBodyReader{data: []byte(sse + "data: {\"type\":\"error\"}\n\n")},
 +		}, nil
 +	})})
@@ -26481,7 +26951,7 @@ index e69de29..194ef4f 100644
 +	}
 +	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		return &http.Response{
-+			StatusCode: 200, Header: make(http.Header),
++			StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body: &partialBodyReader{data: []byte(sse), errTail: io.ErrUnexpectedEOF},
 +		}, nil
 +	})})
@@ -26516,7 +26986,7 @@ index e69de29..194ef4f 100644
 +	}
 +	cl3 := httptransport.Decorate(ctx3, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +		return &http.Response{
-+			StatusCode: 200, Header: make(http.Header),
++			StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body: &partialBodyReader{data: []byte(sse)},
 +		}, nil
 +	})})
@@ -26566,7 +27036,7 @@ index e69de29..194ef4f 100644
 +				t.Fatal(err)
 +			}
 +			cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +			})})
 +			req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +			resp1, err := cl1.Do(req1)
@@ -26594,7 +27064,7 @@ index e69de29..194ef4f 100644
 +				t.Fatal(err)
 +			}
 +			cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +			})})
 +			req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +			resp2, err := cl2.Do(req2)
@@ -26637,7 +27107,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +		resp, err := cl.Do(req)
@@ -26911,7 +27381,7 @@ index e69de29..194ef4f 100644
 +		// Keep pipe open without closing (stalled upstream after terminal event).
 +	}()
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: pr}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: pr}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	resp, err := cl.Do(req)
@@ -26985,7 +27455,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	resp2, err := cl2.Do(req2)
@@ -27045,7 +27515,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl3 := httptransport.Decorate(ctx3, &http.Client{Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 +	})})
 +	req3, _ := http.NewRequestWithContext(ctx3, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
 +	resp3, err := cl3.Do(req3)
@@ -27233,7 +27703,7 @@ index e69de29..194ef4f 100644
 +			<-req2Finished // Force request 1 to respond AFTER request 2.
 +			return &http.Response{
 +				StatusCode: 200,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader("ok1")),
 +				TLS:        verifiedTLSState("api.kimi.com"),
 +			}, nil
@@ -27255,7 +27725,7 @@ index e69de29..194ef4f 100644
 +		cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: 200,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader("ok2")),
 +				TLS:        verifiedTLSState("api.anthropic.com"),
 +			}, nil
@@ -27310,7 +27780,7 @@ index e69de29..194ef4f 100644
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +		return &http.Response{
 +			StatusCode: 200,
-+			Header:     make(http.Header),
++			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body:       io.NopCloser(strings.NewReader(sse)),
 +			TLS:        verifiedTLSState("chatgpt.com"),
 +		}, nil
@@ -27380,7 +27850,7 @@ index e69de29..194ef4f 100644
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +		return &http.Response{
 +			StatusCode: 200,
-+			Header:     make(http.Header),
++			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body:       io.NopCloser(strings.NewReader(sse)),
 +			TLS:        verifiedTLSState("chatgpt.com"),
 +		}, nil
@@ -27502,7 +27972,7 @@ index e69de29..194ef4f 100644
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: 200,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader(sse)),
 +				TLS:        verifiedTLSState("chatgpt.com"),
 +			}, nil
@@ -27563,7 +28033,7 @@ index e69de29..194ef4f 100644
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: 200,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader(sse)),
 +				TLS:        verifiedTLSState("chatgpt.com"),
 +			}, nil
@@ -27634,7 +28104,7 @@ index e69de29..194ef4f 100644
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode: 200,
-+				Header:     make(http.Header),
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body:       io.NopCloser(strings.NewReader(sse)),
 +				TLS:        verifiedTLSState("chatgpt.com"),
 +			}, nil
@@ -27737,7 +28207,7 @@ index e69de29..194ef4f 100644
 +	}
 +	clS := httptransport.Decorate(ctxS, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +		return &http.Response{
-+			StatusCode: 200, Header: make(http.Header),
++			StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body: io.NopCloser(strings.NewReader("data: " + `{"type":"response.completed","response":{"id":"resp_psync","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n")),
 +			TLS:  verifiedTLSState("chatgpt.com"),
 +		}, nil
@@ -27867,7 +28337,7 @@ index e69de29..194ef4f 100644
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
-+				StatusCode: 200, Header: make(http.Header),
++				StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body: io.NopCloser(strings.NewReader(sse)),
 +				TLS:  verifiedTLSState("chatgpt.com"),
 +			}, nil
@@ -28015,7 +28485,7 @@ index e69de29..194ef4f 100644
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
 +			return &http.Response{
-+				StatusCode: 200, Header: make(http.Header),
++				StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +				Body: io.NopCloser(strings.NewReader(sse)),
 +				TLS:  verifiedTLSState("chatgpt.com"),
 +			}, nil
@@ -28136,7 +28606,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clD1 := httptransport.Decorate(ctxD1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqD1, _ := http.NewRequestWithContext(ctxD1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respD1, err := clD1.Do(reqD1)
@@ -28170,7 +28640,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clD2 := httptransport.Decorate(ctxD2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqD2, _ := http.NewRequestWithContext(ctxD2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respD2, err := clD2.Do(reqD2)
@@ -28313,7 +28783,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clR := httptransport.Decorate(ctxR, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqR, _ := http.NewRequestWithContext(ctxR, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respR, err := clR.Do(reqR)
@@ -28370,7 +28840,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clT2 := httptransport.Decorate(ctxT2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqT2, _ := http.NewRequestWithContext(ctxT2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respT2, err := clT2.Do(reqT2)
@@ -28447,7 +28917,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clP1 := httptransport.Decorate(ctxP1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqP1, _ := http.NewRequestWithContext(ctxP1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respP1, err := clP1.Do(reqP1)
@@ -28668,7 +29138,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clPC1 := httptransport.Decorate(ctxPC1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqPC1, _ := http.NewRequestWithContext(ctxPC1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respPC1, err := clPC1.Do(reqPC1)
@@ -28757,7 +29227,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		clB1 := httptransport.Decorate(ctxB1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		reqB1, _ := http.NewRequestWithContext(ctxB1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		respB1, err := clB1.Do(reqB1)
@@ -28926,7 +29396,7 @@ index e69de29..194ef4f 100644
 +			c.RequireStrictProducer()
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -29069,7 +29539,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clMC1 := httptransport.Decorate(ctxMC1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqMC1, _ := http.NewRequestWithContext(ctxMC1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respMC1, err := clMC1.Do(reqMC1)
@@ -29093,7 +29563,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clMC2 := httptransport.Decorate(ctxMC2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"wrong\"}}\n\n")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"wrong\"}}\n\n")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqMC2, _ := http.NewRequestWithContext(ctxMC2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respMC2, err := clMC2.Do(reqMC2)
@@ -29190,7 +29660,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clER1 := httptransport.Decorate(ctxER1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqER1, _ := http.NewRequestWithContext(ctxER1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respER1, err := clER1.Do(reqER1)
@@ -29214,7 +29684,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clER2 := httptransport.Decorate(ctxER2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqER2, _ := http.NewRequestWithContext(ctxER2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respER2, err := clER2.Do(reqER2)
@@ -29278,7 +29748,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clTE1 := httptransport.Decorate(ctxTE1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqTE1, _ := http.NewRequestWithContext(ctxTE1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respTE1, err := clTE1.Do(reqTE1)
@@ -29302,7 +29772,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clTE2 := httptransport.Decorate(ctxTE2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqTE2, _ := http.NewRequestWithContext(ctxTE2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respTE2, err := clTE2.Do(reqTE2)
@@ -29371,7 +29841,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clE1 := httptransport.Decorate(ctxE1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqE1, _ := http.NewRequestWithContext(ctxE1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respE1, err := clE1.Do(reqE1)
@@ -29395,7 +29865,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clE2 := httptransport.Decorate(ctxE2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(": keepalive\n\n")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(": keepalive\n\n")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqE2, _ := http.NewRequestWithContext(ctxE2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respE2, err := clE2.Do(reqE2)
@@ -30396,7 +30866,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp1, err := cl1.Do(req1)
@@ -30448,7 +30918,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -30543,7 +31013,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -30660,7 +31130,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp1, err := cl1.Do(req1)
@@ -30795,7 +31265,7 @@ index e69de29..194ef4f 100644
 +				t.Fatal(err)
 +			}
 +			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +			})})
 +			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +			resp, err := cl.Do(req)
@@ -30907,7 +31377,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clB := httptransport.Decorate(ctxB, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqB, _ := http.NewRequestWithContext(ctxB, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respB, err := clB.Do(reqB)
@@ -31050,7 +31520,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("Start(%s): %v", launch, err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -31331,7 +31801,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -31435,7 +31905,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -31517,7 +31987,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp1, err := cl1.Do(req1)
@@ -31551,7 +32021,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl2 := httptransport.Decorate(ctx2, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req2, _ := http.NewRequestWithContext(ctx2, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp2, err := cl2.Do(req2)
@@ -31882,7 +32352,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -31937,7 +32407,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -32410,7 +32880,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -32446,7 +32916,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -32616,7 +33086,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -32777,7 +33247,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -32851,7 +33321,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -32961,7 +33431,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33113,7 +33583,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33183,7 +33653,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33311,7 +33781,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33446,7 +33916,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33557,7 +34027,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33598,7 +34068,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33644,7 +34114,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -33773,7 +34243,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -33822,7 +34292,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("Start(%s): %v", launch, err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -33928,7 +34398,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -34014,7 +34484,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -34065,7 +34535,7 @@ index e69de29..194ef4f 100644
 +				t.Fatal(err)
 +			}
 +			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +			})})
 +			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +			resp, err := cl.Do(req)
@@ -34102,7 +34572,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -34222,7 +34692,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("Start(%s): %v", launch, err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -34444,7 +34914,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -34723,7 +35193,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -34765,7 +35235,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -34897,7 +35367,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -34933,7 +35403,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -34976,7 +35446,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -35241,7 +35711,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -35334,7 +35804,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -35554,7 +36024,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -35657,7 +36127,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -35734,7 +36204,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -35805,7 +36275,7 @@ index e69de29..194ef4f 100644
 +				t.Fatal(err)
 +			}
 +			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +			})})
 +			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +			resp, err := cl.Do(req)
@@ -35942,7 +36412,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -36110,7 +36580,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -36212,7 +36682,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -36296,7 +36766,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -36928,7 +37398,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -37138,7 +37608,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -37218,7 +37688,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -37472,7 +37942,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -37585,7 +38055,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -37818,7 +38288,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -38014,7 +38484,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -38098,7 +38568,7 @@ index e69de29..194ef4f 100644
 +			t.Fatal(err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -38187,7 +38657,7 @@ index e69de29..194ef4f 100644
 +			ProtoMajor:    1,
 +			ProtoMinor:    1,
 +			ContentLength: int64(len(sseOK)),
-+			Header:        make(http.Header),
++			Header:        http.Header{"Content-Type": []string{"text/event-stream"}},
 +			Body:          io.NopCloser(strings.NewReader(sseOK)),
 +			TLS:           verifiedTLSState("chatgpt.com"),
 +		}, nil
@@ -38383,7 +38853,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	cl1 := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp1, err := cl1.Do(req1)
@@ -38514,7 +38984,7 @@ index e69de29..194ef4f 100644
 +		t.Fatal(err)
 +	}
 +	clC := httptransport.Decorate(ctxC, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqC, _ := http.NewRequestWithContext(ctxC, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respC, err := clC.Do(reqC)
@@ -38605,7 +39075,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -38724,7 +39194,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -38829,7 +39299,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -38979,7 +39449,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -39038,7 +39508,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -39134,7 +39604,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -39199,7 +39669,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -39291,7 +39761,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -39392,7 +39862,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -39530,7 +40000,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -39614,7 +40084,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -39771,7 +40241,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -39872,7 +40342,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c3.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx3, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx3, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -40071,7 +40541,7 @@ index e69de29..194ef4f 100644
 +				t.Fatalf("c.Start: %v", err)
 +			}
 +			cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +			})})
 +			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +			resp, err := cl.Do(req)
@@ -40142,7 +40612,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -40299,7 +40769,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -40438,7 +40908,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c1.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -40645,7 +41115,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("cH.Start: %v", err)
 +	}
 +	clH := httptransport.Decorate(ctxH, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqH, _ := http.NewRequestWithContext(ctxH, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respH, err := clH.Do(reqH)
@@ -40699,7 +41169,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -40886,7 +41356,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("unrelated launchB cB.Start: %v", err)
 +	}
 +	clB := httptransport.Decorate(ctxB, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	reqB, _ := http.NewRequestWithContext(ctxB, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	respB, err := clB.Do(reqB)
@@ -40931,7 +41401,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -41043,7 +41513,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -41192,7 +41662,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start: %v", err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -41320,7 +41790,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -41418,7 +41888,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("c.Start(%s): %v", launch, err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -41512,7 +41982,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c1.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -41748,7 +42218,7 @@ index e69de29..194ef4f 100644
 +		t.Fatalf("c1.Start: %v", err)
 +	}
 +	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)
@@ -42827,7 +43297,7 @@ index e69de29..194ef4f 100644
 +			t.Fatalf("Start(%s): %v", launch, err)
 +		}
 +		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
 +		})})
 +		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +		resp, err := cl.Do(req)
@@ -43702,6 +44172,7 @@ index e69de29..194ef4f 100644
 +		Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode:    http.StatusOK,
++			Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +				ProtoMajor:    1,
 +				ProtoMinor:    1,
 +				ContentLength: 2,
@@ -43758,6 +44229,7 @@ index e69de29..194ef4f 100644
 +		Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
 +			return &http.Response{
 +				StatusCode:    http.StatusOK,
++			Header: http.Header{"Content-Type": []string{"text/event-stream"}},
 +				ProtoMajor:    1,
 +				ProtoMinor:    1,
 +				ContentLength: 2,
@@ -43830,6 +44302,242 @@ index e69de29..194ef4f 100644
 +		}
 +	}
 +}
++
++func TestR97MCPCallErrorContentTypeChunkExtAndItemSchemaAliases(t *testing.T) {
++	// 1. Astra P1 #1 (PR #2280 R97): mcp_call (and any tool item) carrying BOTH status="completed"
++	//    (or omitted completed status / non-failed streamed item) AND a non-null error field MUST
++	//    be rejected on both streamed output_item and final response.completed paths; explicit
++	//    "error": null remains valid.
++	runStrictSSECase := func(name string, sse string) SealStatus {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), "r97-"+name)
++		launch := "review-e9700001-2222-4333-8444-555555550001"
++		sess := "11111111-2222-4333-8444-555555559701"
++		ctx, col, err := BeginReview(context.Background(), root, launch, sess, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s BeginReview: %v", name, err)
++		}
++		ctx, ex, err := col.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s Start: %v", name, err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{
++			Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{
++					StatusCode:    http.StatusOK,
++					ProtoMajor:    1,
++					ProtoMinor:    1,
++					Header:        http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
++					ContentLength: int64(len(sse)),
++					Body:          io.NopCloser(strings.NewReader(sse)),
++					TLS:           verifiedTLSState("chatgpt.com"),
++				}, nil
++			}),
++		})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("%s Do: %v", name, err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(col, raw)
++		ex.End()
++		col.Complete(true)
++		col.HandlerDone(true)
++		return SealReview(root, launch, sess)
++	}
++
++	finalMsg := `{"id":"msg_1","type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}`
++	finalMsgStream := "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"status\":\"in_progress\",\"content\":[]}}\n\n" +
++		fmt.Sprintf("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":%s}\n\n", finalMsg)
++	// 1a. Completed mcp_call with error: null -> SealOK.
++	okMCPNullErr := fmt.Sprintf(
++		"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"in_progress\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":null}}\n\n"+
++			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":null}}\n\n"+
++			"%s"+
++			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mcp_ok\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":null},%s]}}\n\n",
++		finalMsgStream, finalMsg,
++	)
++	if st := runStrictSSECase("mcp_null_error_ok", okMCPNullErr); st != SealOK {
++		t.Fatalf("mcp_call with explicit error:null = %v, want SealOK", st)
++	}
++
++	// 1b. Completed mcp_call with non-null error (string, object, empty string) on completed-only & streamed paths -> SealRejected.
++	for _, tc := range []struct {
++		name string
++		sse  string
++	}{
++		{
++			"mcp_completed_string_err",
++			fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mcp_b1\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":\"tool failed\"},%s]}}\n\n", finalMsg),
++		},
++		{
++			"mcp_completed_obj_err",
++			fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mcp_b2\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":{\"message\":\"boom\"}},%s]}}\n\n", finalMsg),
++		},
++		{
++			"mcp_done_string_err",
++			fmt.Sprintf("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"in_progress\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":null}}\n\nevent: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":\"tool failed\"}}\n\n%sevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mcp_b3\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\"},%s]}}\n\n", finalMsgStream, finalMsg),
++		},
++		{
++			"mcp_added_in_progress_err",
++			fmt.Sprintf("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"in_progress\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"error\":\"early fail\"}}\n\nevent: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\"}}\n\n%sevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mcp_b4\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\"},%s]}}\n\n", finalMsgStream, finalMsg),
++		},
++		// Astra P2 #4: item protocol key case-aliases matching Python (_SSE_ITEM_SCHEMA_KEYS).
++		{
++			"alias_Container_ID",
++			fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_al1\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"ci_1\",\"type\":\"code_interpreter_call\",\"status\":\"completed\",\"Container_ID\":\"cntr_1\",\"code\":\"print(1)\"},%s]}}\n\n", finalMsg),
++		},
++		{
++			"alias_Result",
++			fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_al2\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"ig_1\",\"type\":\"image_generation_call\",\"status\":\"completed\",\"Result\":\"abc\"},%s]}}\n\n", finalMsg),
++		},
++		{
++			"alias_Error",
++			fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_al3\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[{\"id\":\"mcp_1\",\"type\":\"mcp_call\",\"status\":\"completed\",\"name\":\"read\",\"server_label\":\"repo\",\"arguments\":\"{}\",\"Error\":null},%s]}}\n\n", finalMsg),
++		},
++	} {
++		if st := runStrictSSECase(tc.name, tc.sse); st != SealRejected {
++			t.Fatalf("case %s = %v, want SealRejected", tc.name, st)
++		}
++	}
++
++	// 2. Astra P1 #2 (PR #2280 R97): Formal Codex 200 OK upstream response MUST carry a single
++	//    valid RFC 9110 Content-Type: text/event-stream; missing, conflicting, or non-SSE media
++	//    type MUST abort AND taint the launch so a later clean turn cannot seal.
++	cleanSSE := fmt.Sprintf("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ct_ok\",\"status\":\"completed\",\"model\":\"gpt-6.2-sol\",\"output\":[%s]}}\n\n", finalMsg)
++	for _, tc := range []struct {
++		name string
++		vals []string
++	}{
++		{"missing_ct", nil},
++		{"empty_ct", []string{""}},
++		{"text_plain", []string{"text/plain"}},
++		{"dup_ct_conflict", []string{"text/event-stream", "text/plain"}},
++		{"dup_ct_same", []string{"text/event-stream", "text/event-stream"}},
++		{"bad_param", []string{"text/event-stream; badparam"}},
++		{"unclosed_quote", []string{`text/event-stream; charset="utf-8`}},
++	} {
++		rootCT := filepath.Join(t.TempDir(), "r97-ct-"+tc.name)
++		launchCT := "review-e9700002-2222-4333-8444-555555550002"
++		sessCT := "11111111-2222-4333-8444-555555559702"
++		ctx1, col1, err := BeginReview(context.Background(), rootCT, launchCT, sessCT, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s BeginReview: %v", tc.name, err)
++		}
++		ctx1, ex1, err := col1.Start(ctx1, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("%s Start: %v", tc.name, err)
++		}
++		hdr := make(http.Header)
++		if tc.vals != nil {
++			hdr["Content-Type"] = tc.vals
++		}
++		cl1 := httptransport.Decorate(ctx1, &http.Client{
++			Transport: fakeTransport(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{
++					StatusCode:    http.StatusOK,
++					ProtoMajor:    1,
++					ProtoMinor:    1,
++					Header:        hdr,
++					ContentLength: int64(len(cleanSSE)),
++					Body:          io.NopCloser(strings.NewReader(cleanSSE)),
++					TLS:           verifiedTLSState("chatgpt.com"),
++				}, nil
++			}),
++		})
++		req1, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp1, err1 := cl1.Do(req1)
++		if resp1 != nil && resp1.Body != nil {
++			_ = resp1.Body.Close()
++		}
++		ex1.End()
++		col1.Complete(false)
++		col1.HandlerDone(false)
++		if !errors.Is(err1, ErrUnavailable) {
++			t.Fatalf("case %s bad Content-Type err = %v, want ErrUnavailable", tc.name, err1)
++		}
++		// Tainted launch MUST refuse a subsequent clean turn and return SealRejected.
++		if _, _, err2 := BeginReview(context.Background(), rootCT, launchCT, sessCT, "gpt-6.2-sol"); !errors.Is(err2, ErrUnavailable) {
++			t.Fatalf("case %s follow-up BeginReview after bad Content-Type = %v, want ErrUnavailable (tainted)", tc.name, err2)
++		}
++		if st := SealReview(rootCT, launchCT, sessCT); st != SealRejected {
++			t.Fatalf("case %s SealReview = %v, want SealRejected", tc.name, st)
++		}
++	}
++
++	// 3. Astra P2 #3 (PR #2280 R97): strictHTTP1FramingConn MUST strictly validate RFC 9112 §7.1.1
++	//    chunk-ext, chunk terminators, trailers, and trailing bytes on Transfer-Encoding: chunked
++	//    responses BEFORE bytes reach net/http's permissive chunked reader.
++	sendChunkedRaw := func(rawResp string) (string, error) {
++		ln, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer ln.Close()
++		go func() {
++			conn, aerr := ln.Accept()
++			if aerr != nil {
++				return
++			}
++			defer conn.Close()
++			buf := make([]byte, 2048)
++			_, _ = conn.Read(buf)
++			_, _ = io.WriteString(conn, rawResp)
++		}()
++		dialer := &net.Dialer{Timeout: 5 * time.Second}
++		tr := &http.Transport{
++			DisableKeepAlives: true,
++			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++				c, derr := dialer.DialContext(ctx, network, addr)
++				if derr != nil {
++					return nil, derr
++				}
++				return NewStrictHTTP1FramingConn(c), nil
++			},
++		}
++		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+ln.Addr().String()+"/v1/responses", nil)
++		resp, err := tr.RoundTrip(req)
++		if err != nil {
++			return "", err
++		}
++		defer resp.Body.Close()
++		b, rerr := io.ReadAll(resp.Body)
++		return string(b), rerr
++	}
++
++	for _, tc := range []struct {
++		name string
++		raw  string
++	}{
++		{"invalid_chunk_ext_space", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;bad ext\r\nhello\r\n0\r\n\r\n"},
++		{"invalid_chunk_ext_unclosed_quote", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;a=\"unclosed\r\nhello\r\n0\r\n\r\n"},
++		{"invalid_chunk_ext_trailing_semi", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;a=1;\r\nhello\r\n0\r\n\r\n"},
++		{"invalid_chunk_ext_empty_name", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;=1\r\nhello\r\n0\r\n\r\n"},
++		{"invalid_chunk_ext_on_zero_chunk", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0;bad ext\r\n\r\n"},
++		{"invalid_chunk_bare_lf", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\nhello\r\n0\r\n\r\n"},
++		{"invalid_chunk_trailer_cl", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nContent-Length: 5\r\n\r\n"},
++		{"invalid_chunk_trailing_smuggle", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\nEXTRA"},
++	} {
++		if body, err := sendChunkedRaw(tc.raw); !errors.Is(err, ErrHTTP1FramingViolation) {
++			t.Fatalf("chunked bad case %s = (%q, %v), want ErrHTTP1FramingViolation", tc.name, body, err)
++		}
++	}
++	for _, tc := range []struct {
++		name string
++		raw  string
++		want string
++	}{
++		{"valid_chunk_ext_quoted", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1;foo=\"a\\\"b\"\r\nhello\r\n0;done\r\nX-Trace: ok\r\n\r\n", "hello"},
++		{"valid_multi_chunk", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n3;k=v\r\n!!!\r\n0\r\n\r\n", "hi!!!"},
++	} {
++		body, err := sendChunkedRaw(tc.raw)
++		if err != nil || body != tc.want {
++			t.Fatalf("chunked good case %s = (%q, %v), want (%q, nil)", tc.name, body, err, tc.want)
++		}
++	}
++}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
 new file mode 100644
 index 0000000..fdf1f50
@@ -43880,7 +44588,7 @@ index 0000000..164e818
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_enabled_test.go b/sdk/preflightreceipt/seal_hook_enabled_test.go
 new file mode 100644
-index 0000000..7b08c30
+index 0000000..44b9210
 --- /dev/null
 +++ b/sdk/preflightreceipt/seal_hook_enabled_test.go
 @@ -0,0 +1,94 @@
@@ -43920,7 +44628,7 @@ index 0000000..7b08c30
 +		t.Fatal(err)
 +	}
 +	cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
-+		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
++		return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1, ContentLength: int64(len(sseOK)), Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sseOK)), TLS: verifiedTLSState("chatgpt.com")}, nil
 +	})})
 +	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
 +	resp, err := cl.Do(req)

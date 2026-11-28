@@ -2848,3 +2848,63 @@ def test_round_trip_requires_event_stream_content_type():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_item_schema_key_case_aliases_match_go_producer():
+    """Astra P2 #4 (R97): Python 的 _SSE_ITEM_SCHEMA_KEYS 必须包含 Go 生产端的 container_id/result/error，
+    对 Container_ID / Result / Error 等大小写变体在流式 item 与终态 output 中与 Go 保持一致拒绝。"""
+    current = {"body": b""}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = current["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)  # DevSkim: ignore DS162092 schema parity 回归
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_port}"  # DevSkim: ignore DS162092 schema parity 回归
+        for bad_item in (
+            '{"id":"ci_1","type":"code_interpreter_call","status":"completed","Container_ID":"cntr_1","code":"print(1)"}',
+            '{"id":"img_1","type":"image_generation_call","status":"completed","Result":"base64data"}',
+            '{"id":"mcp_1","type":"mcp_call","status":"completed","name":"read","server_label":"s","arguments":"{}","Error":null}',
+        ):
+            # 1. response.completed output 中的大小写变体必须拒绝。
+            current["body"] = (
+                f'event: response.completed\ndata: {{"type":"response.completed","response":{{"id":"resp_p1","status":"completed","output":[{bad_item},{{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"ok"}}]}}]}}}}\n\n'
+            ).encode()
+            res_comp = preflight._round_trip_http(url, KEY, OPUS, "preflight-alias-comp", preflight.Deadline(3))
+            assert res_comp["ok"] is False, (bad_item, res_comp)
+
+            # 2. response.output_item.done item 中的大小写变体同样必须拒绝。
+            current["body"] = (
+                f'event: response.output_item.done\ndata: {{"type":"response.output_item.done","output_index":0,"item":{bad_item}}}\n\n'
+                'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_p2","status":"completed","output":[]}}\n\n'
+            ).encode()
+            res_done = preflight._round_trip_http(url, KEY, OPUS, "preflight-alias-done", preflight.Deadline(3))
+            assert res_done["ok"] is False, (bad_item, res_done)
+
+        # 3. 规范小写字段（container_id / result / error）须正常通过。
+        current["body"] = (
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_p3","status":"completed","output":['
+            '{"id":"ci_1","type":"code_interpreter_call","status":"completed","container_id":"cntr_1","code":"print(1)"},'
+            '{"id":"img_1","type":"image_generation_call","status":"completed","result":"base64data"},'
+            '{"id":"mcp_1","type":"mcp_call","status":"completed","name":"read","server_label":"s","arguments":"{}","error":null},'
+            '{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]}}\n\n'
+        ).encode()
+        res_ok = preflight._round_trip_http(url, KEY, OPUS, "preflight-alias-ok", preflight.Deadline(3))
+        assert res_ok["ok"] is True, res_ok
+    finally:
+        srv.shutdown()
+        srv.server_close()
