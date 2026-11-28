@@ -3285,10 +3285,10 @@ index 85ae6d6..69a1d19 100644
 +}
 diff --git a/internal/runtime/executor/codex_executor_preflight_test.go b/internal/runtime/executor/codex_executor_preflight_test.go
 new file mode 100644
-index 0000000..d32702d
+index 0000000..cdddd73
 --- /dev/null
 +++ b/internal/runtime/executor/codex_executor_preflight_test.go
-@@ -0,0 +1,1557 @@
+@@ -0,0 +1,1613 @@
 +package executor
 +
 +import (
@@ -3301,6 +3301,7 @@ index 0000000..d32702d
 +	"crypto/x509/pkix"
 +	"encoding/json"
 +	"errors"
++	"fmt"
 +	"io"
 +	"math/big"
 +	"net/http"
@@ -4846,8 +4847,63 @@ index 0000000..d32702d
 +		}
 +	})
 +}
++
++func TestPreflightReceiptCodexCollectOutputItemDoneItemCountCap(t *testing.T) {
++	t.Run("indexed-and-unindexed-combined-cap-enforced", func(t *testing.T) {
++		byIndex := make(map[int64][]byte)
++		var fallback [][]byte
++		totalBytes := 0
++		const maxBytes = 8 * 1024 * 1024
++		const maxItems = 4
++
++		// Add 2 indexed items + 2 unindexed items (reaches cap=4).
++		for i := 0; i < 2; i++ {
++			ev := []byte(fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":{"id":"i%d","type":"reasoning"}}`, i, i))
++			if !collectCodexOutputItemDoneBounded(ev, byIndex, &fallback, &totalBytes, maxBytes, maxItems) {
++				t.Fatalf("indexed item %d unexpectedly rejected under cap", i)
++			}
++		}
++		for i := 0; i < 2; i++ {
++			ev := []byte(fmt.Sprintf(`{"type":"response.output_item.done","item":{"id":"u%d","type":"reasoning"}}`, i))
++			if !collectCodexOutputItemDoneBounded(ev, byIndex, &fallback, &totalBytes, maxBytes, maxItems) {
++				t.Fatalf("unindexed item %d unexpectedly rejected under cap", i)
++			}
++		}
++		// Overwriting an existing index must still be allowed when total count stays at cap.
++		overwrite := []byte(`{"type":"response.output_item.done","output_index":1,"item":{"id":"i1","type":"reasoning"}}`)
++		if !collectCodexOutputItemDoneBounded(overwrite, byIndex, &fallback, &totalBytes, maxBytes, maxItems) {
++			t.Fatalf("overwriting existing output_index unexpectedly rejected")
++		}
++		// Adding a 5th distinct tiny item MUST fail and clear buffers even well under 8 MiB byte cap.
++		fifth := []byte(`{"type":"response.output_item.done","output_index":2,"item":{"id":"i2"}}`)
++		if collectCodexOutputItemDoneBounded(fifth, byIndex, &fallback, &totalBytes, maxBytes, maxItems) {
++			t.Fatalf("5th distinct tiny output_item.done exceeded item count cap but was accepted")
++		}
++		if len(byIndex) != 0 || len(fallback) != 0 || totalBytes != 0 {
++			t.Fatalf("buffers not cleared after item count overflow: indexed=%d fallback=%d bytes=%d", len(byIndex), len(fallback), totalBytes)
++		}
++	})
++
++	t.Run("unindexed-overflow-rejected", func(t *testing.T) {
++		byIndex := make(map[int64][]byte)
++		var fallback [][]byte
++		totalBytes := 0
++		for i := 0; i < 3; i++ {
++			ev := []byte(`{"type":"response.output_item.done","item":{}}`)
++			if !collectCodexOutputItemDoneBounded(ev, byIndex, &fallback, &totalBytes, 8*1024*1024, 3) {
++				t.Fatalf("unindexed item %d rejected under cap", i)
++			}
++		}
++		if collectCodexOutputItemDoneBounded([]byte(`{"type":"response.output_item.done","item":{}}`), byIndex, &fallback, &totalBytes, 8*1024*1024, 3) {
++			t.Fatalf("4th unindexed tiny item exceeded cap=3 but was accepted")
++		}
++		if len(byIndex) != 0 || len(fallback) != 0 || totalBytes != 0 {
++			t.Fatalf("buffers not cleared after unindexed overflow")
++		}
++	})
++}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 6074124..b67006f 100644
+index 6074124..031ded8 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
 @@ -3,10 +3,12 @@ package executor
@@ -5195,7 +5251,7 @@ index 6074124..b67006f 100644
 +						eventType := ojson.GetBytesNoCopy(eventPayload, "type").String()
 +						switch eventType {
 +						case "response.output_item.done":
-+							if !collectCodexOutputItemDoneBounded(eventPayload, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes) {
++							if !collectCodexOutputItemDoneBounded(eventPayload, outputItemsByIndex, &outputItemsFallback, &outputItemsBytes, maxCodexCollectedOutputItemBytes, maxCodexCollectedOutputItems) {
 +								pendingStrictTerminal = nil
 +								pendingStrictBytes = 0
 +								failPostTerminal()
@@ -5503,10 +5559,10 @@ index 6074124..b67006f 100644
  		if emittedCount == 0 {
  			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 diff --git a/internal/runtime/executor/codex_executor_terminal.go b/internal/runtime/executor/codex_executor_terminal.go
-index 6e513dd..0ae5a3b 100644
+index 6e513dd..d1065a6 100644
 --- a/internal/runtime/executor/codex_executor_terminal.go
 +++ b/internal/runtime/executor/codex_executor_terminal.go
-@@ -46,6 +46,23 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
+@@ -46,6 +46,24 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
  	return true
  }
  
@@ -5526,15 +5582,16 @@ index 6e513dd..0ae5a3b 100644
 +}
 +
 +var maxCodexCollectedOutputItemBytes = 8 * 1024 * 1024 // 8 MiB cumulative budget per stream
++var maxCodexCollectedOutputItems = 2048                // hard cap on indexed + unindexed items per stream
 +
  // Streamed Codex responses may emit response.output_item.done events while leaving
  // response.completed.response.output empty. Keep the stream path aligned with the
  // already-patched non-stream path by reconstructing response.output from those items.
-@@ -62,6 +79,39 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
+@@ -62,6 +80,51 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
  	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
  }
  
-+func collectCodexOutputItemDoneBounded(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte, totalBytes *int, maxBytes int) bool {
++func collectCodexOutputItemDoneBounded(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte, totalBytes *int, maxBytes, maxItems int) bool {
 +	itemResult := ojson.GetBytesNoCopy(eventData, "item")
 +	if !itemResult.Exists() || itemResult.Type != ojson.JSON {
 +		return true
@@ -5543,8 +5600,14 @@ index 6e513dd..0ae5a3b 100644
 +	outputIndexResult := ojson.GetBytesNoCopy(eventData, "output_index")
 +	if outputIndexResult.Exists() {
 +		idx := outputIndexResult.Int()
-+		prevLen := len(outputItemsByIndex[idx])
-+		nextTotal := *totalBytes - prevLen + rawLen
++		prev, existed := outputItemsByIndex[idx]
++		if !existed && maxItems > 0 && len(outputItemsByIndex)+len(*outputItemsFallback) >= maxItems {
++			clear(outputItemsByIndex)
++			*outputItemsFallback = nil
++			*totalBytes = 0
++			return false
++		}
++		nextTotal := *totalBytes - len(prev) + rawLen
 +		if maxBytes > 0 && nextTotal > maxBytes {
 +			clear(outputItemsByIndex)
 +			*outputItemsFallback = nil
@@ -5554,6 +5617,12 @@ index 6e513dd..0ae5a3b 100644
 +		outputItemsByIndex[idx] = []byte(itemResult.Raw)
 +		*totalBytes = nextTotal
 +		return true
++	}
++	if maxItems > 0 && len(outputItemsByIndex)+len(*outputItemsFallback) >= maxItems {
++		clear(outputItemsByIndex)
++		*outputItemsFallback = nil
++		*totalBytes = 0
++		return false
 +	}
 +	nextTotal := *totalBytes + rawLen
 +	if maxBytes > 0 && nextTotal > maxBytes {
@@ -7915,10 +7984,10 @@ index 0000000..89341b4
 +	return errors.ErrUnsupported
 +}
 diff --git a/sdk/preflightreceipt/receipt.go b/sdk/preflightreceipt/receipt.go
-index e69de29..bbb67c0 100644
+index e69de29..8683516 100644
 --- a/sdk/preflightreceipt/receipt.go
 +++ b/sdk/preflightreceipt/receipt.go
-@@ -0,0 +1,13523 @@
+@@ -0,0 +1,13540 @@
 +// Package preflightreceipt produces bounded, body-independent admission evidence.
 +// It is enabled only for explicit preflight sessions and formal review launches, never for ordinary traffic.
 +package preflightreceipt
@@ -9828,7 +9897,7 @@ index e69de29..bbb67c0 100644
 +	return status == "" || status == "completed"
 +}
 +
-+func isValidCompletedToolItem(itemType, callID, name string, argsIsStr, inputIsStr bool) bool {
++func isValidCompletedToolItem(itemType, callID, name, serverLabel string, argsIsStr, inputIsStr bool) bool {
 +	switch itemType {
 +	case "function_call":
 +		return callID != "" && strings.TrimSpace(callID) == callID &&
@@ -9838,6 +9907,10 @@ index e69de29..bbb67c0 100644
 +		return callID != "" && strings.TrimSpace(callID) == callID &&
 +			name != "" && strings.TrimSpace(name) == name &&
 +			inputIsStr
++	case "mcp_call":
++		return name != "" && strings.TrimSpace(name) == name &&
++			serverLabel != "" && strings.TrimSpace(serverLabel) == serverLabel &&
++			argsIsStr
 +	default:
 +		return true
 +	}
@@ -10121,7 +10194,7 @@ index e69de29..bbb67c0 100644
 +				return false
 +			}
 +		} else if !isCompletedNonMessageItemStatus(item.Status) ||
-+			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ArgsIsStr, item.InputIsStr) {
++			!isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr) {
 +			return false
 +		}
 +	}
@@ -13179,7 +13252,7 @@ index e69de29..bbb67c0 100644
 +			}
 +			isAssistantMsg := item.Type == "message" && item.Role == "assistant"
 +			if !isValidOutputItemStatus(item.Type, item.Role, item.Status, true) ||
-+				(item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ArgsIsStr, item.InputIsStr)) {
++				(item.Status == "completed" && !isValidCompletedToolItem(item.Type, item.CallID, item.Name, item.ServerLabel, item.ArgsIsStr, item.InputIsStr)) {
 +				c.mu.Unlock()
 +				c.taintStreamAnomaly()
 +				return
@@ -13754,7 +13827,7 @@ index e69de29..bbb67c0 100644
 +				return
 +			}
 +		} else if !isCompletedNonMessageItemStatus(itemStatus) ||
-+			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneArgs.isStr, doneInput.isStr) {
++			!isValidCompletedToolItem(itemType, doneMeta.callID, doneMeta.name, doneMeta.serverLabel, doneArgs.isStr, doneInput.isStr) {
 +			c.taintStreamAnomaly()
 +			return
 +		}
@@ -15838,7 +15911,10 @@ index e69de29..bbb67c0 100644
 +		started = entry.started
 +		entry.mu.Unlock()
 +	}
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		failAndReleaseReservationEntryNonBlocking(entry, turnSeq, pendingTainted, pendingFailedSeq, false)
++		return nil, ErrUnavailable
++	}
 +	if needAsyncFailPersist {
 +		enqueueExistingReviewTurnFailureLocked(entry, pendingFailedSeq, false)
 +	}
@@ -16080,6 +16156,7 @@ index e69de29..bbb67c0 100644
 +	if !reviewMu.LockContext(ctx) {
 +		return nil, ErrUnavailable
 +	}
++	drainCancelFailLocked()
 +	for {
 +		if reclaimingKeys[key] {
 +			reviewMu.Unlock()
@@ -16123,7 +16200,9 @@ index e69de29..bbb67c0 100644
 +		if !rootDropDrained || !checkDiskTaintRootHealthyContext(ctx, root) {
 +			return nil, ErrUnavailable
 +		}
-+		reviewMu.Lock()
++		if !reviewMu.LockContext(ctx) {
++			return nil, ErrUnavailable
++		}
 +		if len(pendingDiskTaintKeys) == 0 && diskTaintWorkers == 0 {
 +			delete(diskTaintDroppedRoots, root)
 +		} else {
@@ -16190,7 +16269,11 @@ index e69de29..bbb67c0 100644
 +	if err != nil {
 +		return nil, ErrUnavailable
 +	}
-+	reviewMu.Lock()
++	if !reviewMu.LockContext(ctx) {
++		failAndReleaseReservationEntryNonBlocking(entry, turnSeq, false, 0, false)
++		return nil, ErrUnavailable
++	}
++	drainCancelFailLocked()
 +	pendingTainted = pendingReviewLaunches[key] != nil && pendingReviewLaunches[key].tainted
 +	var pendingFailedSeq uint64
 +	if st := pendingReviewLaunches[key]; st != nil {
@@ -17516,7 +17599,10 @@ index e69de29..bbb67c0 100644
 +		return ctx, nil, ErrUnavailable
 +	}
 +	if turnSeq == 0 {
-+		reviewMu.Lock()
++		if !reviewMu.LockContext(ctx) {
++			failAndReleaseReservationEntryNonBlocking(entry, 0, false, 0, holdsSlot)
++			return ctx, nil, ErrUnavailable
++		}
 +		reviewTurnSeqGen++
 +		turnSeq = reviewTurnSeqGen
 +		reviewMu.Unlock()
@@ -21443,10 +21529,10 @@ index e69de29..bbb67c0 100644
 +	return nil
 +}
 diff --git a/sdk/preflightreceipt/receipt_test.go b/sdk/preflightreceipt/receipt_test.go
-index e69de29..3bc5d7a 100644
+index e69de29..1fcc1af 100644
 --- a/sdk/preflightreceipt/receipt_test.go
 +++ b/sdk/preflightreceipt/receipt_test.go
-@@ -0,0 +1,16777 @@
+@@ -0,0 +1,16963 @@
 +package preflightreceipt
 +
 +import (
@@ -24151,8 +24237,8 @@ index e69de29..3bc5d7a 100644
 +		return SealReview(root, launch, session)
 +	}
 +
-+	// 1. Capitalized keys inside response.metadata and output[].arguments MUST be allowed.
-+	validWithMetadata := "data: " + `{"type":"response.completed","response":{"id":"resp_meta_ok","status":"completed","model":"gpt-6.2-sol","metadata":{"ID":"user-1","Model":"custom","Text":"note","a":1,"A":2},"output":[{"type":"mcp_call","call_id":"call_meta_1","name":"tool","arguments":{"ID":"arg-1","Model":"m","Status":"s"}},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass","annotations":[{"Text":"cite","ID":"c1"}]}]}]}}` + "\n\n"
++	// 1. Capitalized keys inside response.metadata, non-protocol nested payloads, and annotations MUST be allowed.
++	validWithMetadata := "data: " + `{"type":"response.completed","response":{"id":"resp_meta_ok","status":"completed","model":"gpt-6.2-sol","metadata":{"ID":"user-1","Model":"custom","Text":"note","a":1,"A":2},"output":[{"type":"mcp_call","server_label":"srv","name":"tool","arguments":"{}","extra_payload":{"ID":"arg-1","Model":"m","Status":"s"}},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pass","annotations":[{"Text":"cite","ID":"c1"}]}]}]}}` + "\n\n"
 +	if st := runSSE(t, "review-b6666666-2222-4333-8444-555555555501", "019d0000-0000-7000-8000-666666666601", validWithMetadata); st != SealOK {
 +		t.Fatalf("valid SSE with capitalized metadata/arguments keys = %v, want SealOK", st)
 +	}
@@ -38222,6 +38308,192 @@ index e69de29..3bc5d7a 100644
 +	reviewMu.Unlock()
 +	if gotPending != 0 || gotInFlight != 0 {
 +		t.Fatalf("slots leaked after barrier drain: pendingReviewTotal=%d inFlight=%d", gotPending, gotInFlight)
++	}
++}
++
++func TestReviewCompletedMCPCallRequiresNameServerLabelAndStringArguments(t *testing.T) {
++	runSSE := func(t *testing.T, launch, session, body string) SealStatus {
++		t.Helper()
++		root := filepath.Join(t.TempDir(), "receipts")
++		ctx, c, err := BeginReview(context.Background(), root, launch, session, "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("BeginReview: %v", err)
++		}
++		ctx, lease, err := c.Start(ctx, "codex", "gpt-6.2-sol")
++		if err != nil {
++			t.Fatalf("Start: %v", err)
++		}
++		cl := httptransport.Decorate(ctx, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++			return &http.Response{
++				StatusCode: 200,
++				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
++				Body:       io.NopCloser(strings.NewReader(body)),
++				TLS:        verifiedTLSState("chatgpt.com"),
++			}, nil
++		})})
++		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++		resp, err := cl.Do(req)
++		if err != nil {
++			t.Fatalf("Do: %v", err)
++		}
++		raw, _ := io.ReadAll(resp.Body)
++		_ = resp.Body.Close()
++		observeStrictSSEForTest(c, raw)
++		lease.End()
++		c.Complete(true)
++		c.HandlerDone(true)
++		return SealReview(root, launch, session)
++	}
++
++	// Complete mcp_call (non-empty trimmed name & server_label + JSON string arguments) must pass.
++	validSSE := "data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"mcp_ok","type":"mcp_call","status":"completed","server_label":"git","name":"diff","arguments":"{}"}}` + "\n\n" +
++		"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_mcp_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++		"data: " + `{"type":"response.completed","response":{"id":"resp_mcp_ok","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_ok","type":"mcp_call","status":"completed","server_label":"git","name":"diff","arguments":"{}"},{"id":"msg_mcp_ok","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n"
++	if st := runSSE(t, "review-f1f1f1f1-1111-4111-8111-111111111100", "f1f1f1f1-1111-4111-8111-111111111100", validSSE); st != SealOK {
++		t.Fatalf("valid completed mcp_call = %v, want SealOK", st)
++	}
++
++	badCases := []struct {
++		name string
++		sse  string
++	}{
++		{
++			name: "snapshot-missing-name",
++			sse:  "data: " + `{"type":"response.completed","response":{"id":"resp_mcp_b1","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_1","type":"mcp_call","status":"completed","server_label":"git","arguments":"{}"},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name: "snapshot-missing-server-label",
++			sse:  "data: " + `{"type":"response.completed","response":{"id":"resp_mcp_b2","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_2","type":"mcp_call","status":"completed","name":"diff","arguments":"{}"},{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name: "snapshot-missing-arguments",
++			sse:  "data: " + `{"type":"response.completed","response":{"id":"resp_mcp_b3","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_3","type":"mcp_call","status":"completed","server_label":"git","name":"diff"},{"id":"msg_3","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name: "snapshot-nonstring-arguments",
++			sse:  "data: " + `{"type":"response.completed","response":{"id":"resp_mcp_b4","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_4","type":"mcp_call","status":"completed","server_label":"git","name":"diff","arguments":{"k":"v"}},{"id":"msg_4","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name: "snapshot-padded-server-label",
++			sse:  "data: " + `{"type":"response.completed","response":{"id":"resp_mcp_b5","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_5","type":"mcp_call","status":"completed","server_label":" git ","name":"diff","arguments":"{}"},{"id":"msg_5","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++		{
++			name: "done-event-missing-server-label",
++			sse: "data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"mcp_6","type":"mcp_call","status":"completed","name":"diff","arguments":"{}"}}` + "\n\n" +
++				"data: " + `{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_6","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}}` + "\n\n" +
++				"data: " + `{"type":"response.completed","response":{"id":"resp_mcp_b6","status":"completed","model":"gpt-6.2-sol","output":[{"id":"mcp_6","type":"mcp_call","status":"completed","name":"diff","arguments":"{}"},{"id":"msg_6","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}` + "\n\n",
++		},
++	}
++	for i, tc := range badCases {
++		launch := fmt.Sprintf("review-f1f1f1f1-1111-4111-8111-1111111111%02d", i+1)
++		sess := fmt.Sprintf("f1f1f1f1-1111-4111-8111-1111111111%02d", i+1)
++		if st := runSSE(t, launch, sess, tc.sse); st != SealRejected {
++			t.Fatalf("%s: SealReview = %v, want SealRejected", tc.name, st)
++		}
++	}
++}
++
++func TestReserveTailContextCancelReleasesReservationUnderContendedReviewMu(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "receipts")
++	launch := "review-f2f2f2f2-2222-4222-8222-222222222222"
++	sess := "f2f2f2f2-2222-4222-8222-222222222222"
++
++	// Complete 1 valid turn so launch exists in reviewLedger and is otherwise sealable.
++	pend1, err := BeginPendingReviewContext(context.Background(), root, launch)
++	if err != nil {
++		t.Fatalf("BeginPendingReviewContext: %v", err)
++	}
++	res1, err := ReserveReviewContext(context.Background(), root, launch, pend1.TurnSeq())
++	if err != nil {
++		pend1.Release()
++		t.Fatalf("ReserveReviewContext: %v", err)
++	}
++	res1.AttachPendingSlot(pend1)
++	pend1.Release()
++	ctx1, c1, err := BeginReviewReserved(context.Background(), res1, sess, "gpt-6.2-sol")
++	if err != nil {
++		res1.Release()
++		t.Fatalf("BeginReviewReserved: %v", err)
++	}
++	ctx1, e1, err := c1.Start(ctx1, "codex", "gpt-6.2-sol")
++	if err != nil {
++		t.Fatalf("c1.Start: %v", err)
++	}
++	cl := httptransport.Decorate(ctx1, &http.Client{Transport: fakeTransport(func(r *http.Request) (*http.Response, error) {
++		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), TLS: verifiedTLSState("chatgpt.com")}, nil
++	})})
++	req, _ := http.NewRequestWithContext(ctx1, http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6.2-sol","stream":true}`))
++	resp, err := cl.Do(req)
++	if err != nil {
++		t.Fatalf("cl.Do: %v", err)
++	}
++	_, _ = io.Copy(io.Discard, resp.Body)
++	_ = resp.Body.Close()
++	observeStrictSSEForTest(c1, []byte("event: response.completed\ndata: "+`{"type":"response.completed","response":{"id":"resp_tail_cancel_1","status":"completed","model":"gpt-6.2-sol","output":[{"type":"message","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":"VERDICT: PASS"}]}]}}`+"\n\n"))
++	e1.End()
++	c1.Complete(true)
++	c1.HandlerDone(true)
++
++	// Simulate finishReserveReviewEntryContext reaching its tail reviewMu.LockContext(ctx) while
++	// reviewMu is contended and ctx cancels (inFlight already incremented).
++	key := filepath.Clean(root) + "\x00" + launch
++	reviewMu.Lock()
++	entry := reviewLedger[key]
++	if entry == nil {
++		reviewMu.Unlock()
++		t.Fatalf("expected reviewLedger entry")
++	}
++	entry.inFlight++
++	nextSeq := reviewTurnSeqGen + 10
++	// Keep reviewMu HELD while invoking finishReserveReviewEntryContext with a short deadline ctx!
++	ctxTail, cancelTail := context.WithTimeout(context.Background(), 40*time.Millisecond)
++	defer cancelTail()
++	done := make(chan error, 1)
++	go func() {
++		_, ferr := finishReserveReviewEntryContext(ctxTail, root, key, entry, nextSeq, false, 0)
++		done <- ferr
++	}()
++	select {
++	case ferr := <-done:
++		if !errors.Is(ferr, ErrUnavailable) {
++			reviewMu.Unlock()
++			t.Fatalf("finishReserveReviewEntryContext tail cancel = %v, want ErrUnavailable", ferr)
++		}
++	case <-time.After(500 * time.Millisecond):
++		reviewMu.Unlock()
++		t.Fatalf("finishReserveReviewEntryContext tail blocked on contended reviewMu past deadline")
++	}
++	reviewMu.Unlock()
++
++	defer func() {
++		deadline := time.Now().Add(2 * time.Second)
++		for {
++			reviewMu.Lock()
++			drainCancelFailLocked()
++			busy := failurePersistWorkers + finalizeWorkers
++			reviewMu.Unlock()
++			cancelFailMu.Lock()
++			cfBusy := cancelFailRunning
++			cancelFailMu.Unlock()
++			if busy == 0 && !cfBusy {
++				break
++			}
++			if time.Now().After(deadline) {
++				break
++			}
++			time.Sleep(5 * time.Millisecond)
++		}
++	}()
++
++	// SealReviewWithDigest MUST drain the barrier, release entry.inFlight, and reject (not SealInFlight or SealOK).
++	if st, dig := SealReviewWithDigest(root, launch, sess); st != SealRejected || dig != "" {
++		t.Fatalf("SealReviewWithDigest after tail cancel = (%v, %q), want (SealRejected, \"\")", st, dig)
++	}
++	reviewMu.Lock()
++	gotInFlight := entry.inFlight
++	reviewMu.Unlock()
++	if gotInFlight != 0 {
++		t.Fatalf("entry.inFlight after tail cancel drain = %d, want 0", gotInFlight)
 +	}
 +}
 diff --git a/sdk/preflightreceipt/seal_hook_disabled.go b/sdk/preflightreceipt/seal_hook_disabled.go
