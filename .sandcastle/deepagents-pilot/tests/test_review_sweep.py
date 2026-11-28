@@ -23,9 +23,9 @@ lane = _external_review.lane  # 复用真实审查 lane 与 PR 替身
 
 class FakeGitHub:
     """GitHub 端口替身：PR、检查、文件与写操作记录。"""
-    def __init__(self, lane, *, required=("deepagents/review", "ci-ok"), review_app=5664795):
+    def __init__(self, lane, *, required=module.MERGE_CHECKS, review_app=5664795):
         self.lane = lane
-        self.required = {name: {"deepagents/review": review_app, "ci-ok": 15368}[name] for name in required}
+        self.required = {name: {"deepagents/review": review_app, "ci-ok": 15368, "DevSkim": 15368}[name] for name in required}
         self.extra_pulls = []
         self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
         self.committed = {}  # head → committer 时间；没登记的 head 都按建替身时刚推送（同一时刻，按号码排）
@@ -50,7 +50,7 @@ class FakeGitHub:
         return state
 
     def checks(self, number, state, bindings, review_runs):
-        assert bindings.get("DevSkim") == 15368 and all(bindings.get(k) == v for k, v in self.required.items())
+        assert all(bindings.get(k) == v for k, v in self.required.items())
         return module.MergeChecks(dict(self.checks_by_head.get(state["head"], {})), 1)
 
     def server_second(self):
@@ -569,12 +569,12 @@ BOUND = [{"context": "deepagents/review", "app_id": 5486877}, {"context": "ci-ok
     ({"strict": True, "checks": BOUND}, {"deepagents/review": 5486877, "ci-ok": 15368}),
     ({"strict": False, "checks": BOUND}, {}),
     ({"strict": True, "checks": [BOUND[0], {"context": "ci-ok", "app_id": None}, {"context": "x", "app_id": -1}]},
-     {"deepagents/review": 5486877}),
+     {"deepagents/review": 5486877, "ci-ok": None, "x": None}),
 ])
 @pytest.mark.parametrize("enforce_admins", [True, False])
-def test_required_checks_count_only_strict_enforced_and_app_bound(monkeypatch, rules, trusted, enforce_admins):
+def test_required_checks_preserve_unbound_contexts_under_strict_enforced_protection(monkeypatch, rules, trusted, enforce_admins):
     """I2：strict 关着一个都不算（会拿旧 base 上的结论合入）；enforce_admins 关着也不算（管理员身份可绕过保护）；
-    没绑定来源 app 的检查谁都能伪造，不算。"""
+    未绑定来源 App 的配置须可见，不得与缺项混淆。"""
     cli = module.GhCli("Newchanlun/NewChanlun")
     protection = {"required_status_checks": rules, "enforce_admins": {"enabled": enforce_admins}}
     calls = []
@@ -1285,24 +1285,31 @@ def test_withdraw_timeout_stops_the_fail_closed_sweep(lane):
 
 
 def test_actions_done_before_a_timeout_are_still_logged(lane, capsys):
-    """opus 中：本轮先合入了一个 PR、后一个写超时，已合入那条照样写日志，写超时那条记 write-unknown。"""
+    """本轮只合一笔；此后的纵深撤销仍执行，撤销超时不抹掉先前成功。"""
+    github = FakeGitHub(lane)
+    _more_pulls(lane, github, [1805])
+    green(github, f"{1805:040d}")
+    github.files[1810] = [{"filename": "credentials.json"}]
+    github.states[1810] = {"auto_merge": True}
+    github.disable_auto_merge = _hang
+    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
+    assert ServeRound(sweep, clock=Clock())() is None
+    lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
+    assert github.calls == [("merge", 1805, f"{1805:040d}")]
+    assert any(a.get("pr") == 1805 and a["action"] == "merged" for a in lines)
+    assert any(a.get("pr") == 1810 and a["action"] == "write-unknown" for a in lines)
+    assert lines[-1]["action"] == "round-skipped"
+
+
+def test_first_merge_defers_other_merges_built_on_the_old_main(lane):
     github = FakeGitHub(lane)
     _more_pulls(lane, github, [1805])
     green(github, f"{1805:040d}")
     green(github, lane.gateway.pr["head"]["sha"])
-    merges = []
-    def merge(number, head):
-        if number == 1810:
-            _hang()
-        merges.append(number)
-    github.merge = merge
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
-    assert ServeRound(sweep, clock=Clock())() is None
-    lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
-    assert merges == [1805]
-    assert any(a.get("pr") == 1805 and a["action"] == "merged" for a in lines)
-    assert any(a.get("pr") == 1810 and a["action"] == "write-unknown" for a in lines)
-    assert lines[-1]["action"] == "round-skipped"
+    actions = sweep.tick()
+    assert acts(actions, 1805)[-1] == "merged" and acts(actions)[-1] == "base-recheck-next-round"
+    assert github.calls == [("merge", 1805, f"{1805:040d}")]
 
 
 # ---- 第四轮独审（7b477efd，run 52055f21）：分类绑定到读到的 head；fetch 失败明说读不到 ----
@@ -1459,11 +1466,21 @@ REVIEW_BOT = "newchanlun-review-gate[bot]"
 RUN_UUID = "83f12ba9-f3c5-49ec-845e-da074743c13e"
 STAMP = "2026-11-28T13:03:48Z"
 SECOND = int(datetime.fromisoformat(STAMP.replace("Z", "+00:00")).timestamp())
-CHECK_STATE = {"head": HEAD, "base": BASE, "repository_id": 1150335160, "pr_id": 5426953656}
+CHECK_STATE = {"head": HEAD, "base": BASE, "head_ref": "decision/feature",
+               "repository_id": 1150335160, "pr_id": 5426953656}
 
 
-def _gh_fake(statuses, checks, *, apps=None, second=SECOND + 1, puts=None):
+def _pull_original(state, number=1810):
+    return {"number": number, "id": state["pr_id"], "state": state.get("state", "open"),
+            "draft": state.get("draft", False), "mergeable_state": state.get("mergeable_state", "clean"),
+            "changed_files": state.get("changed_files", 1), "auto_merge": {} if state.get("auto_merge") else None,
+            "base": {"ref": state.get("base_ref", "main"), "sha": state["base"], "repo": {"id": state["repository_id"]}},
+            "head": {"ref": state["head_ref"], "sha": state["head"], "repo": {"id": state["repository_id"]}}}
+
+
+def _gh_fake(statuses, checks, *, apps=None, second=SECOND + 1, puts=None, state=CHECK_STATE, overrides=None):
     apps = apps if apps is not None else {"newchanlun-review-gate": 5664795}
+    overrides = {} if overrides is None else overrides
 
     def gh(*args):
         path = next(a for a in args if a.startswith(("repos/", "apps/")))
@@ -1473,15 +1490,37 @@ def _gh_fake(statuses, checks, *, apps=None, second=SECOND + 1, puts=None):
             assert puts is not None and args[1:3] == ("-X", "PUT")
             puts.append((path, *args[4:]))
             return "{}"
-        if "/statuses" in path:
+        if path.endswith("/pulls/1810"):
+            return json.dumps(_pull_original(state))
+        if "/statuses?" in path:
             return "\n".join(json.dumps(x) for x in statuses)
-        if "/check-runs?" in path:
-            assert "filter=all" in path
-            return "\n".join(json.dumps(check) for check, _, _ in checks)
+        verb = path.partition("?")[0]
+        if verb in overrides:
+            assert "--paginate" in args and "--slurp" in args
+            return json.dumps(overrides[verb])
+        if "/pulls?" in path:
+            assert "--paginate" in args and "--slurp" in args and "state=all" in path and "%2F" in path
+            return json.dumps([[_pull_original(state)]])
+        if "/events?" in path:
+            assert "--paginate" in args and "--slurp" in args
+            return "[[]]"
+        if "/actions/workflows/" in path:
+            assert "--paginate" in args and "--slurp" in args and f"head_sha={state['head']}" in path
+            workflow = path.split("/workflows/")[1].partition("/")[0]
+            runs = [run for _, run, _ in checks if (run.get("path") or "").endswith(f"/{workflow}")]
+            # 每页只放一个 run，防止读取器只看第一页。
+            return json.dumps([{"workflow_runs": [run], "total_count": len(runs)} for run in runs]
+                              or [{"workflow_runs": [], "total_count": 0}])
         if "/actions/runs/" in path:
-            return json.dumps(next(run for _, run, _ in checks if str(run["id"]) == path.rsplit("/", 1)[1]))
-        if "/actions/jobs/" in path:
-            return json.dumps(next(job for _, _, job in checks if str(job["id"]) == path.rsplit("/", 1)[1]))
+            suffix = path.split("/actions/runs/")[1].partition("?")[0]
+            run_id, _, rest = suffix.partition("/")
+            if rest:
+                assert "--paginate" in args and "--slurp" in args
+                jobs = [job for _, run, job in checks if str(run["id"]) == run_id]
+                return json.dumps([{"jobs": jobs, "total_count": len(jobs)}])
+            return json.dumps(next(run for _, run, _ in checks if str(run["id"]) == run_id))
+        if "/check-runs/" in path:
+            return json.dumps(next(check for check, _, _ in checks if str(check["id"]) == path.rsplit("/", 1)[1]))
         assert path == f"repos/{REPOSITORY}" and "--include" in args and "Cache-Control: no-cache" in args
         date = formatdate(second() if callable(second) else second, usegmt=True)
         return f"HTTP/2.0 200 OK\nDate: {date}\n\n{{}}"
@@ -1502,17 +1541,22 @@ def _review_record(state=CHECK_STATE, number=1810):
 
 
 def _run(name, state=CHECK_STATE, *, check_id=140984998172, conclusion="success", app_id=15368,
-         path=None, event="pull_request", number=1810, pr_id=None):
-    run_id = check_id + 1000
+         path=None, event="pull_request", number=1810, pr_id=None, run_id=None, attempt=1,
+         status="completed", created_at=STAMP):
+    run_id = run_id if run_id is not None else check_id + 1000
     head = state["head"]
-    check = {"name": name, "status": "completed", "conclusion": conclusion, "app": {"id": app_id},
-             "id": check_id, "head_sha": head, "check_suite": {"id": run_id + 1000}, "completed_at": STAMP,
-             "details_url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}/job/{check_id}"}
-    run = {"id": run_id, "run_attempt": 1, "event": event, "path": path or module.WORKFLOWS.get(name),
-           "repository": {"id": state["repository_id"]}, "head_sha": head, "check_suite_id": run_id + 1000,
-           "pull_requests": [{"id": pr_id or state["pr_id"], "number": number, "base": {"ref": "main"},
-                              "head": {"sha": head}}]}
-    job = {"id": check_id, "name": name, "head_sha": head, "run_attempt": 1, "run_id": run_id,
+    check = {"name": name, "status": status, "conclusion": conclusion, "app": {"id": app_id},
+             "id": check_id, "head_sha": head, "check_suite": {"id": run_id + 1000}, "completed_at": STAMP}
+    pull = _pull_original(state, number)
+    if pr_id is not None:
+        pull["id"] = pr_id
+    run = {"id": run_id, "run_attempt": attempt, "event": event, "path": path or module.WORKFLOWS.get(name),
+           "repository": {"id": state["repository_id"]}, "head_repository": pull["head"]["repo"],
+           "head_branch": state["head_ref"], "head_sha": head, "check_suite_id": run_id + 1000,
+           "workflow_id": 236472671 if name == "ci-ok" else 242058253, "created_at": created_at,
+           "status": status, "conclusion": conclusion, "pull_requests": [pull]}
+    job = {"id": check_id, "name": name, "head_sha": head, "run_attempt": attempt, "run_id": run_id,
+           "status": status, "conclusion": conclusion, "completed_at": STAMP,
            "check_run_url": f"https://api.github.com/repos/{REPOSITORY}/check-runs/{check_id}"}
     return check, run, job
 
@@ -1522,10 +1566,13 @@ def test_spoofed_same_name_checks_from_other_apps_do_not_count(monkeypatch):
     status, record = _review_record()
     spoof = {**status, "context": "DeepAgents/Review", "id": status["id"] + 1,
              "creator": {"login": "someone-else[bot]", "type": "Bot"}}
-    checks = [_run("deepagents/review"), _run("DevSkim", app_id=99999), _run("ci-ok", check_id=3)]
+    checks = [_run("deepagents/review", check_id=1), _run("DevSkim", check_id=2, app_id=99999), _run("ci-ok", check_id=3)]
     monkeypatch.setattr(cli, "_gh", _gh_fake([status, spoof], checks))
-    actual = cli.checks(1810, CHECK_STATE, BINDINGS, [record])
-    assert actual == module.MergeChecks({"deepagents/review": "pending", "ci-ok": "success"})
+    with pytest.raises(module.EvidenceInsufficient, match="绑定 App"):
+        cli.checks(1810, CHECK_STATE, BINDINGS, [record])
+    checks.pop(1)
+    assert cli.checks(1810, CHECK_STATE, BINDINGS, [record]) == module.MergeChecks(
+        {"deepagents/review": "pending", "ci-ok": "success", "DevSkim": "pending"})
 
 
 def test_genuine_checks_from_bound_apps_count_even_with_unrelated_same_name_runs(monkeypatch):
@@ -1554,18 +1601,18 @@ def transition(lane, monkeypatch):
     """真实 sweep 决策与 GhCli 检查、时钟、PUT；仅 HTTP、PR 队列及宿主原件用离线夹具。"""
     sweep, _, github = make(lane, run=False, auto_merge=True)
     cli = module.GhCli(REPOSITORY)
-    state = {**github.pr(1810), "repository_id": CHECK_STATE["repository_id"], "pr_id": CHECK_STATE["pr_id"]}
+    state = {**CHECK_STATE, **github.pr(1810), "head_ref": lane.gateway.pr["head"]["ref"]}
     status, record = _review_record(state)
     checks = [_run("ci-ok", state, check_id=1), _run("DevSkim", state, check_id=2)]
     server = [SECOND + 1]
     puts = []
     records = [record]
-    monkeypatch.setattr(github, "pr", lambda number: dict(state))
+    monkeypatch.setattr(github, "pr", cli.pr)
     monkeypatch.setattr(github, "checks", cli.checks)
     monkeypatch.setattr(github, "server_second", cli.server_second)
     monkeypatch.setattr(github, "merge", cli.merge)
     monkeypatch.setattr(lane, "status", lambda number: records)
-    monkeypatch.setattr(cli, "_gh", _gh_fake([status], checks, second=lambda: server[0], puts=puts))
+    monkeypatch.setattr(cli, "_gh", _gh_fake([status], checks, second=lambda: server[0], puts=puts, state=state))
     return sweep, state, status, records, checks, server, puts
 
 
@@ -1596,7 +1643,8 @@ def test_transition_requires_the_exact_review_original(transition, defect):
             "wrong-head": ("head_sha", "f" * 40),
         }[defect]
         record["target"][key] = record["outcome"]["target"][key] = value
-    assert acts(sweep.tick())[-1] == "waiting" and puts == []
+    expected = "needs-reconcile" if defect in ("wrong-full-base-same-prefix", "wrong-base-prefix") else "waiting"
+    assert acts(sweep.tick())[-1] == expected and puts == []
 
 
 @pytest.mark.parametrize("defect", ["workflow_dispatch", "workflow", "pr", "head", "attempt", "unproven-pr", "ambiguous-pr"])
@@ -1640,13 +1688,175 @@ def test_transition_only_puts_after_strictly_later_github_second(transition, lat
     assert puts == [(f"repos/{REPOSITORY}/pulls/1810/merge", "-f", f"sha={state['head']}", "-f", "merge_method=merge")]
 
 
+@pytest.mark.parametrize("newer_status,expected", [("completed", "failure"), ("in_progress", "pending")])
+def test_latest_workflow_run_wins_over_larger_check_id_from_old_rerun(transition, newer_status, expected):
+    sweep, state, _, _, checks, _, puts = transition
+    checks[0] = _run("ci-ok", state, check_id=100, run_id=4, attempt=2, created_at="2026-11-28T13:03:40Z")
+    checks.append(_run("ci-ok", state, check_id=50, run_id=5, status=newer_status, conclusion="failure"))
+    result = next(a for a in sweep.tick() if a["action"] == "waiting")
+    assert result["checks"]["ci-ok"] == expected and puts == []
+
+
+def test_older_in_progress_applicable_run_also_blocks_latest_green(transition):
+    sweep, state, _, _, checks, _, puts = transition
+    checks.append(_run("ci-ok", state, check_id=50, run_id=5, status="queued", conclusion=None,
+                       created_at="2026-11-28T13:03:40Z"))
+    result = next(a for a in sweep.tick() if a["action"] == "waiting")
+    assert result["checks"]["ci-ok"] == "pending" and puts == []
+
+
+@pytest.mark.parametrize("event", sorted(module.BASE_CHANGE_EVENTS))
+@pytest.mark.parametrize("retargeted_pr", [1810, 1811])
+def test_target_change_on_any_pr_of_same_ref_refuses_actions_evidence(transition, monkeypatch, event, retargeted_pr):
+    sweep, state, status, _, checks, _, puts = transition
+    closed = _pull_original({**state, "pr_id": 999, "state": "closed"}, number=1811)
+    prefix = f"repos/{REPOSITORY}"
+    overrides = {f"{prefix}/pulls": [[_pull_original(state)], [closed]],
+                 f"{prefix}/issues/{retargeted_pr}/events": [[{"id": 2, "event": "closed"}], [{"id": 1, "event": event}]]}
+    monkeypatch.setattr(sweep.github.checks.__self__, "_gh", _gh_fake(
+        [status], checks, state=state, puts=puts, overrides=overrides))
+    result = next(a for a in sweep.tick() if a["action"] == "evidence-insufficient")
+    assert f"#{retargeted_pr} 有改投" in result["reason"] and puts == []
+
+
+def test_same_ref_closed_pr_targeting_other_base_refuses_actions_evidence(transition, monkeypatch):
+    sweep, state, status, _, checks, _, puts = transition
+    other = _pull_original({**state, "pr_id": 999, "state": "closed", "base_ref": "other"}, number=1811)
+    monkeypatch.setattr(sweep.github.checks.__self__, "_gh", _gh_fake(
+        [status], checks, state=state, puts=puts,
+        overrides={f"repos/{REPOSITORY}/pulls": [[_pull_original(state)], [other]]}))
+    result = next(a for a in sweep.tick() if a["action"] == "evidence-insufficient")
+    assert "#1811 未始终指向本仓 main" in result["reason"] and puts == []
+
+
+@pytest.mark.parametrize("kind", ["run-count", "event-page", "jobs-count"])
+def test_incomplete_github_inventory_fails_closed(transition, monkeypatch, kind):
+    sweep, state, status, _, checks, _, puts = transition
+    check, run, job = checks[0]
+    prefix = f"repos/{REPOSITORY}"
+    overrides = {
+        "run-count": {f"{prefix}/actions/workflows/ci.yml/runs": [{"total_count": 2, "workflow_runs": [run]}]},
+        "event-page": {f"{prefix}/issues/1810/events": [[{"id": 7, "event": "closed"}], None]},
+        "jobs-count": {f"{prefix}/actions/runs/{run['id']}/attempts/1/jobs": [{"total_count": 2, "jobs": [job]}]},
+    }
+    monkeypatch.setattr(sweep.github.checks.__self__, "_gh", _gh_fake(
+        [status], checks, state=state, puts=puts, overrides=overrides[kind]))
+    assert acts(sweep.tick())[-1] == "evidence-insufficient" and puts == []
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("DevSkim-red", "merge-recheck-failed"), ("base-ref", "merge-recheck-failed"), ("base-sha", "base-moved"),
+    ("head-sha", "head-moved"), ("draft", "merge-recheck-failed"), ("closed", "merge-recheck-failed"),
+    ("files", "merge-recheck-failed"), ("DevSkim-unbound", "auto-merge-unsafe"),
+    ("native-auto-merge", "native-auto-merge-enabled"), ("same-second", "merge-recheck-failed"),
+])
+def test_transition_rechecks_only_after_green_plan_before_put(transition, monkeypatch, change, expected):
+    sweep, state, _, _, checks, server, puts = transition
+    first_read = sweep.github.server_second
+    calls = []
+
+    def second():
+        now = first_read()
+        calls.append(now)
+        if len(calls) == 1:
+            if change == "DevSkim-red":
+                checks[1][0]["conclusion"] = "failure"
+            elif change == "base-ref":
+                state["base_ref"] = "other"
+            elif change == "base-sha":
+                state["base"] = "e" * 40
+            elif change == "head-sha":
+                state["head"] = "e" * 40
+            elif change == "draft":
+                state["draft"] = True
+            elif change == "closed":
+                state["state"] = "closed"
+            elif change == "files":
+                sweep.github.files[1810] = [{"filename": "credentials.json"}]
+            elif change == "DevSkim-unbound":
+                sweep.github.required["DevSkim"] = None
+            elif change == "native-auto-merge":
+                monkeypatch.setattr(sweep.github, "allow_auto_merge", lambda: True)
+            else:
+                server[0] = SECOND
+        return now
+
+    monkeypatch.setattr(sweep.github, "server_second", second)
+    result = sweep.tick()[-1]
+    assert calls[0] == SECOND + 1 and result["action"] == expected and puts == []
+    if change == "DevSkim-red":
+        assert result["checks"]["DevSkim"] == "failure"
+
+
+@pytest.mark.parametrize("binding", [None, -1, 999, "missing"])
+def test_devskim_must_be_configured_and_bound_in_real_protection_response(transition, monkeypatch, binding):
+    sweep, _, _, _, _, _, puts = transition
+    cli = sweep.github.checks.__self__
+    checks = [{"context": name, "app_id": app} for name, app in BINDINGS.items() if name != "DevSkim"]
+    if binding != "missing":
+        checks.append({"context": "DevSkim", "app_id": binding})
+    gh = cli._gh
+    protection = {"required_status_checks": {"strict": True, "checks": checks}, "enforce_admins": {"enabled": True}}
+    monkeypatch.setattr(cli, "_gh", lambda *args: json.dumps(protection) if args[-1].endswith("/main/protection")
+                        else gh(*args))
+    monkeypatch.setattr(sweep.github, "required_checks", cli.required_checks)
+    assert ("DevSkim" in cli.required_checks()) == (binding != "missing")
+    assert any(a["action"] == "auto-merge-unsafe" for a in sweep.tick()) and puts == []
+
+
+def test_closed_pr_shared_head_supersedes_publication_and_frees_queue(lane, monkeypatch):
+    lane.review_pr(1810)
+    other = {**lane.gateway.pr, "number": 1811}
+    get_pr = lane.gateway.get_pr
+    monkeypatch.setattr(lane.gateway, "get_pr", lambda n: copy.deepcopy(other) if n == 1811 else get_pr(n))
+    lane.review_pr(1811)
+    other["state"] = "closed"
+    sweep, host, github = make(lane, run=False, auto_merge=True)
+    _more_pulls(lane, github, [1812])
+    github.states[1812] = {"mergeable_state": "behind"}
+    cli = module.GhCli(REPOSITORY)
+    statuses = [{**row, "creator": {"login": REVIEW_BOT, "type": "Bot"},
+                 "created_at": STAMP, "updated_at": STAMP} for row in lane.gateway.rows]
+    monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, []))
+    monkeypatch.setattr(github, "checks", lambda n, state, bindings, runs: cli.checks(
+        n, {**CHECK_STATE, **state}, bindings, runs))
+    actions = sweep.tick()
+    blocked = next(a for a in actions if a["pr"] == 1810 and a["action"] == "needs-reconcile")
+    assert blocked["review"] == "superseded" and blocked["queue_head"] is False
+    assert host.spawned == [] and github.calls == [("update", 1812, f"{1812:040d}")]
+    pending = {**statuses[0], "state": "pending", "id": statuses[0]["id"] + 1,
+               "description": statuses[0]["description"].replace("success", "pending")}
+    state = {**CHECK_STATE, **github.pr(1810)}
+    assert cli._review_check(1810, state, statuses + [pending], lane.status(1810)) == ("pending", None)
+    lane.review_pr(1810, 2)  # 操作员为本 PR/base/head 重新正式审查；不重用 PR B 的发布。
+    current = {**lane.gateway.rows[0], "creator": {"login": REVIEW_BOT, "type": "Bot"},
+               "created_at": STAMP, "updated_at": STAMP}
+    assert cli._review_check(1810, state, statuses + [current], lane.status(1810)) == ("success", SECOND)
+
+
+def test_merge_recheck_read_timeout_does_not_claim_put_was_sent(transition, monkeypatch):
+    sweep, _, _, _, _, _, puts = transition
+    read = sweep.github.required_checks
+    calls = []
+
+    def protection():
+        if calls:
+            _hang()
+        calls.append(True)
+        return read()
+
+    monkeypatch.setattr(sweep.github, "required_checks", protection)
+    with pytest.raises(SourceUnreadable) as caught:
+        sweep.tick()
+    assert "merge-recheck-failed" in acts(caught.value.actions) and puts == []
+    assert "write-unknown" not in acts(caught.value.actions)
+
+
 @pytest.mark.parametrize("missing", ["enforce_admins", "strict", "binding"])
 def test_protection_mismatch_never_merges(lane, missing):
     """分支保护任一不符（enforce_admins 关、strict 关、必需检查没绑定 app）：失败关闭，不合入、不追平。"""
     github = FakeGitHub(lane, required=() if missing != "binding" else ("deepagents/review",))
     green(github, lane.gateway.pr["head"]["sha"])
-    if missing != "binding":
-        github.checks = lambda number, state, bindings, runs: module.MergeChecks(github.checks_by_head[state["head"]], 1)
     sweep, _, _ = make(lane, github=github, auto_merge=True)
     actions = sweep.tick()
     assert any(a["action"] == "auto-merge-unsafe" for a in actions) and github.calls == []
