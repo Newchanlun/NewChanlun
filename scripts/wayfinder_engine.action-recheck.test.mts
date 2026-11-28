@@ -1,3 +1,4 @@
+import { isolateMaintenance } from "./wayfinder-maintenance-fixture.mts";
 /** #1915：完整单轮入口的扫描后变更反例；假 gh 拒绝所有未声明调用，不接触 GitHub。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,6 +24,7 @@ function run(path: "split" | "queue", change: "body" | "block" | "closed" | "val
       if (file.endsWith("deepagents-cutover.mts")) text = text.replace('"/Volumes/AgentStorage/deepagents-exec"', JSON.stringify(state));
       writeFileSync(join(root, file), text);
     }
+    isolateMaintenance(root);
     const body = path === "split" ? '<!-- wayfinder-split -->\n```json\n' + JSON.stringify({ tickets: [
       { id: "S1", title: "first", summary: "reviewed A", depends_on: [], rulings: [8] },
       { id: "S2", title: "second", summary: "reviewed A", depends_on: ["S1"], rulings: [8] },
@@ -71,7 +73,7 @@ else if(args[0]==='api' && cmd.includes('--method POST')) {write();out({});}
 else if(args[0]==='api' && /issues\\/(101|102)$/.test(args[1])) {console.log(+args[1].split('/').pop());}
 else {console.error('Unexpected fake gh: '+cmd);process.exit(71);}
 `, { mode: 0o755 });
-    const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--once"], {
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--maintenance-root", join(root, "maintenance"), "--once"], {
       cwd: root, env: { ...process.env, PATH: `${root}:${process.env.PATH}`, WFE_FIXTURE: root,
         GH_REPO: "fixture/repo", WAYFINDER_ORCHESTRATOR: "fixture", WAYFINDER_GH_MAX_ATTEMPTS: "1" },
       encoding: "utf8", timeout: 20_000,

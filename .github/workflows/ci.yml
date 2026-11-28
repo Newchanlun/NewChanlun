@@ -1437,6 +1437,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # maintenance_local 的真实 TS→Python 入口测试需要根 package-lock 中的 tsx。
+      # 本 job 的默认 cwd 是 pilot；与 sandcastle-ts 复用相同安装方式，显式回根目录。
+      - name: Install frozen TS bridge dependencies
+        working-directory: .
+        run: npm ci --ignore-scripts
       - name: Install frozen pilot, Studio, and check tools
         run: python -m pip install -r requirements-ci.txt
       - name: Check dependency compatibility

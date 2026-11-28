@@ -1,3 +1,4 @@
+import { isolateMaintenance } from "./wayfinder-maintenance-fixture.mts";
 /**
  * #1915 N1/N2：旧票迁移与 Deep Agents 持有生命周期。真实切流模块与票级 flock 原样运行，
  * 只把执行器状态根与排空根指到临时目录；假 gh 拒绝所有未声明调用，不接触 GitHub。
@@ -62,6 +63,7 @@ function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "inten
     if (file === "scripts/wayfinder_engine.mts" && process.env.HOLD_ENGINE_SOURCE) text = readFileSync(process.env.HOLD_ENGINE_SOURCE, "utf8");
     writeFileSync(join(root, file), text);
   }
+  isolateMaintenance(root);
   if (o.claim) writeFileSync(join(exec, "claims", "101.json"), JSON.stringify(o.claim));
   const body = "<!-- wayfinder-split -->\n```json\n" + JSON.stringify({ tickets: [
     { id: "S1", title: "first", depends_on: [] }, { id: "S2", title: "second", depends_on: ["S1"] }] }) + "\n```";
@@ -70,7 +72,7 @@ function fixture(issues: Issue[], o: { claim?: Claim; onScan?: "mirror" | "inten
   writeFileSync(join(root, "state.json"), JSON.stringify({ body, pass, issues, links: issues.map(i => i.number),
     edges: [[102, 101]], writes: [], onScan: o.onScan ?? null }));
   writeFileSync(join(root, "gh"), FAKE_GH, { mode: 0o755 });
-  const run = () => spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--once"], {
+  const run = () => spawnSync(process.execPath, ["--experimental-strip-types", "scripts/wayfinder_engine.mts", "--live", "--maintenance-root", join(root, "maintenance"), "--once"], {
     cwd: root, encoding: "utf8", timeout: 30_000,
     env: { ...process.env, PATH: `${root}:${process.env.PATH}`, FIXTURE: root, GH_REPO: "fixture/repo",
       WAYFINDER_ORCHESTRATOR: "fixture", WAYFINDER_GH_MAX_ATTEMPTS: "1" } });

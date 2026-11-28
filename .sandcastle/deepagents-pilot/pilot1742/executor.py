@@ -5,11 +5,12 @@ import fcntl
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -874,25 +875,53 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
     `--once` 让 IdentityError 照旧冒到 main → 退出码 2（runbook 拿它当检查步骤）；
     `--loop` 写明哪个源读不到、标到状态页，等一个轮询间隔再从头核身份，进程不退出（launchd 不重启）。
     本机配置错误（LocalConfigError，含私钥 PrivateKeyError）不是读不到源，两种模式都冒到 main → 退出码 2。"""
+    from .maintenance import Owner, evidence_write
     from .queue import QueueIntake, mark_source_unreadable
+    maintenance_root = getattr(args, "maintenance_root", None)
+    maintenance = Owner("executor") if maintenance_root is None else Owner("executor", maintenance_root)
 
     def child(unit: WorkUnit) -> int:
         command = [sys.executable, "-m", "pilot1742.executor", "--state-root", str(args.state_root),
                    "--drain-root", str(args.drain_root), "run", "--run-id", unit.run_id,
                    "--workers-log", str(args.workers_log), "--private-key", str(args.private_key),
                    "--recheck-approval"]
+        with maintenance.gate.tx() as db:
+            permit = db.execute("SELECT jobs.id FROM jobs JOIN bindings ON bindings.job=jobs.id WHERE owner=? AND work=? AND state IN ('active','unknown') AND json_extract(bindings.data,'$.run_id')=? AND jobs.id NOT IN (SELECT job FROM resolutions)",
+                                (maintenance.id, f"ticket:{unit.ticket}", unit.run_id)).fetchone()
+        if permit is None:
+            raise ValueError("missing maintenance admission")
+        command += ["--maintenance-job", permit['id'], "--maintenance-root", str(maintenance.gate.root)]
         if args.model_rules is not None:
             command.extend(["--model-rules", str(args.model_rules.resolve())])
-        return subprocess.run(command, check=False).returncode
+        try:
+            return subprocess.run(command, check=False).returncode
+        except OSError:
+            with evidence_write():
+                maintenance.gate.cancel_unstarted(maintenance.id, permit['id'], 'spawn_failed')
+            raise
 
     sweep_round = None
-    if args.review_sweep and review_key is not None:
-        from .review_sweep import serve_round
-        sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
-                                  max_running=args.review_sweep_max_running)
     client: GitHubAppClient | None = None
     try:
+        maintenance.coverage(False)
         while True:
+            try:
+                maintenance.poll()  # 失败时本轮不得领取，也不重建 owner 掩盖旧记录。
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                print(f"round skipped, maintenance unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+                if args.once:
+                    return 75
+                time.sleep(args.poll_seconds)
+                continue
+            if args.review_sweep and review_key is not None and sweep_round is None:
+                try:
+                    from .review_sweep import serve_round
+                    sweep_round = serve_round(review_key, auto_merge=args.review_sweep_auto_merge,
+                                              max_running=args.review_sweep_max_running,
+                                              **({"maintenance_root": args.maintenance_root}
+                                                 if getattr(args, "maintenance_root", None) is not None else {}))
+                except Exception as error:
+                    print(f"review-sweep initialization unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
             try:
                 cutover_store.load()
             except CutoverError as error:
@@ -903,7 +932,7 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
             try:
                 if client is None:
                     client = _client(args)
-                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo)
+                    intake = QueueIntake(args.state_root, RepoGateway(client), store, cutover_store, source_repo, maintenance)
                 print(json.dumps(intake.once(child), ensure_ascii=False, indent=2), flush=True)
             except IdentityError as error:
                 if args.once or isinstance(error, LocalConfigError):
@@ -918,11 +947,21 @@ def _serve(args: argparse.Namespace, store: ClaimStore, cutover_store: CutoverSt
                 return 0
             time.sleep(args.poll_seconds)
     finally:
-        if client is not None:
-            client.close()
+        try:
+            try:
+                maintenance.stop()
+            except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                print(f"maintenance stop unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+        finally:
+            try:
+                if sweep_round is not None:
+                    sweep_round.close()
+            finally:
+                if client is not None:
+                    client.close()
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None, *, on_execution: Callable[[], None] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pilot1742.executor", description="新执行器：v2 票登记、引擎队列、持有、运行与释放")
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     parser.add_argument("--drain-root", type=Path, default=DRAIN_ROOT, help="隔离测试用；部署保持缺省全局根")
@@ -941,6 +980,8 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = sub.add_parser("run", help="持有并运行或恢复一个已登记的 v2 run")
     run_parser.add_argument("--model-rules", type=Path, help="新 run 的 pstack 角色表；缺省沿用全局表")
     run_parser.add_argument("--run-id", required=True)
+    run_parser.add_argument("--maintenance-job")
+    run_parser.add_argument("--maintenance-root", type=Path)
     run_parser.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
     run_parser.add_argument("--private-key", type=Path, required=True)
     run_parser.add_argument("--crash-at", choices=V2_CRASH_POINTS, help="受控故障注入：在该点对本进程 SIGKILL")
@@ -953,6 +994,7 @@ def main(argv: list[str] | None = None) -> int:
     modes = serve.add_mutually_exclusive_group(required=True)
     modes.add_argument("--once", action="store_true")
     modes.add_argument("--loop", action="store_true")
+    serve.add_argument("--maintenance-root", type=Path)
     serve.add_argument("--model-rules", type=Path, help="传给每个新 run 的项目 pstack 角色表")
     serve.add_argument("--poll-seconds", type=float, default=60)
     serve.add_argument("--workers-log", type=Path, default=WORKERS_LOG)
@@ -1098,6 +1140,13 @@ def main(argv: list[str] | None = None) -> int:
                 return cancel_worker(run, args.role, args.head)
             executor = TicketExecutor(unit, gateway, claims=store, workers_log=args.workers_log,
                                       crash=_sigkill_at(args.crash_at), cutover=cutover_store)
+            from .maintenance import ExecutorBusy
+            try:
+                if on_execution is not None:
+                    on_execution()
+            except ExecutorBusy as error:
+                print(str(error), file=sys.stderr)
+                return EXIT_BUSY
             try:
                 pilot = open_v2_run(args.state_root, unit, task, executor, model_rules=args.model_rules)
             except Busy as error:
@@ -1118,6 +1167,103 @@ def main(argv: list[str] | None = None) -> int:
     except (*EXECUTOR_ERRORS, Halted, ToolRefusal, ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 2
+
+
+def _manual_main(arguments: list[str]) -> int:
+    """手动 run 先登记进程，在真实执行边界领取；只读/登记命令不创建维护状态。"""
+    from .maintenance import Closed, ExecutorBusy, Owner, evidence_write
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    parser.add_argument("--drain-root", type=Path)
+    parser.add_argument("--maintenance-root", type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("command", nargs="?")
+    binding, _ = parser.parse_known_args(arguments)
+    if "--help" in arguments or "-h" in arguments:
+        return _main(arguments)
+    if binding.command == "serve":
+        # 预检可能早退；在其之前登记，不能留下一条无法绑定的 census sighting。
+        owner = Owner("executor", binding.maintenance_root)
+        try:
+            with owner.observing():
+                return _main(arguments)
+        finally:
+            owner.stop()
+    if binding.command != "run":
+        return _main(arguments)
+    witness = None
+    scope_bound = False
+    code = 75
+    with ExitStack() as stack:
+        owner = Owner("executor", binding.maintenance_root)
+        stack.callback(owner.stop)
+        owner.coverage(False)
+        def coverage():
+            from .maintenance_recovery import executor_scope_idle
+            owner.coverage(not scope_bound or executor_scope_idle(
+                dict(state_root=str(binding.state_root), source_repo=str(SOURCE_REPO))))
+        def final_coverage():
+            with evidence_write():
+                coverage()
+        stack.callback(final_coverage)
+        stack.enter_context(owner.observing())
+        def entering():
+            nonlocal witness, scope_bound
+            unit, _ = load_unit(binding.state_root, binding.run_id)
+            owner.gate.bind_scope(owner.id, binding.state_root, SOURCE_REPO)
+            scope_bound = True
+            job = owner.gate.admit_executor(owner.id, unit.run_id, unit.ticket, binding.state_root, SOURCE_REPO, manual=True)
+            witness = owner.gate.start_bound(job, unit.run_id, binding.state_root)
+        try:
+            code = _main(arguments, on_execution=entering)
+        except (Closed, ExecutorBusy):
+            return 75
+        finally:
+            with evidence_write():
+                if witness is not None:
+                    owner.gate.returned(witness)
+                    if code != 75:
+                        with evidence_write():
+                            owner.gate.complete_bound(witness)
+                        owner.gate.settle_current_executor(witness)
+        return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # 手动与 serve 的 run 使用同一绑定协议；只读命令不会触发 execution hook。
+    if "--maintenance-job" not in arguments:
+        return _manual_main(arguments)
+    from .maintenance import ExecutorBusy, Gate, evidence_write
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--maintenance-job", required=True)
+    parser.add_argument("--maintenance-root", type=Path, required=True)
+    parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--run-id", required=True)
+    binding, _ = parser.parse_known_args(arguments)
+    gate = Gate(binding.maintenance_root)
+    try:
+        witness = gate.start_bound(binding.maintenance_job, binding.run_id, binding.state_root)
+    except ExecutorBusy:
+        return 75
+    entered = False
+    def entering():
+        nonlocal entered
+        entered = True
+    returned = False
+    try:
+        code = _main(arguments, on_execution=entering)
+    finally:
+        with evidence_write():
+            if entered:
+                gate.returned(witness)
+            else:
+                gate.returned_preflight(witness)
+            returned = True
+    if returned and code != 75:
+        with evidence_write():
+            gate.complete_bound(witness)
+    return code
 
 
 if __name__ == "__main__":
