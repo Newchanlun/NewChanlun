@@ -2,7 +2,7 @@
 
 > 正本：本文件是背驰的教义正本。
 > 最后裁定：[#2114](https://github.com/xy7365527-lang/NewChanlun/issues/2114)（2026-11-20，第三类点不代证走势完成）；此前 [#1627](https://github.com/xy7365527-lang/NewChanlun/issues/1627)（2026-10-21，「唯一仍属「选择」的那一样」节：`a₀` 构件改指 `zhongshu.md` §2.1.1，数据周期 1 分钟 K 线单列）；[#815](https://github.com/xy7365527-lang/NewChanlun/issues/815) M-4（2026-08-03，**「小转大」＝ 转折二分类第二支的俗称，不是独立概念，不设独立正本词条**——正本落本文件「小转大」节）、[#873](https://github.com/xy7365527-lang/NewChanlun/issues/873)（2026-08-03，**力度的精确定义 = 速度净增量；[#859](https://github.com/xy7365527-lang/NewChanlun/issues/859) D-2「原文空白只能自选」已整体改判为 `[新缠论:推论]`**）、[#859](https://github.com/xy7365527-lang/NewChanlun/issues/859)、[#865](https://github.com/xy7365527-lang/NewChanlun/issues/865)、[#869](https://github.com/xy7365527-lang/NewChanlun/issues/869)（均 2026-08-03，map [#854](https://github.com/xy7365527-lang/NewChanlun/issues/854)）、[#862](https://github.com/xy7365527-lang/NewChanlun/issues/862)（2026-08-03）、[#814](https://github.com/xy7365527-lang/NewChanlun/issues/814)（2026-08-03，编排者裁定 D-2/D-3/D-4/D-5）
-> 受影响代码清单：见 [#2114 实施交接](qushi.md#2114-受影响代码清单)；既有裁定：**#815 M-4 那一组见 [`qushi.md`](qushi.md) 末节「#815 受影响代码清单（四组汇总）」**（#815 四组共用一份，本文件不另立）；此外见 #862、#814 resolution；本文件「力度是什么」§受影响代码（五套实现的处置）+ 各裁定小节内嵌代码清单（D-2/D-3/D-5）。**#873 的力度计算已落地，`ForceL` 已接入生产趋势背驰并设为默认**（`rust/src/theta_v0/parser/segment.rs:1687–1702`、`rust/src/theta_v0/classifier/divergence.rs:565–571,634–640`、`rust/src/theta_v0/classifier/signal/gates.rs:327–343`）。下游复用速度净增量计算，按 #2114 对齐比较窗、窗内首末笔归属和正式发布门。
+> 受影响代码清单：见 [#2114 实施交接](qushi.md#2114-受影响代码清单)；既有裁定：**#815 M-4 那一组见 [`qushi.md`](qushi.md) 末节「#815 受影响代码清单（四组汇总）」**（#815 四组共用一份，本文件不另立）；此外见 #862、#814 resolution；本文件「力度是什么」§受影响代码（五套实现的处置）+ 各裁定小节内嵌代码清单（D-2/D-3/D-5）。**#873 的力度计算已在 `theta_v0` 分类路径实现，`ForceL` 为该路径默认档**（`rust/src/theta_v0/parser/segment.rs:1687–1702`、`rust/src/theta_v0/classifier/divergence.rs:570–571,634–640`、`rust/src/theta_v0/classifier/signal/gates.rs:327–343`）。现役正式 S 入口仍接 `local_shape`（`rust/src/bin/s_structure_session.rs:87–89,3814`、`rust/src/bin/s_session_v3/generation.rs:76,869`）；正式趋势背驰切入 `ForceL` 归 #2114 下游切线，届时复用速度净增量计算，并对齐比较窗、窗内首末笔归属和正式发布门。
 
 **版本**: v1.9（#2114 同步完成与递归口径；v1.8 为 #1627 `a₀` 构件指针，v1.7 为 #994 TV 候选处置）
 **状态**: 力度的度量层定义、次级别背驰口径和四档 gauge 名分已裁；正式比较按[趋势正本](qushi.md#趋势背驰的-b-与-c-比较窗)，多实例全窗截止判据待裁。
@@ -470,7 +470,7 @@ D-2 判「原文空白、链的起点不存在」时，是这么处置 MACD 的�
 
 | 实现 | 处置 |
 |---|---|
-| MACD 段面积 | 缠师的力度代理（见上「两层结构」）；在现行 `ForceL` 的趋势判定中不作默认 |
+| MACD 段面积 | 缠师的力度代理（见上「两层结构」）；在 `theta_v0` 分类路径中不作默认力度档 |
 | 三维度 OR `rust/src/divergence.rs:309-321` | **D-4 已裁定**：形状（T2 面积∨T6 黄白线∨T7 伸长高度）符合三条件 OR，属旧引擎，非 theta_v0 生产路径 |
 | 振幅×时长 `rust/src/divergence.rs:188-197` | **退场**：原文零根据 + 踩收敛通则兜底条 |
 | Wasserstein-1 `a_divergence_topo.py:96` | **退场**：原文零命中 + 非生产件 |
@@ -478,14 +478,14 @@ D-2 判「原文空白、链的起点不存在」时，是这么处置 MACD 的�
 
 ### 研究对照臂：四档 gauge 的名分（#814 D-5 裁定）
 
-`MacdArea`、`ThetaDom`、`Conjunction`、`ThetaLex` **是研究对照臂**，不产生交易决策。现行趋势背驰默认 `ForceL`；D-4 的三条件取或说的是代理组合，不是 `ForceL` 缺证时的替用判据。
+`MacdArea`、`ThetaDom`、`Conjunction`、`ThetaLex` **是研究对照臂**，不产生交易决策。`theta_v0` 分类路径默认 `ForceL`；D-4 的三条件取或说的是代理组合，不是 `ForceL` 缺证时的替用判据。
 
 **#814 裁定时的依据与待办（历史记录，以下代码行号与默认档均指当时）**：
 1. 收敛通则限定词③（已声明的独立对照臂，`AGENTS.md` §「收敛通则：同一判断不得有宽严两档」）。
 2. 实测全仓**无任何 env var／配置键**能切换 `divergence_gauge`——`ThetaConfig.divergence_gauge` 字段本身存在（`config.rs:424`），但全仓唯一改写处是 `rust/src/theta_v0/backtest/wverify_run.rs:1075` 的 `cfg.divergence_gauge = g`，出现在一个 `#[ignore]` 的四档 OOS 对照测试 `thetadom_three_gauge_oos` 里；其余全部引用点都只读默认值。
 3. 自称「不 fallback 回 MACD」属实——`confirm_divergence`（同文件）对 `ThetaDom`/`Conjunction`/`ThetaLex` 在 `force=None` 时统一走 `.unwrap_or(false)`，判「非背驰」，不降级回 `MacdArea` 通道。
 
-**但现状仍不合规两处**：
+**裁定当时有两处不合规**：
 1. **缺显式声明**：限定词③的前提是「已声明的」对照臂，当前代码/文档均未显式写出这四档是对照臂而非候选生产口径，本次裁定即补上这份声明。
 2. **未核实真不在生产路径上**：`confirm_divergence` 的消费者 `judge_first_cached`（`rust/src/theta_v0/classifier/signal.rs:392`，调用点在同文件 461 行）**是生产的一类买卖点判定入口**——当前只是靠「`gauge` 参数默认值恰好是 `MacdArea`」维持口径唯一，那是**约定**，不是**约束**（没有任何机制阻止上游改传其他三档进生产）。
 
@@ -806,9 +806,9 @@ class Divergence:
 2. **T2 柱子面积**：C段 MACD 柱子面积 < A段面积 → 背驰信号（已集成：`macd_area_for_range()`）
 3. **T7 柱子伸长高度**（HIST峰值）：C段 HIST 峰值未超过 A段 HIST 峰值 → 背驰信号（工具函数：`histogram_peak_for_range()`）
 
-**代理在代码中的位置**：旧引擎 `rust/src/divergence.rs:309-321`（`check_three_dim`）实现三条件 OR。theta_v0 的 `segments_diverge` 只算 MACD 面积衰减（`rust/src/theta_v0/classifier/divergence.rs:279–288`）；它给出面积代理读数，不是现行趋势背驰默认的力度判据。默认路径用 `ForceL`，见本文件开头的实施现状。
+**代理在代码中的位置**：旧引擎 `rust/src/divergence.rs:309-321`（`check_three_dim`）实现三条件 OR。theta_v0 的 `segments_diverge` 只算 MACD 面积衰减（`rust/src/theta_v0/classifier/divergence.rs:279–288`）；它给出面积代理读数，不是 `theta_v0` 分类路径的默认力度判据；该路径默认用 `ForceL`，正式 S 接线现状见文件开头。
 
-**代价（#814 裁定时的推演）**：若把面积单通道代理改为三条件 OR，背驰候选会放宽，与 D-2 收紧 `sublevel_diverges` 的方向相反。此推演不代表现行 `ForceL` 路径的信号量。
+**代价（#814 裁定时的推演）**：若把面积单通道代理改为三条件 OR，背驰候选会放宽，与 D-2 收紧 `sublevel_diverges` 的方向相反。此推演不代表`theta_v0` 分类路径默认 `ForceL` 的信号量。
 
 **实现细节**（沿用 #862 前记录，未变）：
 - Divergence 数据类扩展：新增 `dif_peak_a/c`, `hist_peak_a/c` 字段（默认0.0，向后兼容）
