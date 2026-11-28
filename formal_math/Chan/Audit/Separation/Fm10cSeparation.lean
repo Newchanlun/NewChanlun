@@ -218,9 +218,9 @@ def brokenEnd (xs : List Seg) (s : Nat) : Option Nat :=
 def noCapAccepts (xs : List Seg) (i j : Nat) : Bool :=
   decide (((firstSeedFrom xs i).bind (brokenEnd xs)) = some j)
 
--- W10a 只有一行切点，TowerValid 展开后只剩本层的 CutsValid。
+-- W10 只有一行切点，保留本层 CutsValid 与 ValidDecomp 的切点个数检查。
 def validOneLevel (r : Accepts) (xs : List Seg) (marks : List Nat) : Bool :=
-  (adjacent marks).all (fun (i, j) => decide (i < j)) &&
+  decide (2 ≤ marks.length) && (adjacent marks).all (fun (i, j) => decide (i < j)) &&
   marks.all (fun j => decide (j ≤ xs.length)) && decide (marks.headD 0 = 0) &&
   (adjacent marks).all (fun (i, j) => r xs i j)
 
@@ -247,6 +247,10 @@ def carryBlockEnd (p : CarryNineParams) (xs : List Seg) (i : Nat) : Option Nat :
 def carryAccepts (p : CarryNineParams) (xs : List Seg) (i j : Nat) : Bool :=
   decide (carryBlockEnd p xs i = some j)
 
+/-- 甲方 confirmedStable 的逐输入蕴含，不另区分普通块和已确认块。 -/
+def confirmedStableAt (r : Accepts) (ctx ext : List Seg) (i j : Nat) : Bool :=
+  !r ctx i j || r (ctx ++ ext) i j
+
 /-! M9/M15：取指定层的段表作输入；走势类型在传入的中枢表上判定。 -/
 
 inductive TrendKind where | consolidation | uptrend | downtrend
@@ -260,6 +264,14 @@ def classifyTrend : List Center → Option TrendKind
     if pairs.all (fun (x,y) => decide (x.hull.hi < y.hull.lo)) then some .uptrend
     else if pairs.all (fun (x,y) => decide (y.hull.hi < x.hull.lo)) then some .downtrend
     else none
+
+/-- 甲方前瞻：首枢的末覆盖段离开，后续不得回核，但不要求再创新高或新低。 -/
+def trendFormingProspect (side : Dir) (xs : List Seg) (z : Center) (k : Nat) : Bool :=
+  z.wellFormed xs && (List.range z.first).all (fun i => !seedAt xs i) &&
+    decide (k + 1 = z.stop) && z.thirdAt side xs k &&
+    (xs.drop (k + 2)).all (fun s => match side with
+      | .up => decide (z.core.hi < s.range.lo)
+      | .down => decide (s.range.hi < z.core.lo))
 
 abbrev StrengthJudge := List Seg → Center → Nat → Nat → Bool
 
@@ -304,10 +316,15 @@ def secondStrength (side : Dir) (xs : List Seg) (z : Center) (i : Nat) : Option 
   | .down => if second.range.hi < z.core.lo then .merged
     else if second.range.hi < first.range.hi then .rising else .weak
 
--- isThirdSell 与 isPseudoThirdSell 均调用此式，不额外分流层级。
+-- 真三类点与类三类点均调用此式，不额外分流层级。
 def thirdCore (side : Dir) (xs : List Seg) (z : Center) (k : Nat) : Bool :=
   z.wellFormed xs && decide (k + 1 = z.stop) &&
     (xs[k]?.any fun s => s.range.overlaps z.core) && z.thirdAt side xs k
+
+def isOscillationBuy (xs : List Seg) (turn : Nat) (z : Center) (k : Nat) : Bool :=
+  decide (phaseOf xs turn k = .oscillation) && z.wellFormed xs &&
+    decide (z.first ≤ k ∧ k < z.stop) &&
+    (xs[k]?.any fun s => decide (s.dir = .down ∧ s.range.lo ≤ z.core.lo))
 
 end Opus
 
@@ -399,6 +416,8 @@ def windows (xs : List Seg) : List Center :=
 
 abbrev Rank := Nat → List Seg → List Nat → Nat → Nat → Option Nat
 
+abbrev Confirmed := Nat → List Seg → List Nat → Nat → Nat → Bool
+
 def coarsen (xs : List Seg) (i j : Nat) : Option Seg :=
   if j > xs.length then none else
     match xs.extract i j with
@@ -418,6 +437,15 @@ def preferred (r : Rank) (k : Nat) (xs : List Seg) (past : List Nat) (i j : Nat)
   | none => false
   | some score => decide (i < j ∧ j ≤ xs.length) &&
       (ends r k xs past i).all (fun q => decide (q.2 ≤ score))
+
+/-- 乙方 InterfaceLaws 的稳定子句；保留合法、占优、改分与确认状态的全部判定。 -/
+def stableAt (r : Rank) (confirmed : Confirmed) (k : Nat) (s t : AltSeq)
+    (past : List Nat) (i j : Nat) : Bool :=
+  let score := r k s.items past i j
+  !confirmed k s.items past i j || !(s.items.isPrefixOf t.items) ||
+    (score.isSome && preferred r k s.items past i j &&
+      decide (r k t.items past i j = score) && preferred r k t.items past i j &&
+      confirmed k t.items past i j)
 
 def carryBounded (r : Rank) (bound k : Nat) (xs : List Seg) (past : List Nat) (i : Nat) :
     Bool :=
@@ -446,6 +474,12 @@ def Stage.ascend (s : Stage) (raw : List Nat) : Option (List Nat × Stage) := do
     let localCuts := raw.map (fun j => s.raw.idxOf j)
     let blocks ← (adjacent localCuts).mapM fun (i, j) => coarsen s.seq.items i j
     if h : alternating blocks then some (localCuts, ⟨⟨blocks, h⟩, raw⟩) else none
+
+/-- 单行、深度零的 ValidDecomp：先还原实际几何，再逐块检查 rank，切点用原坐标。 -/
+def validOneLevel (r : Rank) (s : Stage) (raw : List Nat) : Bool :=
+  (s.ascend raw).any fun (cuts, _) =>
+    (adjacent cuts).zipIdx.all fun ((i,j), n) =>
+      (r 0 s.seq.items (cuts.take n).reverse i j).isSome
 
 /-! M7：固定种子、三凸包公交和离开回拉，按进位类别及优先级打分。 -/
 
@@ -496,6 +530,9 @@ def carryScore (p : CarryNineParams) (xs : List Seg) (past : List Nat) (i j : Na
       then 1 else 2)
   | other => other
 
+def carryConfirmed (p : CarryNineParams) (xs : List Seg) (past : List Nat) (i j : Nat) : Bool :=
+  decide (carryScore p xs past i j = some 2)
+
 /-! M9/M15：原有认证账本、端点观测与按 cut 查询的阶段门。 -/
 
 inductive TrendKind where | consolidation | uptrend | downtrend
@@ -528,6 +565,23 @@ def classifyTrend (b : FinishedBlock) : Option TrendKind :=
     if pairs.all (fun (a,z) => decide (a.hull.hi < z.hull.lo)) then some .uptrend
     else if pairs.all (fun (a,z) => decide (z.hull.hi < a.hull.lo)) then some .downtrend
     else none
+
+/-- 乙方前瞻：只收一个前枢；跳空离开后不得回核，且必须顺向越过离开段极值。 -/
+def trendFormingProspect (s : AltSeq) (centers : List Center) (side : Dir) (atCut : Nat) : Bool :=
+  match centers with
+  | [z] =>
+    let follow := s.items.extract (z.stop + 2) atCut
+    z.thirdEvent side s.items && decide (atCut ≤ s.items.length) &&
+      (follow.all fun x => match side with
+        | .up => decide (z.core.hi < x.range.lo)
+        | .down => decide (x.range.hi < z.core.lo)) &&
+      match s.items[z.stop]? with
+      | none => false
+      | some leave => follow.any fun x => decide (x.dir = side) &&
+          match side with
+          | .up => decide (leave.range.hi < x.range.hi)
+          | .down => decide (x.range.lo < leave.range.lo)
+  | _ => false
 
 structure DecompData where
   depth : Nat
@@ -653,11 +707,27 @@ def thirdPoint (d : Decomposition) (side : Dir) (cut : Nat) : Bool :=
   thirdGeometry d side cut && decide (phaseAt d (cut - 2) = some .oscillation ∧
     phaseAt d cut = some .departure)
 
+def isThirdBuy (d : Decomposition) (cut : Nat) : Bool :=
+  decide (0 < d.val.depth) && thirdPoint d .up cut
+
+def isPseudoThirdBuy (d : Decomposition) (cut : Nat) : Bool :=
+  decide (d.val.depth = 0) && thirdPoint d .up cut
+
 def isThirdSell (d : Decomposition) (cut : Nat) : Bool :=
   decide (0 < d.val.depth) && thirdPoint d .down cut
 
 def isPseudoThirdSell (d : Decomposition) (cut : Nat) : Bool :=
   decide (d.val.depth = 0) && thirdPoint d .down cut
+
+def oscillationPoint (d : Decomposition) (side : Dir) (cut : Nat) : Bool :=
+  let xs := d.val.steps.items
+  decide (0 < cut ∧ phaseAt d cut = some .oscillation) &&
+    match recent d d.val.origin cut, xs[cut-1]?, xs[cut]?,
+          d.val.prices[cut-1]?, d.val.prices[cut]? with
+    | some z, some a, some b, some (_,p), some (q,_) =>
+      decide (a.dir = side.flip ∧ b.dir = side ∧ p = q) &&
+        z.core.overlaps a.range && !ahead side p (edge side.flip z.core)
+    | _, _, _, _, _ => false
 
 end Astra
 
@@ -759,6 +829,39 @@ def opusCarry : Opus.CarryNineParams := ⟨.coreBroken, .afterNine, .mayIncludeF
 
 def astraCarry : Astra.CarryNineParams := ⟨false, false, false⟩
 
+def opusSeeded : Opus.CarryNineParams := { opusCarry with timing := .seeded }
+
+def astraSeeded : Astra.CarryNineParams := { astraCarry with finishAtSeed := true }
+
+def astraSeededRank : Astra.Rank :=
+  fun _ xs past i j => Astra.carryScore astraSeeded xs past i j
+
+def astraSeededConfirmed : Astra.Confirmed :=
+  fun _ xs past i j => Astra.carryConfirmed astraSeeded xs past i j
+
+def w9bNine : List Seg :=
+  segments [(.up,10,20), (.down,10,20), (.up,10,20), (.down,10,20), (.up,10,20),
+    (.down,10,20), (.up,10,20), (.down,10,20), (.up,10,20)]
+
+def w9bPrefix : List Seg := w9bNine.take 3
+
+def w9bExtension : List Seg := w9bNine.drop 3
+
+def w9bBase : Astra.AltSeq := ⟨w9bNine, by decide⟩
+
+def w9bShort : Astra.AltSeq := ⟨w9bPrefix, by decide⟩
+
+theorem w9b_seeded_prefix_stability :
+    w9bPrefix ++ w9bExtension = w9bNine ∧
+    Opus.carryAccepts opusSeeded w9bPrefix 0 3 = true ∧
+    Opus.carryAccepts opusSeeded w9bNine 0 3 = false ∧
+    Opus.carryAccepts opusSeeded w9bNine 0 9 = true ∧
+    Opus.confirmedStableAt (Opus.carryAccepts opusSeeded) w9bPrefix w9bExtension 0 3 = false ∧
+    astraSeededRank 0 w9bPrefix [] 0 3 = some 0 ∧
+    astraSeededConfirmed 0 w9bPrefix [] 0 3 = false ∧
+    Astra.stableAt astraSeededRank astraSeededConfirmed 0 w9bShort w9bBase [] 0 3 = true := by
+  decide
+
 def w9cSteps : List Seg :=
   segments [(.down,0,5), (.up,10,20), (.down,10,20), (.up,10,20), (.down,10,20),
     (.up,10,20), (.down,10,20), (.up,10,20), (.down,10,20), (.up,10,20)]
@@ -806,6 +909,15 @@ theorem w10a_even_block_before_another :
     (w10aBottom.ascend [0,4,7]).isSome = false := by
   decide
 
+theorem w10b_legal_nonpreferred_seed_split :
+    Opus.validOneLevel (Opus.carryAccepts opusSeeded) w9bNine [0,3,6,9] = false ∧
+    Opus.validOneLevel (Opus.carryAccepts opusSeeded) w9bNine [0,9] = true ∧
+    Astra.validOneLevel astraSeededRank (Astra.Stage.bottom w9bBase) [0,3,6,9] = true ∧
+    Astra.validOneLevel astraSeededRank (Astra.Stage.bottom w9bBase) [0,9] = true ∧
+    astraSeededRank 0 w9bNine [] 0 3 = some 0 ∧
+    Astra.preferred astraSeededRank 0 w9bNine [] 0 3 = false := by
+  decide
+
 def w11aSteps : List Seg :=
   segments [(.up,10,20), (.down,10,20), (.up,10,20), (.down,0,10), (.up,0,10),
     (.down,0,10), (.up,20,30), (.down,20,30), (.up,20,30)]
@@ -825,6 +937,57 @@ theorem w11b_non_seed_lead :
     Astra.carryScore astraCarry w11bSteps [] 0 4 = none ∧
     (List.range (w11bSteps.length + 1)).all
       (fun j => (Astra.carryScore astraCarry w11bSteps [] 0 j).isNone) = true := by
+  decide
+
+def w11cSteps : List Seg :=
+  segments [(.up,10,20), (.down,10,20), (.up,10,20), (.down,0,5)]
+
+theorem w11c_core_break_without_retest :
+    Opus.carryAccepts opusCarry w11cSteps 0 3 = true ∧
+    (Astra.Center.window? w11cSteps 0 3).isSome = true ∧
+    Astra.carryScore astraCarry w11cSteps [] 0 3 = none := by
+  decide
+
+def w11dSteps : List Seg :=
+  segments [(.down,0,20), (.up,10,20), (.down,10,20), (.up,25,35), (.down,22,35),
+    (.up,18,30), (.down,18,30)]
+
+theorem w11d_gap_pullback_upgrades :
+    Opus.carryAccepts opusCarry w11dSteps 0 3 = true ∧
+    Opus.carryAccepts opusCarry w11dSteps 0 7 = false ∧
+    (Astra.Center.window? w11dSteps 0 3).any (fun z =>
+      Astra.returningCenter w11dSteps z 7 true) = true ∧
+    Astra.carryScore astraCarry w11dSteps [] 0 7 = some 2 := by
+  decide
+
+/-! ## W14：连续离开、跳空离开与顺向推进 -/
+
+def w14aSeq (high : Int) : List Seg :=
+  segments [(.down,10,20), (.up,10,20), (.down,10,20), (.up,10,30), (.down,22,30),
+    (.up,22,high)]
+
+def w14aAlt : Astra.AltSeq := ⟨w14aSeq 40, by decide⟩
+
+def w14aCover : Opus.Center := ⟨0,4,by decide,⟨10,20⟩,⟨10,30⟩⟩
+
+theorem w14a_continuous_leave :
+    Opus.trendFormingProspect .up (w14aSeq 40) w14aCover 3 = true ∧
+    Opus.trendFormingProspect .up (w14aSeq 29) w14aCover 3 = true ∧
+    Astra.trendFormingProspect w14aAlt
+      ((Astra.Center.window? w14aAlt.items 0 3).toList) .up 6 = false := by
+  decide
+
+def w14bSeq (high : Int) : List Seg :=
+  segments [(.down,10,20), (.up,10,20), (.down,10,20), (.up,25,30), (.down,26,30),
+    (.up,26,high)]
+
+theorem w14b_gap_leave_requires_progress :
+    threeSeed.wellFormed (w14bSeq 40) = true ∧
+    Opus.trendFormingProspect .up (w14bSeq 40) threeSeed 2 = false ∧
+    Astra.trendFormingProspect ⟨w14bSeq 40, by decide⟩
+      ((Astra.Center.window? (w14bSeq 40) 0 3).toList) .up 6 = true ∧
+    Astra.trendFormingProspect ⟨w14bSeq 29, by decide⟩
+      ((Astra.Center.window? (w14bSeq 29) 0 3).toList) .up 6 = false := by
   decide
 
 /-! ## W17–W19：认证转折、触核等号、第 3 段兼离开 -/
@@ -875,6 +1038,63 @@ theorem w17a_core_vs_hull_sell :
     (Astra.secondStrength? w17aSell astraTrivialStrength .down 10).isSome = true := by
   decide
 
+def w17bSingle : List Seg :=
+  segments [(.up,10,20), (.down,10,20), (.up,10,20), (.down,2,15)]
+
+def w17bFakePrev : Opus.Center := ⟨99,3,by decide,⟨50,60⟩,⟨50,60⟩⟩
+
+def w17bUnderflowJudge : Opus.StrengthJudge := fun xs _ prior exit =>
+  decide (prior = 0 ∧ exit = 3) &&
+    (xs[prior]?.any fun s => s.dir == .up)
+
+def w17bSingleData : Astra.DecompData :=
+  let centers := (Astra.Center.window? w17bSingle 0 3).toList
+  ⟨1, (fun _ _ _ i j => if i = 0 ∧ j = 4 then some 0 else none),
+    ⟨w17bSingle, by decide⟩, w17bSingle.map (fun s => (s.entry,s.exit)),
+    [0,4], [⟨0,4,centers⟩], centers, 0⟩
+
+def w17bSingleDecomp : Astra.Decomposition := ⟨w17bSingleData, by decide⟩
+
+/-- 甲方只验证后枢，且误用饱和减法所得的第零段。乙方认证这四段为盘整，不能把块尾登记为趋势转折。 -/
+theorem w17b_fabricated_prev_and_underflow :
+    w17bFakePrev.wellFormed w17bSingle = false ∧
+    threeSeed.first - 1 = 0 ∧ w17bSingle[threeSeed.first - 1].dir = .up ∧
+    w17bSingle[3].dir = .down ∧
+    Opus.firstPoint .up w17bSingle w17bUnderflowJudge [] threeSeed 3 = false ∧
+    Opus.firstPoint .up w17bSingle w17bUnderflowJudge [w17bFakePrev] threeSeed 3 = true ∧
+    w17bSingleData.completed.head?.bind Astra.classifyTrend = some .consolidation ∧
+    ({ w17bSingleData with origin := 4 }).certified = false ∧
+    Astra.firstPoint w17bSingleDecomp astraTrivialStrength .up 4 = false := by
+  decide
+
+def w17bPrior : List Seg :=
+  segments [(.down,50,60), (.up,40,50), (.down,40,50), (.up,40,50), (.down,20,40),
+    (.up,10,25), (.down,5,20), (.up,10,20), (.down,2,20), (.up,2,15), (.down,11,15)]
+
+def w17bPriorA : Opus.Center := { trendA with first := 1 }
+
+def w17bPriorB : Opus.Center := { trendB with first := 5 }
+
+def w17bPriorDecomp : Astra.Decomposition :=
+  let centers := [1,5].flatMap fun i => (Astra.Center.window? w17bPrior i (i + 3)).toList
+  ⟨⟨1, (fun _ _ _ i j => if i = 0 ∧ j = 9 then some 0 else none),
+    ⟨w17bPrior, by decide⟩, w17bPrior.map (fun s => (s.entry,s.exit)),
+    [0,9], [⟨0,9,centers⟩], centers, 9⟩, by decide⟩
+
+def opusOnlyPrior (i : Nat) : Opus.StrengthJudge :=
+  fun _ _ prior exit => decide (prior = i ∧ exit = 8)
+
+def astraOnlyPrior (i : Nat) : Astra.StrengthJudge :=
+  fun _ _ prior exit => decide (prior.source = (i,i) ∧ exit.source = (8,8))
+
+/-- 离开同时越过核和波动下沿；只认可第一枢前的比较段时，两套搜索域才分离。 -/
+theorem w17b_prior_before_first_center :
+    Opus.firstPoint .up w17bPrior (opusOnlyPrior 0) [w17bPriorA] w17bPriorB 8 = false ∧
+    Astra.firstPoint w17bPriorDecomp (astraOnlyPrior 0) .up 9 = true ∧
+    Opus.firstPoint .up w17bPrior (opusOnlyPrior 4) [w17bPriorA] w17bPriorB 8 = true ∧
+    Astra.firstPoint w17bPriorDecomp (astraOnlyPrior 4) .up 9 = true := by
+  decide
+
 def w18Steps : List Seg := trendSteps 3 28 20
 
 def w18Buy : Astra.Decomposition := ⟨trendData ⟨w18Steps, by decide⟩, by decide⟩
@@ -910,6 +1130,67 @@ theorem w19a_third_segment_is_leave :
     Astra.thirdGeometry w19aDepth1 .down 4 = false ∧
     Astra.isThirdSell w19aDepth1 4 = false ∧
     Astra.isPseudoThirdSell w19aDepth0 4 = false := by
+  decide
+
+def astraOpenData (depth : Nat) (steps : Astra.AltSeq) (first stop : Nat) : Astra.DecompData :=
+  ⟨depth, fun _ _ _ _ _ => none, steps, steps.items.map (fun s => (s.entry,s.exit)),
+    [0], [], (Astra.Center.window? steps.items first stop).toList, 0⟩
+
+def w19bSteps : List Seg :=
+  segments [(.up,0,20), (.down,10,20), (.up,10,25), (.down,22,25)]
+
+def w19bSeed : Opus.Center := ⟨0,3,by decide,⟨10,20⟩,⟨0,25⟩⟩
+
+def w19bAlt : Astra.AltSeq := ⟨w19bSteps, by decide⟩
+
+def w19bDepth0 : Astra.Decomposition := ⟨astraOpenData 0 w19bAlt 0 3, by decide⟩
+
+def w19bDepth1 : Astra.Decomposition := ⟨astraOpenData 1 w19bAlt 0 3, by decide⟩
+
+theorem w19b_third_segment_leaves_up :
+    Opus.thirdCore .up w19bSteps w19bSeed 2 = true ∧
+    Astra.breakoutRetest w19bDepth1 .up ⟨10,20⟩ 4 = true ∧
+    Astra.thirdGeometry w19bDepth1 .up 4 = false ∧
+    Astra.isThirdBuy w19bDepth1 4 = false ∧
+    Astra.isPseudoThirdBuy w19bDepth0 4 = false := by
+  decide
+
+def w19cCover : Opus.Center := ⟨0,4,by decide,⟨10,20⟩,⟨10,30⟩⟩
+
+def w19cDepth0 : Astra.Decomposition :=
+  ⟨astraOpenData 0 ⟨w8aSteps, by decide⟩ 0 3, by decide⟩
+
+/-- 甲方在底层同样调用几何判据；乙方几何与阶段均通过，但只准调用类三买。 -/
+theorem w19c_depth_zero_routes_to_pseudo :
+    Opus.thirdCore .up w8aSteps w19cCover 3 = true ∧
+    Astra.thirdPoint w19cDepth0 .up 5 = true ∧
+    Astra.isThirdBuy w19cDepth0 5 = false ∧
+    Astra.isPseudoThirdBuy w19cDepth0 5 = true := by
+  decide
+
+/-! ## W20：在线触边与后继反转段 -/
+
+def w20aSteps : List Seg :=
+  segments [(.down,0,5), (.up,10,20), (.down,10,20), (.up,10,20), (.down,8,15)]
+
+def w20aCover : Opus.Center := ⟨1,4,by decide,⟨10,20⟩,⟨8,20⟩⟩
+
+def w20aData : Astra.DecompData := astraOpenData 0 ⟨w20aSteps, by decide⟩ 1 5
+
+def w20aOpen : Astra.Decomposition := ⟨w20aData, by decide⟩
+
+def w20aConfirmedSteps : List Seg := w20aSteps ++ [⟨.up, ⟨8,18⟩, (5,5)⟩]
+
+def w20aConfirmed : Astra.Decomposition :=
+  ⟨astraOpenData 0 ⟨w20aConfirmedSteps, by decide⟩ 1 5, by decide⟩
+
+/-- 对撞报告取 origin = 1，但此处没有完成趋势可认证该起点。改按基底起点观察，仍选同一中枢并处于震荡；只补端点相接的反转段即可翻转乙方结果。 -/
+theorem w20a_oscillation_waits_for_reversal :
+    Opus.isOscillationBuy w20aSteps 0 w20aCover 4 = true ∧
+    ({ w20aData with origin := 1 }).certified = false ∧
+    Astra.phaseAt w20aOpen 5 = some .oscillation ∧
+    Astra.oscillationPoint w20aOpen .up 5 = false ∧
+    Astra.oscillationPoint w20aConfirmed .up 5 = true := by
   decide
 
 end Chan.Audit.Separation.Fm10c
