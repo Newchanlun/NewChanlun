@@ -24,6 +24,8 @@ class FakeGitHub:
     """GitHub 端口替身：PR、检查、文件与写操作记录。"""
     def __init__(self, lane, *, required=module.MERGE_CHECKS, review_app=5664795):
         self.lane = lane
+        if lane is not None:
+            lane.gateway.pr.setdefault("auto_merge", None)  # REST 列表用 null 表示未挂载
         self.required = {name: {"deepagents/review": review_app, "ci-ok": 15368, "DevSkim": 15368}[name] for name in required}
         self.extra_pulls = []
         self.states, self.checks_by_head, self.files, self.calls, self.fail = {}, {}, {}, [], {}
@@ -50,6 +52,9 @@ class FakeGitHub:
 
     def checks(self, number, state, bindings, review_runs):
         return {k: v for k, v in self.checks_by_head.get(state["head"], {}).items() if bindings.get(k)}
+
+    def review_status(self, number, state, runs, publisher):
+        return self.checks(number, state, {"deepagents/review": publisher[0]}, runs).get("deepagents/review")
 
     def required_checks(self):
         return dict(self.required)
@@ -89,7 +94,7 @@ class Host:
 def make(lane, *, run=True, github=None, **kwargs):
     host = Host(lane, run=run)
     github = github or FakeGitHub(lane)
-    kwargs.setdefault("review_app", lambda: 5664795)  # HOST 现状：审查专用 App，main 的必需检查也绑它
+    kwargs.setdefault("publisher", lambda: module.REVIEW_PUBLISHER)
     sweep = Sweep(github, lane, host.spawn, state_root=lane.state_root, rows=lambda: list(host.rows), **kwargs)
     return sweep, host, github
 
@@ -172,15 +177,19 @@ def test_interrupted_review_resumes_same_attempt_once_then_needs_operator(lane):
 def test_unpublished_outcome_is_resumed_once_then_needs_reconcile(lane):
     """F6：outcome 已存但终态没发布，不算完成；同一 attempt 续跑一次走受管对账与发布，再不成报 needs-reconcile。"""
     sweep, host, _ = make(lane, run=False)
+    _leave_unpublished_outcome(lane)
+    assert acts(sweep.tick()) == ["resume-publish"]
+    host.rows.clear()
+    assert acts(sweep.tick()) == ["needs-reconcile"]
+
+
+def _leave_unpublished_outcome(lane):
     lane.review_pr(1810)
     row = lane.status(1810)[0]
     path = lane.state_root / "runs" / ReviewTarget(**row["target"]).key / "outcome.json"
     saved = json.loads(path.read_text())
     saved.pop("publication")
     path.write_text(json.dumps(saved))
-    assert acts(sweep.tick()) == ["resume-publish"]
-    host.rows.clear()
-    assert acts(sweep.tick()) == ["needs-reconcile"]
 
 
 def test_explicit_reattempt_by_operator_is_left_alone(lane):
@@ -994,7 +1003,7 @@ def test_deployed_executor_plist_turns_sweep_and_auto_merge_on():
     assert args[args.index("--review-sweep-max-running") + 1] == "3"
 
 
-def test_plist_flags_dispatch_formal_review_and_withdraw_without_put(lane, monkeypatch, tmp_path, capsys):
+def test_plist_flags_withdraw_then_dispatch_on_next_clean_round_without_put(lane, monkeypatch, tmp_path, capsys):
     import plistlib
     from pathlib import Path
 
@@ -1005,7 +1014,7 @@ def test_plist_flags_dispatch_formal_review_and_withdraw_without_put(lane, monke
     flags = [arg for arg in arguments if arg in ("--review-sweep", "--review-sweep-auto-merge")]
     rounds = []
     cli, argv = _fake_serve(monkeypatch, tmp_path, rounds=rounds)
-    host = Host(lane)
+    host = Host(lane, run=False)
     github = FakeGitHub(lane)
     github.states[1810] = {"auto_merge": True}
     green(github, lane.gateway.pr["head"]["sha"])
@@ -1024,9 +1033,15 @@ def test_plist_flags_dispatch_formal_review_and_withdraw_without_put(lane, monke
         *args, **kwargs, state_root=lane.state_root, rows=lambda: host.rows))
     with pytest.raises(_StopServe):
         cli.main(argv + flags)
-    assert lane.gateway.sent == ["pending", "success"] and len(host.spawned) == 1
+    assert lane.gateway.sent == [] and host.spawned == []
     assert "auto-merge-disabled-pre-cutover" in capsys.readouterr().out
     assert wire == [("pr", "merge", "1810", "-R", api.repository, "--disable-auto")]
+    github.states[1810] = {"auto_merge": False}
+    (lane.state_root / "sweep" / "serve-round.last").unlink()
+    with pytest.raises(_StopServe):
+        cli.main(argv + flags)
+    assert [n for n, _, _ in host.spawned] == [1810]
+    assert len(wire) == 1
     assert github.calls == []
 
 
@@ -1179,26 +1194,29 @@ def test_timeout_withdraws_native_auto_merge_and_merges_nothing(lane, capsys, wh
     assert ServeRound(sweep, clock=Clock())() is None
     lines = [json.loads(line.removeprefix("review-sweep ")) for line in capsys.readouterr().out.splitlines()]
     assert lines[-1]["action"] == "round-skipped"
-    assert {"pr": 1810, "action": "fail-closed-withdraw", "auto_merge_withdrawn": True}.items() <= next(
-        a for a in lines if a.get("pr") == 1810 and a["action"] == "fail-closed-withdraw").items()
+    assert {"pr": 1810, "action": "native-auto-merge-withdrawal", "auto_merge_withdrawn": True}.items() <= next(
+        a for a in lines if a.get("pr") == 1810 and a["action"] == "native-auto-merge-withdrawal").items()
     attempted = {1810, 1805} if where in ("required_checks", "checks") else {1810}
     assert set(github.calls) == {("disable", n) for n in attempted}
 
 
 def test_auto_merge_state_missing_from_pull_list_counts_as_armed(lane):
     github = FakeGitHub(lane)
+    del lane.gateway.pr["auto_merge"]
     github.states[1810] = {}
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
     github.pr = _hang
     with pytest.raises(SourceUnreadable) as caught:
         sweep.tick()
     assert github.calls == [("disable", 1810)]
-    assert caught.value.actions[-1]["action"] == "fail-closed-withdraw"
+    assert caught.value.actions[-1]["action"] == "native-auto-merge-withdrawal"
+    assert caught.value.actions[-1]["auto_merge_withdrawn"] is True
 
 
 def test_withdraw_timeout_stops_the_fail_closed_sweep(lane):
     github = FakeGitHub(lane)
     _armed_sensitive_and_green_neighbour(lane, github)
+    lane.gateway.pr["auto_merge"] = None  # 让读取先超时，进入失败关闭撤销分支
     github.required_checks = _hang
     github.disable_auto_merge = _hang
     sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
@@ -1377,23 +1395,58 @@ def test_fetch_authenticates_with_the_hosts_gh_credential_helper(monkeypatch, tm
 
 # ---- 第五轮（9ab8a495，run ba9fcac2）：原生 auto-merge 在仓库层关掉，sweep 每轮核对 ----
 
-@pytest.mark.parametrize("setting", ["enabled", "unreadable"])
-def test_repo_allowing_native_auto_merge_withdraws_even_initially_unarmed(lane, setting):
-    """allow_auto_merge 为 true 或未知时，不能凭初读未挂载而跳过撤销。"""
+@pytest.mark.parametrize("setting", ["enabled", "unreadable", "unknown", "timeout"])
+@pytest.mark.parametrize("legacy_flag", [False, True])
+def test_native_auto_merge_setting_blocks_all_review_work_after_prioritized_withdrawal(
+    lane, setting, legacy_flag
+):
+    _leave_unpublished_outcome(lane)
     github = FakeGitHub(lane)
-    _more_pulls(lane, github, [1805, 1811])
-    green(github, f"{1805:040d}")                                   # 本可合入
-    github.states[1811] = {"mergeable_state": "behind"}             # 本可追平
-    _sensitive_armed(lane, github)                                  # 1810：须撤 auto-merge
-    if setting == "enabled":
-        github.allow_auto_merge = lambda: True
+    _same_head_pulls(lane, github, [1805, 1806, 1811])
+    github._pr(1811)["auto_merge"] = {}
+    del github._pr(1806)["auto_merge"]
+    github._pr(1806)["base"]["ref"] = "another-base"
+    github.allow_auto_merge = {"enabled": lambda: True, "unreadable": _raise,
+                              "unknown": lambda: None, "timeout": _hang}[setting]
+    def unexpected(*args):
+        pytest.fail("设置未确认关闭时不得诊断、排序或派审")
+    github.required_checks = github.pr = github.committed_at = unexpected
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=legacy_flag)
+    sweep.spawn = unexpected
+    if setting == "timeout":
+        with pytest.raises(SourceUnreadable) as caught:
+            sweep.tick()
+        actions = caught.value.actions
+        assert github.calls == [("disable", n) for n in (1811, 1806, 1805, 1810)]
     else:
-        github.allow_auto_merge = _raise
-    sweep, _, _ = make(lane, run=False, github=github, auto_merge=True)
-    actions = sweep.tick()
-    flagged = next(a for a in actions if a["action"] == "native-auto-merge-enabled")
-    assert flagged["reason"]
-    assert set(github.calls) == {("disable", n) for n in (1805, 1810, 1811)}
+        actions = sweep.tick()
+        assert github.calls == [("disable", 1811), ("disable", 1806)]
+    assert any(a["action"] == "native-auto-merge-enabled" and a["reason"] for a in actions)
+    assert not {"launch", "resume-review", "resume-publish"} & {a["action"] for a in actions}
+    assert host.spawned == [] and not list(sweep.folder.glob("*.resumes"))
+
+
+@pytest.mark.parametrize("source", ["list", "detail", "unknown-list", "unknown-detail"])
+def test_native_auto_merge_residue_is_withdrawn_before_other_launch_and_its_publication_waits(lane, source):
+    _leave_unpublished_outcome(lane)
+    sweep, host, github = make(lane, run=False)
+    _same_head_pulls(lane, github, [1805])  # 排在 1810 前，有足够名额且本可派审
+    if source == "list":
+        lane.gateway.pr["auto_merge"] = {}
+    elif source == "unknown-list":
+        del lane.gateway.pr["auto_merge"]
+    else:
+        github.states[1810] = {"auto_merge": True if source == "detail" else None}
+    def spawn(number, *args):
+        github.calls.append(("spawn", number))
+        return host.spawn(number, *args)
+    sweep.spawn = spawn
+    assert launched(sweep.tick()) == [1805]
+    assert github.calls == [("disable", 1810), ("spawn", 1805)]
+    assert not list(sweep.folder.glob("*.resumes"))
+    lane.gateway.pr["auto_merge"] = None
+    github.states[1810] = {"auto_merge": False}
+    assert "resume-publish" in acts(sweep.tick())
 
 
 @pytest.mark.parametrize(("payload", "allowed"), [({"allow_auto_merge": False}, False), ({"allow_auto_merge": True}, True),
@@ -1494,6 +1547,11 @@ def _review_record(state=CHECK_STATE, number=1810):
     publication = {"id": status["id"], "sha": state["head"], "state": status["state"], "description": description}
     outcome = {"run_id": RUN_UUID, "target": dict(target), "verdict": "PASS", "publication": publication}
     return status, {"target": target, "outcome": outcome}
+
+
+def _wire_status(monkeypatch, github, cli):
+    monkeypatch.setattr(github, "review_status", lambda n, state, runs, publisher: cli.review_status(
+        n, {**CHECK_STATE, **state}, runs, publisher))
 
 
 def _run(name, state=CHECK_STATE, *, check_id=140984998172, conclusion="success", app_id=15368,
@@ -1732,8 +1790,7 @@ def test_closed_pr_shared_head_supersedes_publication_and_frees_queue(lane, monk
     statuses = [{**row, "creator": {"login": REVIEW_BOT, "type": "Bot"},
                  "created_at": STAMP, "updated_at": STAMP} for row in lane.gateway.rows]
     monkeypatch.setattr(cli, "_gh", _gh_fake(statuses, []))
-    monkeypatch.setattr(github, "checks", lambda n, state, bindings, runs: cli.checks(
-        n, {**CHECK_STATE, **state}, bindings, runs))
+    _wire_status(monkeypatch, github, cli)
     actions = sweep.tick()
     blocked = next(a for a in actions if a.get("pr") == 1810 and a["action"] == "needs-reconcile")
     assert blocked["review"] == "superseded" and blocked["queue_head"] is False
@@ -1766,13 +1823,62 @@ def test_nonofficial_same_name_overwrite_needs_reconcile_and_does_not_block_next
     cli = module.GhCli(REPOSITORY)
     puts = []
     monkeypatch.setattr(cli, "_gh", _gh_fake(real + [latest], [], puts=puts))
-    monkeypatch.setattr(github, "checks", lambda n, state, bindings, runs: cli.checks(
-        n, {**CHECK_STATE, **state}, bindings, runs))
+    _wire_status(monkeypatch, github, cli)
     actions = sweep.tick()
     assert acts(actions, 1810) == ["needs-reconcile"]
     assert next(a for a in actions if a.get("pr") == 1810)["queue_head"] is False
     assert launched(actions) == [1811] and [s[0] for s in host.spawned] == [1811]
     assert not puts and all(call[0] == "disable" for call in github.calls)
+
+
+@pytest.mark.parametrize("overwrite", [None, "other-pr", "other-app"])
+def test_fallback_publication_is_reconciled_but_never_a_merge_gate(lane, monkeypatch, tmp_path, overwrite):
+    monkeypatch.setattr(module.external_review, "IDENTITY_CONFIG", tmp_path / "absent.json")
+    lane.review_pr(1810)  # 真实 lane：夹具的发布者本来就是执行器 App
+    sweep, host, github = make(lane, run=False, auto_merge=True, publisher=module.configured_publisher)
+    original = [{**row, "created_at": STAMP, "updated_at": STAMP} for row in lane.gateway.rows]
+    if overwrite:
+        latest = {**original[0], "id": original[0]["id"] + 1}
+        if overwrite == "other-pr":  # 同一个执行器 App、相同 head，但另一 PR 的 run
+            latest["description"] = f"run={RUN_UUID} " + latest["description"].split(" ", 1)[1]
+        else:
+            latest["creator"] = {"login": REVIEW_BOT, "type": "Bot"}
+        original.append(latest)
+    cli = module.GhCli(REPOSITORY)
+    monkeypatch.setattr(cli, "_gh", _gh_fake(original, [], apps={"newchanlun-deepagents-1742": 5486877}))
+    _wire_status(monkeypatch, github, cli)
+    green(github, lane.gateway.pr["head"]["sha"])
+    actions = sweep.tick()
+    assert any(a["action"] == "merge-protection-mismatch" for a in actions)
+    assert host.spawned == []
+    if overwrite:
+        assert acts(actions) == ["needs-reconcile"] and github.calls == [("disable", 1810)]
+    else:
+        assert acts(actions) == ["done", "check-report"] and github.calls == []
+        assert next(a for a in actions if a["action"] == "check-report")["checks"]["deepagents/review"] is None
+
+
+@pytest.mark.parametrize("file_error", [_raise, _hang])
+def test_overwritten_publication_still_needs_reconciliation_when_file_inventory_fails(lane, monkeypatch, file_error):
+    lane.review_pr(1810)
+    sweep, host, github = make(lane, run=False)
+    originals = [{**row, "creator": {"login": REVIEW_BOT, "type": "Bot"},
+                  "created_at": STAMP, "updated_at": STAMP} for row in lane.gateway.rows]
+    overwritten = {**originals[0], "id": originals[0]["id"] + 1, "creator": {"login": "other[bot]", "type": "Bot"}}
+    cli = module.GhCli(REPOSITORY)
+    monkeypatch.setattr(cli, "_gh", _gh_fake([*originals, overwritten], []))
+    _wire_status(monkeypatch, github, cli)
+    github.pr_files = file_error
+    if file_error is _hang:
+        with pytest.raises(SourceUnreadable) as caught:
+            sweep.tick()
+        actions = caught.value.actions
+    else:
+        actions = sweep.tick()
+    assert "done" not in acts(actions)
+    report = next(a for a in actions if a["action"] == "needs-reconcile")
+    assert report["review"] == "superseded" and report["file_evidence_error"]
+    assert host.spawned == [] and github.calls == [("disable", 1810)]
 
 
 @pytest.mark.parametrize("missing", ["enforce_admins", "strict", "binding"])
@@ -1794,10 +1900,12 @@ def test_review_binding_not_the_configured_reviewer_app_never_merges(lane, bound
     绑定与审查身份文件配的 App 不符、或身份文件缺失时同样不合入。"""
     github = FakeGitHub(lane, review_app=bound)
     green(github, lane.gateway.pr["head"]["sha"])
-    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True, review_app=lambda: configured)
+    sweep, host, _ = make(lane, run=False, github=github, auto_merge=True,
+                         publisher=lambda: (configured, REVIEW_BOT.removesuffix("[bot]")) if configured else None)
     actions = sweep.tick()
     assert acts(actions) == ["launch", "check-report"] and len(host.spawned) == 1   # 本轮刚派出正式审查
     assert [a for a in actions if a["action"] == "merge-protection-mismatch"]
+    assert next(a for a in actions if a["action"] == "check-report")["checks"]["deepagents/review"] is None
     assert github.calls == []
 
 
@@ -1811,14 +1919,14 @@ def test_executor_app_status_alone_does_not_satisfy_reviewer_binding(monkeypatch
     assert cli.checks(1810, CHECK_STATE, BINDINGS, [record]) == {"deepagents/review": "superseded"}
 
 
-def test_configured_review_app_reads_identity_file(tmp_path):
+def test_configured_publisher_reads_identity_file(tmp_path):
     config = tmp_path / "app-identity.json"
-    assert module.configured_review_app(config) is None                      # 没有身份文件：审查沿用执行器 App
+    assert module.configured_publisher(config) == (5486877, "newchanlun-deepagents-1742")
     config.write_text(json.dumps({"app_id": 5664795, "installation_id": 1, "app_slug": "x",
-                                  "installation_permissions": {}}))
-    assert module.configured_review_app(config) == 5664795
+                                  "installation_permissions": {"statuses": "write"}}))
+    assert module.configured_publisher(config) == (5664795, "x")
     config.write_text("not json")
-    assert module.configured_review_app(config) is None
+    assert module.configured_publisher(config) is None
 
 
 def test_serve_passes_the_review_key_not_the_executor_key(monkeypatch, tmp_path):

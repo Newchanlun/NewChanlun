@@ -15,7 +15,7 @@ NewChanlun 是以缠论为核心的量化交易系统。四大支柱与里程碑
 ## 合入与人工确认
 
 - 普通 T/P 决策与 SPEC 均经起草、非作者独审 PASS 后由代理裁定并记账。BLOCK 返修，缺有效独审不放行，不设人工批准门。
-- 合入 main 按 [graph-engineering.md](.sandcastle/docs/graph-engineering.md)「main 的合入」分阶段执行。切换前 `review_sweep` 只派正式审查、报告诊断与对账、撤 GitHub 原生 `auto_merge`；即便部署模板传入 `--review-sweep-auto-merge` 也停用自动合入和追平，零合入 PUT。切换前所有合入由获准人工合入者核精确 head 三门原始 `success`（含 `DevSkim`）、来源归属、保护与服务端跨秒，显式绑定完整 `sha=<head>`（`--match-head-commit`）；该路径没有并发冻结，依赖 `main` 三门保护、`strict`、`enforce_admins` 和绑定 head。#2131 切换后所有 main 合入只走 [ADR 0064](docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md) R09 的唯一受控入口，须核触发时不可变服务端 PR 归属、冻结／排空、状态发布互斥、同锁改动分类及版本绑定用户授权。工蜂和执行器派票 run 只开 PR，draft 须验收后标 ready for review 才进入 sweep。
+- 合入 main 按 [graph-engineering.md](.sandcastle/docs/graph-engineering.md)「main 的合入」分阶段执行。#2131 切换前，sweep 优先撤除开放 PR 的已知或未知原生 `auto_merge` 挂载；仓库未确认 `allow_auto_merge=false` 整轮不派审、不续发，残留挂载的 PR 等确认清除。旧参数只增加只读诊断，零合入或追平 PUT。获准人工合入者按手册核仓库禁用原生 auto-merge、`main` 保护、精确 head 的三门原始 `success`（含 `DevSkim`）、唯一 PR 归属、两类确认和服务端跨秒，普通 merge 命令显式绑定仓库、PR 号和完整 head。#2131 先导 PR 接入触发时不可变服务端 PR 归属并通过独立验收后，所有 main 合入只走 [ADR 0064](docs/adr/0064-at18-whole-graph-acceptance-and-closeout.md) R09 的唯一受控入口，须核该归属、冻结／排空、状态发布互斥、同锁改动分类及版本绑定用户授权。工蜂和执行器派票 run 只开 PR，draft 须验收后标 ready for review 才进入 sweep。
 - 人工确认仅保留实盘下单与资金、密钥与凭证，硬门签署见 graph-engineering「2. 考古」。代理可改 CI 和分支保护配置并报告，但不得放宽必需检查、取消 strict 或绕过保护。
 
 ## 底线
