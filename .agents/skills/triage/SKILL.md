@@ -36,7 +36,7 @@ Five **state** roles:
 - `ready-for-human` — needs human implementation
 - `wontfix` — will not be actioned
 
-For a PR, the same states read against the attached code: `ready-for-agent` means a brief is attached and an agent should take the next step on the diff; `ready-for-human` means a human must act before it moves on. In this repo that is only one of the two human-confirmation categories (live orders and funds, keys and credentials); CI and branch-protection configuration is decided by the agent and reported afterwards (scope in `.sandcastle/docs/graph-engineering.md`, "人工确认只保留两类"); an ordinary PR merges once main's required checks `deepagents/review` and `ci-ok` pass, with no human approval.
+For a PR, the same states read against the attached code: `ready-for-agent` means a brief is attached and an agent should take the next step on the diff; `ready-for-human` means a human must act before it moves on. In this repo that is only one of the two human-confirmation categories (live orders and funds, keys and credentials); CI and branch-protection configuration is decided by the agent and reported afterwards (scope in `.sandcastle/docs/graph-engineering.md`, "人工确认只保留两类"); an ordinary PR needs no human approval. Follow [graph-engineering.md](../../../.sandcastle/docs/graph-engineering.md)「main 的合入」 for the applicable phase: before #2131 cutover, manual merges require raw `success` for `deepagents/review`, `ci-ok`, `DevSkim` on the exact head and strict base synchronization; after cutover, all merges use the single R09 controlled entry point.
 
 Every triaged issue should carry exactly one category role and one state role. If state roles conflict, flag it and ask the maintainer before doing anything else.
 

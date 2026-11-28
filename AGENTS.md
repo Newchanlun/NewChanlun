@@ -15,7 +15,7 @@ NewChanlun 是以缠论为核心的量化交易系统。四大支柱与里程碑
 ## 合入与人工确认
 
 - 普通 T/P 决策与 SPEC 均经起草、非作者独审 PASS 后由代理裁定并记账。BLOCK 返修，缺有效独审不放行，不设人工批准门。
-- 合入 main 要求精确 head 上 `deepagents/review` 和 `ci-ok` 通过，并满足 strict 追平。`executor serve` 的 review_sweep 带 `sha=<head>` 合入；代理可按同一规则合入。工蜂与执行器派票 run 只开 PR。draft 须验收后标 ready for review，才进入 sweep。
+- 合入 main 按 [graph-engineering.md](.sandcastle/docs/graph-engineering.md)「main 的合入」 分阶段执行：切换前人工核验精确 head 上 `deepagents/review`、`ci-ok`、`DevSkim` 均为原始 `success` 并满足 strict；#2131 切换后只走 R09 受控入口。切换前 `executor serve` 的 review_sweep 核验三项归一化结论并以 `sha=<head>` 合入；其绿灯不能代替人工核验。工蜂与执行器派票 run 只开 PR。draft 须验收后标 ready for review，才进入 sweep。
 - 人工确认仅保留实盘下单与资金、密钥与凭证，硬门签署见 graph-engineering「2. 考古」。代理可改 CI 和分支保护配置并报告，但不得放宽必需检查、取消 strict 或绕过保护。
 
 ## 底线
