@@ -1,17 +1,27 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { cpSync, mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { beginManagedStage, finishManagedStage, parseStageReport, verifyManagedRust, runManagedReview, verificationPrompt } from "./managed-commit.mts";
 const report = (files: string[], status = "ready") => `<sandcastle-result>${JSON.stringify({ status, files, verification: ["fixture checked"] })}</sandcastle-result>`;
+let templateDir: string | undefined;
+function getTemplateRepo(): string {
+  if (!templateDir) {
+    templateDir = mkdtempSync(join(tmpdir(), "nc-managed-tpl-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: templateDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    git("init", "-b", "sandcastle/issue-1617"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+    git("commit", "--allow-empty", "-m", "base");
+  }
+  return templateDir;
+}
+after(() => { if (templateDir) rmSync(templateDir, { recursive: true, force: true }); });
 function fixture(t: { after: (fn: () => void) => void }) {
   const cwd = mkdtempSync(join(tmpdir(), "nc-managed-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  cpSync(getTemplateRepo(), cwd, { recursive: true });
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  git("init", "-b", "sandcastle/issue-1617"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
-  git("commit", "--allow-empty", "-m", "base");
   return { cwd, git, begin: (phase: "implementer" | "reviewer" = "implementer") => beginManagedStage(cwd, "sandcastle/issue-1617", 1617, phase) };
 }
 test("作者封包→精确提交→独审修正→重入不重复提交", t => {
