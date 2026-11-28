@@ -37,7 +37,10 @@ def isolated_archive(repo: Path, head: str, *paths: str) -> bytes:
     objects = isolated_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects").decode().strip()
     with tempfile.TemporaryDirectory(prefix="pilot1742-archive-") as temporary:
         clean = Path(temporary)
-        isolated_git(clean, "init", "--bare", "-q", "--template=")
+        (clean / "objects/info").mkdir(parents=True)
+        (clean / "refs").mkdir()
+        (clean / "HEAD").write_text("ref: refs/heads/main\n")
+        (clean / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n")
         (clean / "objects/info/alternates").write_text(json.dumps(objects, ensure_ascii=False) + "\n")
         return isolated_git(clean, "archive", "--format=tar", head, "--", *paths)
 
@@ -96,7 +99,15 @@ def export_repository(repo: Path, head: str, destination: Path) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise ValueError("源码身份需要完整SHA")
     destination.mkdir(parents=True)
-    archive = isolated_archive(repo, head)
+    isolated_git(destination, "init", "-q", "--template=", "-b", "codex/cloud-worker")
+    parents = isolated_git(repo, "show", "-s", "--format=%P", head).decode().split()
+    trees = isolated_git(repo, "rev-list", "--objects", "--no-object-names", *(item + "^{tree}" for item in [head, *parents])).decode().split()
+    objects = "\n".join(dict.fromkeys([head, *parents, *trees])) + "\n"
+    pack = isolated_git(repo, "pack-objects", "--stdout", input=objects.encode())
+    isolated_git(destination, "index-pack", "--stdin", input=pack)
+    if parents:
+        (destination / ".git/shallow").write_text("\n".join(parents) + "\n")
+    archive = isolated_git(destination, "archive", "--format=tar", head)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         for member in tar.getmembers():
             path = PurePosixPath(member.name)
@@ -107,15 +118,6 @@ def export_repository(repo: Path, head: str, destination: Path) -> None:
                 if not target.resolve().is_relative_to(destination.resolve()):
                     raise ValueError("源码符号链接逃出运行包")
         tar.extractall(destination, filter="data")
-    isolated_git(destination, "init", "-q", "--template=")
-    parents = isolated_git(repo, "show", "-s", "--format=%P", head).decode().split()
-    trees = isolated_git(repo, "rev-list", "--objects", "--no-object-names", *(item + "^{tree}" for item in [head, *parents])).decode().split()
-    objects = "\n".join(dict.fromkeys([head, *parents, *trees])) + "\n"
-    pack = isolated_git(repo, "pack-objects", "--stdout", input=objects.encode())
-    isolated_git(destination, "index-pack", "--stdin", input=pack)
-    if parents:
-        (destination / ".git/shallow").write_text("\n".join(parents) + "\n")
-    isolated_git(destination, "symbolic-ref", "HEAD", "refs/heads/codex/cloud-worker")
     isolated_git(destination, "update-ref", "HEAD", head)
     isolated_git(destination, "read-tree", head)
     if isolated_git(destination, "rev-parse", "HEAD").decode().strip() != head:
@@ -214,7 +216,8 @@ def copy_project_skills(snapshot: Path, destination: Path, repo: Path, pstack: P
 def build_project_context(repo: Path, head: str, destination: Path, pstack: Path, models: Path) -> dict:
     destination.mkdir(parents=True)
     paths = ("AGENTS.md", "CONTEXT.md", "docs/agents", ".sandcastle/docs", ".agents/skills")
-    present = [path for path in paths if isolated_git(repo, "ls-tree", head, "--", path)]
+    found = set(isolated_git(repo, "ls-tree", "--name-only", head, "--", *paths).decode().splitlines())
+    present = [path for path in paths if path in found]
     snapshot = destination / "repo"
     snapshot.mkdir()
     extract_paths(repo, head, present, snapshot)
