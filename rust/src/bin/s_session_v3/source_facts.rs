@@ -72,6 +72,36 @@ pub(crate) fn coordinates_digest(
     s: &(impl CodecRead + ?Sized),
     values: &[i64],
 ) -> Result<NodeDigest, String> {
+    if values.len() <= 16 {
+        struct StackCoordinates {
+            buf: [bj::Decimal; 16],
+            len: usize,
+        }
+        impl JsonArray for StackCoordinates {
+            fn len(&self) -> usize {
+                self.len
+            }
+            fn get(&self, i: usize) -> Option<JsonView<'_>> {
+                (i < self.len).then(|| JsonView::String(self.buf[i].text()))
+            }
+        }
+        let coordinates = StackCoordinates {
+            buf: std::array::from_fn(|i| {
+                if i < values.len() {
+                    bj::Decimal::new(values[i])
+                } else {
+                    bj::Decimal::new(0)
+                }
+            }),
+            len: values.len(),
+        };
+        return super::super::super::history::hash_json_in_store(
+            s,
+            JsonView::BorrowedArray(&coordinates),
+            None,
+            None,
+        );
+    }
     struct Coordinates(sc::CodecVec<bj::Decimal>);
     impl JsonArray for Coordinates {
         fn len(&self) -> usize {
@@ -110,9 +140,16 @@ pub(crate) fn observation_sources<'a>(
     {
         Some(source) => coords(s, &source)?,
         None => {
+            let window_refs = s
+                .lookup_subset_ref(record.view(), &["window_start", "window_mid", "window_end"])
+                .map_err(err)?;
             let mut values = sc::CodecVec::default();
             for name in ["window_start", "window_mid", "window_end"] {
-                let window = scalar(s, record, name)?;
+                let window_ref = window_refs
+                    .get_admitted(s, name)
+                    .map_err(err)?
+                    .ok_or_else(|| err(format!("原件缺字段{name}")))?;
+                let window = scalar_value(s, window_ref.view())?;
                 if window.view().is_null() {
                     continue;
                 }
@@ -129,10 +166,18 @@ pub(crate) fn observation_sources<'a>(
     coordinates_digest(s, &coordinates)
 }
 
-fn object_record(
+fn object_record_with_meta(
     s: &mut (impl CodecStore + ?Sized),
     root: sc::RefView<'_>,
-) -> Result<NodeDigest, String> {
+) -> Result<
+    (
+        NodeDigest,
+        Option<i64>,
+        Option<NativeValue<String>>,
+        Option<i64>,
+    ),
+    String,
+> {
     let original = bj::render_json(s, root)?;
     let fields = original
         .view()
@@ -141,16 +186,24 @@ fn object_record(
     let mut unstamped = sc::CodecVec::default();
     s.native_codec_room(&mut unstamped, fields.len())
         .map_err(err)?;
+    let mut first_generation = None;
+    let mut first_cut = None;
+    let mut published_generation = None;
     for (name, value) in fields.iter() {
-        if !matches!(
-            name,
-            "first_known_generation" | "first_known_cut" | "published_generation"
-        ) {
-            unstamped.try_push((name, value)).map_err(err)?;
+        match name {
+            "first_known_generation" => first_generation = value.as_i64(),
+            "first_known_cut" => first_cut = value.as_str(),
+            "published_generation" => published_generation = value.as_i64(),
+            _ => unstamped.try_push((name, value)).map_err(err)?,
         }
     }
     let record = JsonView::object_fields(&unstamped).map_err(err)?;
-    super::super::super::history::hash_json_in_store(s, record, None, None)
+    let digest = super::super::super::history::hash_json_in_store(s, record, None, None)?;
+    let first_cut = first_cut
+        .map(|cut| s.native_string(cut))
+        .transpose()
+        .map_err(err)?;
+    Ok((digest, first_generation, first_cut, published_generation))
 }
 pub(crate) fn export(
     s: &mut (impl CodecStore + ?Sized),
@@ -219,14 +272,27 @@ fn export_parts<'a>(
     for entry in objects {
         let reference = s.native_built_ref(&entry.generated).map_err(err)?;
         let root = reference.view();
-        let record = object_record(s, root)?;
+        let (record, first_generation, first_cut, published_generation) =
+            object_record_with_meta(s, root)?;
         let source_text = field(s, root, "source_coords_json")?;
         let sources = s
             .lookup_ref(source_text.view(), &[PathStep::JsonText])
             .map_err(err)?;
-        let first_generation = number(s, root, "first_known_generation")?;
-        let first_cut = text(s, root, "first_known_cut")?;
-        let published_generation = number(s, root, "published_generation")?;
+        let first_generation = match first_generation {
+            Some(v) => v,
+            None => number(s, root, "first_known_generation")?,
+        };
+        let first_cut = match first_cut {
+            Some(v) => v,
+            None => {
+                let cut = text(s, root, "first_known_cut")?;
+                s.native_string(cut.as_str()).map_err(err)?
+            }
+        };
+        let published_generation = match published_generation {
+            Some(v) => v,
+            None => number(s, root, "published_generation")?,
+        };
         s.native_codec_room(&mut rows.objects, 1).map_err(err)?;
         rows.objects
             .try_push(ObjectRow {
@@ -234,7 +300,7 @@ fn export_parts<'a>(
                 record,
                 sources: digest(&sources)?,
                 first_generation,
-                first_cut: s.native_string(first_cut.as_str()).map_err(err)?,
+                first_cut,
                 published_generation,
             })
             .map_err(err)?;
@@ -277,11 +343,13 @@ fn export_parts<'a>(
     }
     for entry in witnesses {
         let bars = field(s, entry.generated.view(), "raw_bars")?;
+        let bar_elems = elements(s, &bars)?;
         let mut coordinates = sc::CodecVec::default();
-        for bar in elements(s, &bars)? {
+        s.native_codec_room(&mut coordinates, bar_elems.len())
+            .map_err(err)?;
+        for bar in bar_elems {
             let value = text(s, bar.view(), "source_coord")?;
             let coordinate = crate::parse_source_coord(value.as_str()).map_err(err)?;
-            s.native_codec_room(&mut coordinates, 1).map_err(err)?;
             coordinates.try_push(coordinate).map_err(err)?;
         }
         coordinates.sort_unstable();
