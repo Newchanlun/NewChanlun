@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent
@@ -35,6 +36,8 @@ from newchan.pipeline_backtest import (
     PipelineBacktestConfig,
     PipelineBacktestEngine,
     _build_resonance_signals,
+    _build_signals_for_polarity,
+    _polarity_to_scan_direction,
 )
 from newchan.topology.config_space import (
     CENTER,
@@ -42,7 +45,16 @@ from newchan.topology.config_space import (
     WalkDirection,
     polarity_index,
 )
-from newchan.topology.fiber_pipeline_adapter import FiberSignalFilter
+from newchan.topology.fiber_bundle import FiberBundleConfigSpace, default_fiber_bundle
+from newchan.topology.fiber_pipeline_adapter import (
+    FiberSignalFilter,
+    create_fiber_context,
+)
+
+
+@lru_cache(maxsize=1)
+def _default_fiber_bundle() -> FiberBundleConfigSpace:
+    return default_fiber_bundle()
 
 
 def _default_time_tolerance(level_i: int, level_j: int) -> float:
@@ -164,8 +176,30 @@ def evaluate_config(
     prev_fiber_dir: str | None = None
     fiber_scan_dir = "neutral"  # 初始值，会被第一个 dual 覆盖
 
+    if bsps:
+        product_pol = polarity_index(ctx.config)
+        ff = fiber_filter if fiber_filter is not None else FiberSignalFilter()
+        fiber_ctx = create_fiber_context(ctx, fb=_default_fiber_bundle())
+        fiber_pol = (
+            fiber_ctx.fiber_polarity
+            if ff.should_override_polarity(fiber_ctx)
+            else product_pol
+        )
+        computed_fiber_scan_dir = _polarity_to_scan_direction(fiber_pol)
+        product_dir = _polarity_to_direction(product_pol)
+        fiber_dir = _polarity_to_direction(fiber_ctx.fiber_polarity)
+
     for idx, bsp in enumerate(bsps):
-        dual = _build_resonance_signals(bsp, ctx, fiber_filter)
+        product_signals = _build_signals_for_polarity(product_pol, bsp)
+        fiber_signals = _build_signals_for_polarity(fiber_pol, bsp)
+        dual = DualResonanceSignals(
+            product_signals=product_signals,
+            fiber_signals=fiber_signals,
+            product_polarity=product_pol,
+            fiber_polarity=fiber_ctx.fiber_polarity,
+            polarity_divergence=fiber_ctx.polarity_divergence,
+            fiber_scan_direction=computed_fiber_scan_dir,
+        )
         fiber_scan_dir = dual.fiber_scan_direction
 
         # 直积版共振检查
@@ -176,9 +210,6 @@ def evaluate_config(
         fiber_resonates = resonance_check(
             list(dual.fiber_signals), _default_time_tolerance,
         )
-
-        product_dir = _polarity_to_direction(dual.product_polarity)
-        fiber_dir = _polarity_to_direction(dual.fiber_polarity)
 
         # 统计入场/阻断
         if product_resonates:
