@@ -351,6 +351,7 @@ impl ParentPreparation {
 #[derive(Default)]
 pub(super) struct RequestAuditContext {
     slot: Option<VerifiedHistoricalSlot>,
+    clean_immediate: Option<(usize, u64)>,
     #[cfg(feature = "s_incremental")]
     original_scan_scratch: super::content_store::OriginalScanScratch,
     #[cfg(feature = "s_incremental")]
@@ -431,6 +432,17 @@ pub(super) struct VerifiedHistoricalSlot {
     pub(super) source_pending: Option<super::cross_request_source_cache::PendingPool>,
 }
 impl RequestAuditContext {
+    pub(super) fn set_clean_immediate(&mut self, tx: &Transaction<'_>, entry_changes: u64) {
+        self.clean_immediate = Some((unsafe { tx.handle() } as usize, entry_changes));
+    }
+    pub(super) fn clear_clean_immediate(&mut self) {
+        self.clean_immediate = None;
+    }
+    pub(super) fn clean_immediate_for(&self, tx: &Transaction<'_>) -> Option<u64> {
+        let (addr, entry_changes) = self.clean_immediate?;
+        (unsafe { tx.handle() } as usize == addr && tx.total_changes() == entry_changes)
+            .then_some(entry_changes)
+    }
     #[cfg(feature = "s_incremental")]
     pub(super) fn original_scan_scratch(
         &mut self,

@@ -381,6 +381,7 @@ struct AuditTxn<'a> {
     schema_version: i64,
     transaction_id: u64,
     write_sequence: u64,
+    entry_immediate_changes: Option<u64>,
     dirty: Cell<bool>,
     #[cfg(all(feature = "s_incremental", unix))]
     history_write: std::cell::RefCell<Option<history_clamp::WriteCandidate>>,
@@ -1119,6 +1120,8 @@ impl AuditConnection {
             schema_version: 0,
             transaction_id,
             write_sequence: self.write_sequence.get(),
+            entry_immediate_changes: matches!(behavior, TransactionBehavior::Immediate)
+                .then(|| self.connection.total_changes()),
             dirty: Cell::new(false),
             #[cfg(all(feature = "s_incremental", unix))]
             history_write: Default::default(),
@@ -1393,12 +1396,13 @@ impl AuditConnection {
         let audited = if reused {
             None
         } else {
-            Some(s_allocation::audit_in_request(
-                tx,
-                mode,
-                s_allocation::Phase::Advance,
-                context,
-            )?)
+            if let Some(entry) = active.entry_immediate_changes {
+                context.set_clean_immediate(tx, entry);
+            }
+            let res =
+                s_allocation::audit_in_request(tx, mode, s_allocation::Phase::Advance, context);
+            context.clear_clean_immediate();
+            Some(res?)
         };
         verify_writer_epoch(tx, epoch)?;
         if meta_get_opt(tx, "advance_state")?.as_deref() != Some("idle") {
@@ -1601,6 +1605,7 @@ impl AuditConnection {
             Some(candidate) => (Some(&candidate.audited), candidate.capture.as_mut()),
             None => (None, None),
         };
+        let entry_immediate_changes = active.entry_immediate_changes;
         let phase = PublishPhase {
             #[cfg(feature = "s_incremental")]
             publication: parent,
@@ -1625,7 +1630,12 @@ impl AuditConnection {
         if let Some(parent) = parent {
             parent.trace("runtime");
         }
-        let receipt = runtime.publish_in_owner(phase, token, envelope, context)?;
+        if let Some(entry) = entry_immediate_changes {
+            context.set_clean_immediate(phase.transaction, entry);
+        }
+        let receipt_res = runtime.publish_in_owner(phase, token, envelope, context);
+        context.clear_clean_immediate();
+        let receipt = receipt_res?;
         #[cfg(feature = "s_incremental")]
         if has_raw {
             let source =
